@@ -1,3 +1,7 @@
+# ocaml-flambda/llvm-project
+
+This repository is currently for development of a version of lldb that works well in conjunction with the flambda-backend compiler.  The `main` branch is being used here, but this isn't quite the same as the upstream `main` branch: it is based off a recent LLVM release to ensure everything compiles.
+
 # The LLVM Compiler Infrastructure
 
 This directory and its sub-directories contain source code for LLVM,
