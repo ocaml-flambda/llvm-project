@@ -3440,6 +3440,8 @@ static void encodeTypeForFunctionPointerAuth(const ASTContext &Ctx,
 #define RVV_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
 #include "clang/Basic/RISCVVTypes.def"
       llvm_unreachable("not yet implemented");
+    case BuiltinType::OCamlValue:
+      llvm_unreachable("@encoding OCaml value type");
     }
     llvm_unreachable("should never get here");
   }

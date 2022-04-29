@@ -116,7 +116,9 @@ TypeSystemClangSupportsLanguage(lldb::LanguageType language) {
          // Use Clang for D until there is a proper language plugin for it
          language == eLanguageTypeD ||
          // Open Dylan compiler debug info is designed to be Clang-compatible
-         language == eLanguageTypeDylan;
+         language == eLanguageTypeDylan ||
+         // For the moment use the Clang code for OCaml
+         language == eLanguageTypeOCaml;
 }
 
 // Checks whether m1 is an overload of m2 (as opposed to an override). This is
@@ -573,6 +575,10 @@ LanguageSet TypeSystemClang::GetSupportedLanguagesForTypes() {
   languages.Insert(lldb::eLanguageTypeC_plus_plus_14);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_17);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_20);
+<<<<<<< HEAD
+=======
+  languages.Insert(lldb::eLanguageTypeOCaml);
+>>>>>>> 7b7336743a72 (fix conflicts typesystemclang)
   return languages;
 }
 
@@ -5032,14 +5038,14 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::IncompleteMatrixIdx:
       break;
 
-    case clang::BuiltinType::UnresolvedTemplate:
-      break;
-
     // AMD GPU builtin types.
 #define AMDGPU_TYPE(Name, Id, SingletonId, Width, Align)                       \
   case clang::BuiltinType::Id:
 #include "clang/Basic/AMDGPUTypes.def"
       break;
+
+    case clang::BuiltinType::OCamlValue:
+      return lldb::eEncodingSint;
     }
     break;
   // All pointer types are represented as unsigned integer encodings. We may
@@ -8749,6 +8755,12 @@ bool TypeSystemClang::DumpTypeValue(
     return false;
   } else {
     clang::QualType qual_type(GetQualType(type));
+
+    if (qual_type == getASTContext ().OCamlValueTy) {
+      return DumpDataExtractor(data, &s, byte_offset, eFormatOCamlValue, 8, 1,
+                               UINT32_MAX, LLDB_INVALID_ADDRESS,
+                               0, 0, exe_scope);
+    }
 
     const clang::Type::TypeClass type_class = qual_type->getTypeClass();
 

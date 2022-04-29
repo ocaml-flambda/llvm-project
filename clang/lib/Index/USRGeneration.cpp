@@ -845,6 +845,8 @@ void USRGenerator::VisitType(QualType T) {
           Out << 'O'; break;
         case BuiltinType::ObjCSel:
           Out << 'e'; break;
+        case BuiltinType::OCamlValue:
+          Out << "@OCamlValue@"; break;
 #define BUILTIN_TYPE(Id, SingletonId)
 #define PLACEHOLDER_TYPE(Id, SingletonId) case BuiltinType::Id:
 #include "clang/AST/BuiltinTypes.def"
