@@ -165,7 +165,8 @@ public:
     Mesa,
     SUSE,
     OpenEmbedded,
-    LastVendorType = OpenEmbedded
+    RedHat,
+    LastVendorType = RedHat
   };
   enum OSType {
     UnknownOS,
