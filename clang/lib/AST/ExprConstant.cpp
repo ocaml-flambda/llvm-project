@@ -12304,6 +12304,7 @@ GCCTypeClass EvaluateBuiltinClassifyType(QualType T,
 
     case BuiltinType::NullPtr:
 
+    case BuiltinType::OCamlValue:
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
     case BuiltinType::ObjCSel:

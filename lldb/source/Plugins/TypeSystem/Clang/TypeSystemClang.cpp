@@ -575,10 +575,7 @@ LanguageSet TypeSystemClang::GetSupportedLanguagesForTypes() {
   languages.Insert(lldb::eLanguageTypeC_plus_plus_14);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_17);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_20);
-<<<<<<< HEAD
-=======
   languages.Insert(lldb::eLanguageTypeOCaml);
->>>>>>> 7b7336743a72 (fix conflicts typesystemclang)
   return languages;
 }
 
@@ -879,6 +876,7 @@ lldb::BasicType TypeSystemClang::GetBasicTypeEnumeration(llvm::StringRef name) {
       {"id", eBasicTypeObjCID},
       {"SEL", eBasicTypeObjCSel},
       {"nullptr", eBasicTypeNullPtr},
+      {"ocaml_value", eBasicTypeOCamlValue},
   };
 
   auto iter = g_type_map.find(name);
@@ -1018,6 +1016,8 @@ CompilerType TypeSystemClang::GetBuiltinTypeForDWARFEncodingAndBitSize(
         if (QualTypeMatchesBitSize(bit_size, ast, ast.Int128Ty))
           return GetType(ast.Int128Ty);
       }
+      if (type_name == "ocaml_value")
+        return GetType(ast.OCamlValueTy);
     }
     // We weren't able to match up a type name, just search by size
     if (QualTypeMatchesBitSize(bit_size, ast, ast.CharTy))
@@ -2062,6 +2062,8 @@ TypeSystemClang::GetOpaqueCompilerType(clang::ASTContext *ast,
     return ast->getComplexType(ast->DoubleTy).getAsOpaquePtr();
   case eBasicTypeLongDoubleComplex:
     return ast->getComplexType(ast->LongDoubleTy).getAsOpaquePtr();
+  case eBasicTypeOCamlValue:
+    return ast->OCamlValueTy.getAsOpaquePtr();
   case eBasicTypeObjCID:
     return ast->getObjCIdType().getAsOpaquePtr();
   case eBasicTypeObjCClass:
@@ -5038,6 +5040,9 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::IncompleteMatrixIdx:
       break;
 
+    case clang::BuiltinType::UnresolvedTemplate:
+      break;
+
     // AMD GPU builtin types.
 #define AMDGPU_TYPE(Name, Id, SingletonId, Width, Align)                       \
   case clang::BuiltinType::Id:
@@ -5549,6 +5554,10 @@ TypeSystemClang::GetBasicTypeEnumeration(lldb::opaque_compiler_type_t type) {
         return eBasicTypeObjCClass;
       case clang::BuiltinType::ObjCSel:
         return eBasicTypeObjCSel;
+
+      case clang::BuiltinType::OCamlValue:
+        return eBasicTypeOCamlValue;
+
       default:
         return eBasicTypeOther;
       }
@@ -8841,6 +8850,7 @@ bool TypeSystemClang::DumpTypeValue(
         case eFormatVectorOfFloat32:
         case eFormatVectorOfFloat64:
         case eFormatVectorOfUInt128:
+        case eFormatOCamlValue:
           break;
 
         case eFormatChar:
