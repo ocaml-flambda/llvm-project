@@ -3064,6 +3064,9 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
     Out << "Dn";
     break;
 
+  case BuiltinType::OCamlValue:
+    llvm_unreachable("mangling an OCaml value type");
+
 #define BUILTIN_TYPE(Id, SingletonId)
 #define PLACEHOLDER_TYPE(Id, SingletonId) \
   case BuiltinType::Id:

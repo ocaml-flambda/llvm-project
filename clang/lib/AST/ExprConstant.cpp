@@ -11338,6 +11338,7 @@ EvaluateBuiltinClassifyType(QualType T, const LangOptions &LangOpts) {
 
     case BuiltinType::NullPtr:
 
+    case BuiltinType::OCamlValue:
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
     case BuiltinType::ObjCSel:
