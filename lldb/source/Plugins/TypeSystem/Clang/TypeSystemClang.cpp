@@ -574,6 +574,7 @@ LanguageSet TypeSystemClang::GetSupportedLanguagesForTypes() {
   languages.Insert(lldb::eLanguageTypeC_plus_plus_14);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_17);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_20);
+  languages.Insert(lldb::eLanguageTypeOCaml);
   return languages;
 }
 
@@ -856,6 +857,7 @@ lldb::BasicType TypeSystemClang::GetBasicTypeEnumeration(llvm::StringRef name) {
       {"id", eBasicTypeObjCID},
       {"SEL", eBasicTypeObjCSel},
       {"nullptr", eBasicTypeNullPtr},
+      {"ocaml_value", eBasicTypeOCamlValue},
   };
 
   auto iter = g_type_map.find(name);
@@ -992,6 +994,8 @@ CompilerType TypeSystemClang::GetBuiltinTypeForDWARFEncodingAndBitSize(
         if (QualTypeMatchesBitSize(bit_size, ast, ast.Int128Ty))
           return GetType(ast.Int128Ty);
       }
+      if (type_name == "ocaml_value")
+        return GetType(ast.OCamlValueTy);
     }
     // We weren't able to match up a type name, just search by size
     if (QualTypeMatchesBitSize(bit_size, ast, ast.CharTy))
@@ -2058,6 +2062,8 @@ TypeSystemClang::GetOpaqueCompilerType(clang::ASTContext *ast,
     return ast->getComplexType(ast->DoubleTy).getAsOpaquePtr();
   case eBasicTypeLongDoubleComplex:
     return ast->getComplexType(ast->LongDoubleTy).getAsOpaquePtr();
+  case eBasicTypeOCamlValue:
+    return ast->OCamlValueTy.getAsOpaquePtr();
   case eBasicTypeObjCID:
     return ast->getObjCIdType().getAsOpaquePtr();
   case eBasicTypeObjCClass:
@@ -5066,6 +5072,9 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
 #define AMDGPU_TYPE(Name, Id, SingletonId) case clang::BuiltinType::Id:
 #include "clang/Basic/AMDGPUTypes.def"
       break;
+
+    case clang::BuiltinType::OCamlValue:
+      return lldb::eEncodingSint;
     }
     break;
   // All pointer types are represented as unsigned integer encodings. We may
@@ -5562,6 +5571,10 @@ TypeSystemClang::GetBasicTypeEnumeration(lldb::opaque_compiler_type_t type) {
         return eBasicTypeObjCClass;
       case clang::BuiltinType::ObjCSel:
         return eBasicTypeObjCSel;
+
+      case clang::BuiltinType::OCamlValue:
+        return eBasicTypeOCamlValue;
+
       default:
         return eBasicTypeOther;
       }
@@ -8746,6 +8759,12 @@ bool TypeSystemClang::DumpTypeValue(
   } else {
     clang::QualType qual_type(GetQualType(type));
 
+    if (qual_type == getASTContext ().OCamlValueTy) {
+      return DumpDataExtractor(data, &s, byte_offset, eFormatOCamlValue, 8, 1,
+                               UINT32_MAX, LLDB_INVALID_ADDRESS,
+                               0, 0, exe_scope);
+    }
+
     const clang::Type::TypeClass type_class = qual_type->getTypeClass();
 
     if (type_class == clang::Type::Elaborated) {
@@ -8825,6 +8844,7 @@ bool TypeSystemClang::DumpTypeValue(
         case eFormatVectorOfFloat32:
         case eFormatVectorOfFloat64:
         case eFormatVectorOfUInt128:
+        case eFormatOCamlValue:
           break;
 
         case eFormatChar:
