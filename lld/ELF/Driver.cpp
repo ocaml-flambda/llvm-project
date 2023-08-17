@@ -2254,7 +2254,7 @@ static std::vector<WrappedSymbol> addWrappedSymbols(opt::InputArgList &args) {
     if (!sym)
       continue;
 
-    // If __wrap_ is lazy force load it - it sym->binding might be
+    // If __wrap_ is lazy force load it - its sym->binding might be
     // weak, in which case the wrapped symbol will not get loaded.
     StringRef wrapName = saver().save("__wrap_" + name);
     Symbol *existingWrap = symtab.find(wrapName);
