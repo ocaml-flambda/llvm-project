@@ -315,7 +315,9 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
 
 // Add a given library by searching it from input search paths.
 void LinkerDriver::addLibrary(StringRef name) {
-  if (std::optional<std::string> path = searchLibrary(name))
+  if (name.size() > 0 && name[0] == '/')
+    addFile(saver().save(name), /*withLOption=*/true);
+  else if (std::optional<std::string> path = searchLibrary(name))
     addFile(saver().save(*path), /*withLOption=*/true);
   else
     error("unable to find library -l" + name, ErrorTag::LibNotFound, {name});
@@ -2252,8 +2254,13 @@ static std::vector<WrappedSymbol> addWrappedSymbols(opt::InputArgList &args) {
     if (!sym)
       continue;
 
-    Symbol *wrap =
-        addUnusedUndefined(saver().save("__wrap_" + name), sym->binding);
+    // If __wrap_ is lazy force load it - its sym->binding might be
+    // weak, in which case the wrapped symbol will not get loaded.
+    StringRef wrapName = saver().save("__wrap_" + name);
+    Symbol *existingWrap = symtab.find(wrapName);
+    if (existingWrap && existingWrap->isLazy())
+	    existingWrap->extract();
+    Symbol *wrap = addUnusedUndefined(wrapName, sym->binding);
 
     // If __real_ is referenced, pull in the symbol if it is lazy. Do this after
     // processing __wrap_ as that may have referenced __real_.
