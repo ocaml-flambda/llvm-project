@@ -1456,7 +1456,7 @@ template <class ELFT> void Writer<ELFT>::sortSections() {
   script->processInsertCommands();
   script->adjustOutputSections();
 
-  if (!script->hasSectionsCommand)
+  if (!script->hasSectionsCommand && !script->hasOverwriteSectionsCommand)
     return;
 
   // Orphan sections are sections present in the input files which are
@@ -2502,7 +2502,7 @@ static uint64_t computeFileOffset(OutputSection *os, uint64_t off) {
   // The first section in a PT_LOAD has to have congruent offset and address
   // modulo the maximum page size.
   if (os->ptLoad && os->ptLoad->firstSec == os)
-    return alignTo(off, os->ptLoad->p_align, os->addr);
+    return alignTo(off, std::min(config->commonPageSize, (uint64_t)os->ptLoad->p_align), os->addr);
 
   // File offsets are not significant for .bss sections other than the first one
   // in a PT_LOAD/PT_TLS. By convention, we keep section offsets monotonically

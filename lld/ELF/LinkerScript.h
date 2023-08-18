@@ -340,6 +340,7 @@ public:
   SmallVector<PhdrsCommand, 0> phdrsCommands;
 
   bool hasSectionsCommand = false;
+  bool hasOverwriteSectionsCommand = false;
   bool errorOnMissingSection = false;
 
   // List of section patterns specified with KEEP commands. They will

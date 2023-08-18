@@ -564,6 +564,7 @@ SmallVector<SectionCommand *, 0> ScriptParser::readOverlay() {
 }
 
 void ScriptParser::readOverwriteSections() {
+  script->hasOverwriteSectionsCommand = true;
   expect("{");
   while (!errorCount() && !consume("}"))
     script->overwriteSections.push_back(readOutputSectionDescription(next()));
