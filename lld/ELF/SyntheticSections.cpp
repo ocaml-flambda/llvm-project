@@ -40,6 +40,7 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 #include <cstdlib>
+#include <limits>
 
 using namespace llvm;
 using namespace llvm::dwarf;
@@ -3729,8 +3730,31 @@ template <typename ELFT> void elf::writeEhdr(uint8_t *buf, Partition &part) {
   }
 }
 
+uint32_t rankPhdrType(const PhdrEntry *hdr) {
+  switch (hdr->p_type) {
+    case PT_PHDR:
+    // PT_PHDR preceeds any loadable segment
+      return 0;
+    case PT_INTERP:
+    // PT_INTERP preceeds any loadable segment
+      return 1;
+    case PT_LOAD:
+      return 2;
+    default:
+      return std::numeric_limits<uint32_t>::max();
+  }
+}
+
 template <typename ELFT> void elf::writePhdrs(uint8_t *buf, Partition &part) {
   // Write the program header table.
+  // llvm::sort(part.phdrs, [](const PhdrEntry *l, const PhdrEntry *r) {
+  //   auto rankL = rankPhdrType(l);
+  //   auto rankR = rankPhdrType(r);
+  //   if (rankL == rankR)
+  //     // PT_LOAD segments must be ordered by ascending p_vaddr
+  //     return l->p_vaddr < r->p_vaddr;
+  //   return rankL < rankR;
+  // });
   auto *hBuf = reinterpret_cast<typename ELFT::Phdr *>(buf);
   for (PhdrEntry *p : part.phdrs) {
     hBuf->p_type = p->p_type;
