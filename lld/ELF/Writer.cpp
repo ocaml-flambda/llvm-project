@@ -13,6 +13,8 @@
 #include "Config.h"
 #include "InputFiles.h"
 #include "LinkerScript.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "MapFile.h"
 #include "OutputSections.h"
 #include "Relocations.h"
@@ -2863,6 +2865,18 @@ template <class ELFT> void Writer<ELFT>::openFile() {
     flags |= FileOutputBuffer::F_executable;
   if (!ctx.arg.mmapOutputFile)
     flags |= FileOutputBuffer::F_no_mmap;
+  if (ctx.arg.mmapOutputFile) {
+    // LLD relies on [fallocate] to mmap the output.
+    // In case there's no space left on the device
+    // it will error with SIGBUS, which is confusing
+    // for users
+    auto ErrOrSpaceInfo = sys::fs::disk_space(sys::path::parent_path(ctx.arg.outputFile));
+    if (!ErrOrSpaceInfo)
+      error("Can't get remaining size on disk");
+    if (ErrOrSpaceInfo.get().free < fileSize)
+        error("failed to open " + ctx.arg.outputFile + ": " +
+              "No Space Left on Device");
+  }
   Expected<std::unique_ptr<FileOutputBuffer>> bufferOrErr =
       FileOutputBuffer::create(ctx.arg.outputFile, fileSize, flags);
 
