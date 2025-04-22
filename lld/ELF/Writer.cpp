@@ -2800,6 +2800,15 @@ template <class ELFT> void Writer<ELFT>::writeHeader() {
     sec->writeHeaderTo<ELFT>(++sHdrs);
 }
 
+static StringRef parentPathOrDot(StringRef path) {
+  auto parent_path = sys::path::parent_path(path);
+  if (parent_path.empty() && !path.empty() && !sys::path::is_absolute(path)) {
+    return ".";
+  } else {
+    return parent_path;
+  }
+}
+
 // Open a result file.
 template <class ELFT> void Writer<ELFT>::openFile() {
   uint64_t maxSize = config->is64 ? INT64_MAX : UINT32_MAX;
@@ -2825,7 +2834,7 @@ template <class ELFT> void Writer<ELFT>::openFile() {
     // In case there's no space left on the device
     // it will error with SIGBUS, which is confusing
     // for users
-    auto ErrOrSpaceInfo = sys::fs::disk_space(sys::path::parent_path(config->outputFile));
+    auto ErrOrSpaceInfo = sys::fs::disk_space(parentPathOrDot(config->outputFile));
     if (!ErrOrSpaceInfo)
       error("Can't get remaining size on disk");
     if (ErrOrSpaceInfo.get().free < fileSize)
