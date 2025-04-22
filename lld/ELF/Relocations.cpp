@@ -110,6 +110,8 @@ void elf::reportRangeError(uint8_t *loc, const Relocation &rel, const Twine &v,
     hint += "; consider recompiling with -fdebug-types-section to reduce size "
             "of debug sections";
 
+  hint += "; this likely happened because your binary is too big, see https://wiki/x/EQbxK for more info";
+
   errorOrWarn(errPlace.loc + "relocation " + lld::toString(rel.type) +
               " out of range: " + v.str() + " is not in [" + Twine(min).str() +
               ", " + Twine(max).str() + "]" + hint);
