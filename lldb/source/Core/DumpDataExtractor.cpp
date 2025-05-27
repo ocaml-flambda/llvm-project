@@ -624,6 +624,19 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                                 (void *)bigarray_data_ptr);
                       print_default = false;
                     }
+                  } else if (identifier_str == "_f32") {
+                    union {
+                      float f;
+                      uint32_t i;
+                    } u;
+                    u.i = (uint32_t) process->ReadUnsignedIntegerFromMemory(
+                        value + 8, 4, 0, error);
+                    if (error.Fail()) {
+                      s->Printf("<could not read float32>@");
+                    } else {
+                      s->Printf("%fs", u.f);
+                      print_default = false;
+                    }
                   } else {
                     // CR mshinwell: check about converting Address.t to (void*)
                     s->Printf("<custom|\"%s\")>@", identifier_str.c_str());
