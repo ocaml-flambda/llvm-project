@@ -338,6 +338,90 @@ static const llvm::fltSemantics &GetFloatSemantics(const TargetSP &target_sp,
   return llvm::APFloat::Bogus();
 }
 
+
+static std::optional<llvm::APInt> ReadAPIntFromMemory(const DataExtractor &data, Process * process,
+                                           lldb::addr_t load_addr,
+                                           size_t byte_size) {
+  if (byte_size == 0)
+    return std::nullopt;
+
+  llvm::SmallVector<uint64_t, 2> uint64_array;
+  size_t bytes_left = byte_size;
+  uint64_t u64;
+  Status error;
+  const lldb::ByteOrder byte_order = data.GetByteOrder();
+  if (byte_order == lldb::eByteOrderLittle) {
+    while (bytes_left > 0) {
+      if (bytes_left >= 8) {
+        u64 = process->ReadUnsignedIntegerFromMemory(load_addr, 8, 0, error);
+        bytes_left -= 8;
+        load_addr += 8;
+        if (error.Fail())
+          return std::nullopt;
+      } else {
+        u64 = process->ReadUnsignedIntegerFromMemory(load_addr, bytes_left, 0, error);
+        if (error.Fail())
+          return std::nullopt;
+        bytes_left = 0;
+      }
+      uint64_array.push_back(u64);
+    }
+    return llvm::APInt(byte_size * 8, llvm::ArrayRef<uint64_t>(uint64_array));
+  }
+  // CR sspies: big endian not supported
+  return std::nullopt;
+}
+
+
+
+void PrintAPIntAsFloat(
+    const DataExtractor &DE, Stream *s, llvm::APInt apint, size_t byte_size,
+    ExecutionContextScope *exe_scope, Status error) {
+
+  TargetSP target_sp;
+  if (exe_scope)
+    target_sp = exe_scope->CalculateTarget();
+
+  std::optional<unsigned> format_max_padding;
+  if (target_sp)
+    format_max_padding = target_sp->GetMaxZeroPaddingInFloatFormat();
+
+  // Show full precision when printing float values
+  const unsigned format_precision = 0;
+
+  const llvm::fltSemantics &semantics =
+      GetFloatSemantics(target_sp, byte_size);
+
+  // Recalculate the byte size in case of a difference. This is possible
+  // when byte_size is 16 (128-bit), because you could get back the
+  // x87DoubleExtended semantics which has a byte size of 10 (80-bit).
+  const size_t semantics_byte_size =
+      (llvm::APFloat::getSizeInBits(semantics) + 7) / 8;
+  if (byte_size != semantics_byte_size) {
+    error.SetErrorStringWithFormatv(
+        "byte size of {0} does not match semantics byte size of {1}",
+        byte_size, semantics_byte_size
+    );
+    return;
+  }
+
+  llvm::APFloat apfloat(semantics, apint);
+  llvm::SmallVector<char, 256> sv;
+  if (format_max_padding)
+    apfloat.toString(sv, format_precision, *format_max_padding);
+  else
+    apfloat.toString(sv, format_precision);
+  s->AsRawOstream() << sv;
+  // OCaml Specific:
+  // Following OCaml conventions, print the trailing "." to
+  // identify that the integer is in fact a float, but don't
+  // print any trailing zeros.
+  if (apfloat.isInteger()) {
+    s->AsRawOstream() << ".";
+  }
+}
+
+
 static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                                  offset_t start_offset, uint64_t base_addr,
                                  ExecutionContextScope *exe_ctx_scope,
@@ -497,49 +581,34 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
         }
 
         case 253: { // Double_tag
-          union {
-            double f;
-            uint64_t i;
-          } u;
-          u.i = process->ReadUnsignedIntegerFromMemory(value, 8, 0, error);
+          std::optional<llvm::APInt> apint = ReadAPIntFromMemory(DE, process, value, 8);
+          if (!apint) {
+            s->Printf("<could not read float>@");
+            break;
+          }
+          PrintAPIntAsFloat(DE, s, *apint, 8, exe_ctx_scope, error);
           if (error.Fail()) {
             s->Printf("<could not read float>@");
-          } else {
-            // CR mshinwell: should probably use proper float printing code
-            // elsewhere in this file
-            s->Printf("%g", u.f);
-            if (ceilf(u.f) == u.f) {
-              // Following OCaml conventions, print the trailing "." to
-              // identify that the integer is in fact a float, but don't
-              // print any trailing zeros.
-              s->Printf(".");
-            }
-            print_default = false;
           }
+          print_default = false;
           break;
         }
 
         case 254: { // Double_array_tag
           // N.B. Empty float arrays have tag zero
           uint64_t wosize_to_print = wosize <= 10 ? wosize : 10;
+          print_default = false; // we still print the default if one of the fields fails
           s->Printf("[| ");
           for (uint64_t field = 0; field < wosize_to_print; field++) {
-            union {
-              double f;
-              uint64_t i;
-            } u;
-            u.i = process->ReadUnsignedIntegerFromMemory(value + 8 * field, 8, 0, error);
-            if (error.Fail()) {
+            std::optional<llvm::APInt> apint = ReadAPIntFromMemory(DE, process, value + field * 8, 8);
+            if (!apint) {
               s->Printf("<could not read floatarray field %" PRIu64 ">", field);
+              print_default = true;
             } else {
-              // CR mshinwell: should probably use proper float printing code
-              // elsewhere in this file
-              s->Printf("%g", u.f);
-              if (ceilf(u.f) == u.f) {
-                // Following OCaml conventions, print the trailing "." to
-                // identify that the integer is in fact a float, but don't
-                // print any trailing zeros.
-                s->Printf(".");
+              PrintAPIntAsFloat(DE, s, *apint, 8, exe_ctx_scope, error);
+              if (error.Fail()) {
+                s->Printf("<could not read floatarray field %" PRIu64 ">", field);
+                print_default = true;
               }
             }
 
@@ -551,9 +620,6 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                       wosize - wosize_to_print);
           }
           s->Printf(" |]");
-
-          if (!error.Fail())
-            print_default = false;
           break;
         }
 
@@ -625,19 +691,19 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                       print_default = false;
                     }
                   } else if (identifier_str == "_f32") {
-                    union {
-                      float f;
-                      uint32_t i;
-                    } u;
-                    u.i = (uint32_t) process->ReadUnsignedIntegerFromMemory(
-                        value + 8, 4, 0, error);
+                    std::optional<llvm::APInt> apint = ReadAPIntFromMemory(DE, process, value + 8, 4);
+                    if (!apint) {
+                      s->Printf("<could not read float32>@");
+                      break;
+                    }
+                    PrintAPIntAsFloat(DE, s, *apint, 4, exe_ctx_scope, error);
                     if (error.Fail()) {
                       s->Printf("<could not read float32>@");
-                    } else {
-                      s->Printf("%fs", u.f);
-                      print_default = false;
                     }
-                  } else {
+                    s->Printf("s");
+                    print_default = false;
+                  }
+                  else {
                     // CR mshinwell: check about converting Address.t to (void*)
                     s->Printf("<custom|\"%s\")>@", identifier_str.c_str());
                   }
