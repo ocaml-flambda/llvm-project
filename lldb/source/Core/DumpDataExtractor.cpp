@@ -374,51 +374,53 @@ static std::optional<llvm::APInt> ReadAPIntFromMemory(const DataExtractor &data,
 
 
 
-void PrintAPIntAsFloat(
-    const DataExtractor &DE, Stream *s, llvm::APInt apint, size_t byte_size,
-    ExecutionContextScope *exe_scope, Status error) {
-
-  TargetSP target_sp;
-  if (exe_scope)
-    target_sp = exe_scope->CalculateTarget();
-
-  std::optional<unsigned> format_max_padding;
-  if (target_sp)
-    format_max_padding = target_sp->GetMaxZeroPaddingInFloatFormat();
-
-  // Show full precision when printing float values
-  const unsigned format_precision = 0;
-
-  const llvm::fltSemantics &semantics =
-      GetFloatSemantics(target_sp, byte_size);
-
-  // Recalculate the byte size in case of a difference. This is possible
-  // when byte_size is 16 (128-bit), because you could get back the
-  // x87DoubleExtended semantics which has a byte size of 10 (80-bit).
-  const size_t semantics_byte_size =
-      (llvm::APFloat::getSizeInBits(semantics) + 7) / 8;
-  if (byte_size != semantics_byte_size) {
-    error.SetErrorStringWithFormatv(
-        "byte size of {0} does not match semantics byte size of {1}",
-        byte_size, semantics_byte_size
-    );
-    return;
-  }
+void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
+                      const llvm::fltSemantics &semantics,
+                      std::optional<unsigned> format_max_padding,
+                      std::string prefix = "", std::string suffix = "") {
 
   llvm::APFloat apfloat(semantics, apint);
   llvm::SmallVector<char, 256> sv;
   if (format_max_padding)
-    apfloat.toString(sv, format_precision, *format_max_padding);
+    apfloat.toPossiblyShortString(sv, *format_max_padding);
   else
-    apfloat.toString(sv, format_precision);
+    apfloat.toPossiblyShortString(sv);
+
+  s->AsRawOstream() << prefix;
   s->AsRawOstream() << sv;
   // OCaml Specific:
   // Following OCaml conventions, print the trailing "." to
   // identify that the integer is in fact a float, but don't
   // print any trailing zeros.
-  if (apfloat.isInteger()) {
+  bool print_trailing_dot = true;
+  for (char c : sv) {
+    switch (c) {
+      case '-':
+      case '0':
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+      case '6':
+      case '7':
+      case '8':
+      case '9':
+        continue;
+      default:
+        // if we find something that is not a number such as 'e' or 'E' or '.'
+        // there is no need to print the trailing ".".
+        print_trailing_dot = false;
+    }
+    break; // we found something that is not a number, so we will not print
+           // the trailing "."
+  }
+  if (print_trailing_dot){
     s->AsRawOstream() << ".";
   }
+
+  s->AsRawOstream() << suffix;
+
 }
 
 
@@ -448,6 +450,16 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
     if (exe_ctx_scope)
       exe_ctx_scope->CalculateExecutionContext(exe_ctx);
     Process *process = exe_ctx.GetProcessPtr();
+
+    // max padding for floating point numbers
+    TargetSP target_sp;
+    if (exe_ctx_scope)
+      target_sp = exe_ctx_scope->CalculateTarget();
+
+    std::optional<unsigned> format_max_padding;
+    if (target_sp)
+      format_max_padding = target_sp->GetMaxZeroPaddingInFloatFormat();
+
 
     if (process) {
       Status error;
@@ -586,10 +598,8 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
             s->Printf("<could not read float>@");
             break;
           }
-          PrintAPIntAsFloat(DE, s, *apint, 8, exe_ctx_scope, error);
-          if (error.Fail()) {
-            s->Printf("<could not read float>@");
-          }
+          const llvm::fltSemantics &semantics = llvm::APFloat::IEEEdouble();
+          PrintAPIntAsFloat(s, *apint, semantics, format_max_padding);
           print_default = false;
           break;
         }
@@ -605,11 +615,8 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
               s->Printf("<could not read floatarray field %" PRIu64 ">", field);
               print_default = true;
             } else {
-              PrintAPIntAsFloat(DE, s, *apint, 8, exe_ctx_scope, error);
-              if (error.Fail()) {
-                s->Printf("<could not read floatarray field %" PRIu64 ">", field);
-                print_default = true;
-              }
+              const llvm::fltSemantics &semantics = llvm::APFloat::IEEEdouble();
+              PrintAPIntAsFloat(s, *apint, semantics, format_max_padding);
             }
 
             if (field < wosize_to_print - 1)
@@ -696,11 +703,8 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                       s->Printf("<could not read float32>@");
                       break;
                     }
-                    PrintAPIntAsFloat(DE, s, *apint, 4, exe_ctx_scope, error);
-                    if (error.Fail()) {
-                      s->Printf("<could not read float32>@");
-                    }
-                    s->Printf("s");
+                    const llvm::fltSemantics &semantics = llvm::APFloat::IEEEsingle();
+                    PrintAPIntAsFloat(s, *apint, semantics, format_max_padding, "", "s");
                     print_default = false;
                   }
                   else {
@@ -1078,9 +1082,6 @@ lldb::offset_t lldb_private::DumpDataExtractor(
       if (target_sp)
         format_max_padding = target_sp->GetMaxZeroPaddingInFloatFormat();
 
-      // Show full precision when printing float values
-      const unsigned format_precision = 0;
-
       const llvm::fltSemantics &semantics =
           GetFloatSemantics(target_sp, item_byte_size);
 
@@ -1092,13 +1093,12 @@ lldb::offset_t lldb_private::DumpDataExtractor(
       std::optional<llvm::APInt> apint =
           GetAPInt(DE, &offset, semantics_byte_size);
       if (apint) {
-        llvm::APFloat apfloat(semantics, *apint);
-        llvm::SmallVector<char, 256> sv;
-        if (format_max_padding)
-          apfloat.toString(sv, format_precision, *format_max_padding);
-        else
-          apfloat.toString(sv, format_precision);
-        s->AsRawOstream() << sv;
+        std::string suffix = "";
+        if (semantics_byte_size == 4){
+          suffix = "s";
+        }
+        PrintAPIntAsFloat(s, *apint, semantics,
+                          format_max_padding, "#", suffix);
       } else {
         s->Format("error: unsupported byte size ({0}) for float format",
                   item_byte_size);

@@ -1259,6 +1259,29 @@ public:
         toString(Str, FormatPrecision, FormatMaxPadding, TruncateZero));
   }
 
+
+  void toPossiblyShortString(SmallVectorImpl<char> &Str,
+                  unsigned FormatMaxPadding = 3,
+                  bool TruncateZero = true) {
+
+    unsigned precisions[3] = { 5, 12, 15 };
+    for (unsigned i = 0; i < 3; ++i) {
+      toString(Str, precisions[i], FormatMaxPadding, TruncateZero);
+      StringRef sr = StringRef(Str.data(), Str.size());
+      APFloat maybe_self = APFloat(getSemantics(), sr);
+      // we have found an identical float
+      if (maybe_self.bitwiseIsEqual(*this)) {
+        return;
+      } else {
+        Str.clear ();
+      }
+    }
+
+    // we default back to full precision
+    toString(Str, 0, FormatMaxPadding, TruncateZero);
+  }
+
+
   void print(raw_ostream &) const;
   void dump() const;
 
