@@ -3149,6 +3149,22 @@ public:
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K >= firstField && K <= lastField; }
+
+private:
+  uint64_t m_variant_discr_value = UINT64_MAX;
+
+public:
+  void setVariantDiscrValue(uint64_t value) {
+    m_variant_discr_value = value;
+  }
+
+  uint64_t getVariantDiscrValue() {
+    return m_variant_discr_value;
+  }
+
+  bool hasVariantDiscrValue() {
+    return getVariantDiscrValue() != UINT64_MAX;
+  }
 };
 
 /// An instance of this object exists for each enum constant

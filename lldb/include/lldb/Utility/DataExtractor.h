@@ -991,6 +991,14 @@ public:
             uint8_t(GetAddressByteSize())};
   }
 
+  void setDataOriginalSource(lldb::addr_t ptr) {
+    m_data_original_source = ptr;
+  }
+
+  lldb::addr_t getDataOriginalSource() const {
+    return m_data_original_source;
+  }
+
 protected:
   template <typename T> T Get(lldb::offset_t *offset_ptr, T fail_value) const {
     constexpr size_t src_size = sizeof(T);
@@ -1018,6 +1026,8 @@ protected:
   lldb::DataBufferSP m_data_sp;
   /// Making it const would require implementation of move assignment operator.
   uint32_t m_target_byte_size = 1;
+  /// Temporary hack for reading more data from the source than is currently available.
+  lldb::addr_t m_data_original_source = 0;
 };
 
 } // namespace lldb_private

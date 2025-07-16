@@ -62,8 +62,32 @@ DWARFASTParser::ParseChildArrayInfo(const DWARFDIE &parent_die,
                     }
                   }
                 }
-            } else
+            } else {
+#if 0
+              if (form_value.BlockData()) {
+                array_info.computed_num_elements = true;
+                array_info.compute_num_elements =
+                    [=](ModuleSP module_sp, Value *array) -> uint64_t {
+                  const DWARFDataExtractor &debug_info_data = die.GetData();
+                  uint32_t block_length = form_value.Unsigned();
+                  uint32_t block_offset =
+                      form_value.BlockData() - debug_info_data.GetDataStart();
+                  Value initial_value(0);
+                  Value computed_num_elements(0);
+                  if (DWARFExpression::Evaluate(
+                          exe_ctx, nullptr, module_sp,
+                          DataExtractor(debug_info_data, block_offset,
+                                        block_length),
+                          die.GetCU(), eRegisterKindDWARF, &initial_value,
+                          array, computed_num_elements, nullptr)) {
+                    return computed_num_elements.ResolveValue(nullptr).UInt();
+                  }
+                  return 0;
+                };
+              } else
+#endif
               num_elements = form_value.Unsigned();
+            }
             break;
 
           case DW_AT_bit_stride:

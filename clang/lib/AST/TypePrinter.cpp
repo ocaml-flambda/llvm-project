@@ -544,7 +544,12 @@ void TypePrinter::printIncompleteArrayBefore(const IncompleteArrayType *T,
 
 void TypePrinter::printIncompleteArrayAfter(const IncompleteArrayType *T,
                                             raw_ostream &OS) {
-  OS << "[]";
+  // XXX mshinwell: need to check the language, but how?
+  bool is_ocaml = true;
+
+  if (is_ocaml) OS << " array";
+  else OS << "[]";
+
   printAfter(T->getElementType(), OS);
 }
 

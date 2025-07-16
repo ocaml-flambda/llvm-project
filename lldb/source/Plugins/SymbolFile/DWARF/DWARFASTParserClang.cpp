@@ -396,6 +396,9 @@ ParsedDWARFTypeAttributes::ParsedDWARFTypeAttributes(const DWARFDIE &die) {
     case DW_AT_reference:
       ref_qual = clang::RQ_LValue;
       break;
+    case DW_AT_offset_record_from_pointer:
+      offset_record_from_pointer = form_value.Signed();
+      break;
     }
   }
 }
@@ -1910,6 +1913,13 @@ DWARFASTParserClang::ParseStructureLikeDIE(const SymbolContext &sc,
       record_decl->setArgPassingRestrictions(
           clang::RecordDecl::APK_CannotPassInRegs);
   }
+
+  clang::CXXRecordDecl *record_decl =
+      m_ast.GetAsCXXRecordDecl(clang_type.GetOpaqueQualType());
+  if (record_decl) {
+    record_decl->setImplicit();
+    record_decl->setOffsetRecordFromPointer(attrs.offset_record_from_pointer);
+  }
   return type_sp;
 }
 
@@ -2726,7 +2736,7 @@ void DWARFASTParserClang::ParseSingleMember(
     const lldb_private::CompilerType &class_clang_type,
     lldb::AccessType default_accessibility,
     lldb_private::ClangASTImporter::LayoutInfo &layout_info,
-    FieldInfo &last_field_info) {
+    FieldInfo &last_field_info, uint64_t variant_discr_value) {
   Log *log = GetLog(DWARFLog::TypeCompletion | DWARFLog::Lookups);
   // This function can only parse DW_TAG_member.
   assert(die.Tag() == DW_TAG_member);
@@ -2936,8 +2946,9 @@ void DWARFASTParserClang::ParseSingleMember(
   // artificial member with (unnamed bitfield) padding.
   // FIXME: This check should verify that this is indeed an artificial member
   // we are supposed to ignore.
-  if (attrs.is_artificial)
-    return;
+  // if (attrs.is_artificial)
+    // return; // CR tnowak: make a more permament solution than commenting out code.
+  if (!attrs.is_artificial)
 
   if (!member_clang_type.IsCompleteType())
     member_clang_type.GetCompleteType();
@@ -2981,12 +2992,73 @@ void DWARFASTParserClang::ParseSingleMember(
 
   clang::FieldDecl *field_decl = TypeSystemClang::AddFieldToRecordType(
       class_clang_type, attrs.name, member_clang_type, attrs.accessibility,
-      attrs.bit_size);
+      attrs.bit_size, variant_discr_value, attrs.is_artificial);
 
   m_ast.SetMetadataAsUserID(field_decl, die.GetID());
 
   layout_info.field_offsets.insert(
       std::make_pair(field_decl, field_bit_offset));
+}
+
+void DWARFASTParserClang::ParseVariantPart(
+    const DWARFDIE &die, const DWARFDIE &parent_die,
+    const lldb_private::CompilerType &class_clang_type,
+    lldb::AccessType default_accessibility,
+    lldb_private::ClangASTImporter::LayoutInfo &layout_info,
+    FieldInfo &last_field_info) {
+  Log *log = GetLog(DWARFLog::TypeCompletion | DWARFLog::Lookups);
+  assert(die.Tag() == DW_TAG_variant_part);
+
+  // Getting the type of DW_AT_discr in the DW_TAG_variant_part die.
+  DWARFAttributes attributes;
+  const size_t num_attributes = die.GetAttributes(attributes);
+  DWARFFormValue encoding_form;
+  for (std::size_t i = 0; i < num_attributes; ++i) {
+    const dw_attr_t attr = attributes.AttributeAtIndex(i);
+    DWARFFormValue form_value;
+    if (attr == DW_AT_discr && attributes.ExtractFormValueAtIndex(i, form_value))
+      encoding_form = form_value;
+  }
+  const DWARFDIE &discr_member_die = encoding_form.Reference();
+
+  // Adding the DW_TAG_member of the DW_AT_discr directly under the struct.
+  ParseSingleMember(discr_member_die, parent_die, class_clang_type,
+      default_accessibility, layout_info, last_field_info);
+
+  // Under DW_TAG_variant_part there are multiple DW_TAG_variant, each
+  // has a DW_TAG_member. We're adding all of the members directly under the struct
+  // with the DW_AT_discr_value of the DW_TAG_variant.
+  for (DWARFDIE variant_die : die.children())
+    if (variant_die.Tag() == DW_TAG_variant) {
+
+      // Getting the DW_AT_discr_value.
+      uint64_t uval64 = UINT64_MAX;
+      DWARFAttributes attributes;
+      const size_t num_attributes = variant_die.GetAttributes(attributes);
+      for (std::size_t i = 0; i < num_attributes; ++i) {
+        const dw_attr_t attr = attributes.AttributeAtIndex(i);
+        DWARFFormValue form_value;
+        if (attr == DW_AT_discr_value &&
+            attributes.ExtractFormValueAtIndex(i, form_value)) {
+          uval64 = form_value.Unsigned();
+        }
+      }
+      // For now, we don't support default variants, which don't have the DW_AT_discr_value.
+      if (uval64 == UINT64_MAX)
+        LLDB_LOG(log, "Failed to find a discriminant member in a variant.");
+
+      // Adding each DW_TAG_member directly under the struct.
+      for (DWARFDIE member_child_die : variant_die.children())
+        if (member_child_die.Tag() == DW_TAG_member)
+          ParseSingleMember(member_child_die, parent_die, class_clang_type,
+              default_accessibility, layout_info, last_field_info, uval64);
+    }
+
+  // Setting a flag in CXXRecordDecl for custom printing of the variant.
+  clang::CXXRecordDecl *record_decl =
+      m_ast.GetAsCXXRecordDecl(class_clang_type.GetOpaqueQualType());
+  if (record_decl)
+    record_decl->setVariant(true);
 }
 
 bool DWARFASTParserClang::ParseChildMembers(
@@ -3018,6 +3090,11 @@ bool DWARFASTParserClang::ParseChildMembers(
     case DW_TAG_member:
       ParseSingleMember(die, parent_die, class_clang_type,
                         default_accessibility, layout_info, last_field_info);
+      break;
+
+    case DW_TAG_variant_part:
+      ParseVariantPart(die, parent_die, class_clang_type,
+                       default_accessibility, layout_info, last_field_info);
       break;
 
     case DW_TAG_subprogram:

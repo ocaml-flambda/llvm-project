@@ -1835,6 +1835,27 @@ public:
     return K >= firstCXXRecord && K <= lastCXXRecord;
   }
   void markAbstract() { data().Abstract = true; }
+
+private:
+  bool m_is_variant = false;
+  int64_t m_offset_record_from_pointer = 0;
+
+public:
+  bool isVariant() const {
+    return m_is_variant;
+  }
+
+  void setVariant(bool is_variant) {
+    m_is_variant = is_variant;
+  }
+
+  int64_t getOffsetRecordFromPointer() const {
+    return m_offset_record_from_pointer;
+  }
+
+  void setOffsetRecordFromPointer(int64_t offset) {
+    m_offset_record_from_pointer = offset;
+  }
 };
 
 /// Store information needed for an explicit specifier.

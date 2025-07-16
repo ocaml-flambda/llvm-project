@@ -8,6 +8,7 @@
 
 #include "TypeSystemClang.h"
 
+#include "clang/AST/DeclCXX.h"
 #include "llvm/Support/FormatAdapters.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -75,6 +76,7 @@
 #include "Plugins/SymbolFile/DWARF/DWARFASTParserClang.h"
 #include "Plugins/SymbolFile/PDB/PDBASTParser.h"
 #include "Plugins/SymbolFile/NativePDB/PdbAstBuilder.h"
+#include "lldb/lldb-types.h"
 
 #include <cstdio>
 
@@ -2850,7 +2852,6 @@ bool TypeSystemClang::IsAggregateType(lldb::opaque_compiler_type_t type) {
   case clang::Type::ConstantArray:
   case clang::Type::ExtVector:
   case clang::Type::Vector:
-  case clang::Type::Record:
   case clang::Type::ObjCObject:
   case clang::Type::ObjCInterface:
     return true;
@@ -3992,14 +3993,19 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
     return 0;
 
   case clang::Type::LValueReference:
-  case clang::Type::RValueReference:
+  case clang::Type::RValueReference: {
     if (pointee_or_element_clang_type)
       pointee_or_element_clang_type->SetCompilerType(
           weak_from_this(),
           llvm::cast<clang::ReferenceType>(qual_type.getTypePtr())
               ->getPointeeType()
               .getAsOpaquePtr());
-    return eTypeHasChildren | eTypeIsReference | eTypeHasValue;
+    bool is_ocaml = true;
+    if (is_ocaml)
+      return eTypeHasValue;
+    else
+      return eTypeHasChildren | eTypeIsReference | eTypeHasValue;
+  } break;
 
   case clang::Type::MemberPointer:
     return eTypeIsPointer | eTypeIsMember | eTypeHasValue;
@@ -4023,8 +4029,17 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
     return eTypeHasChildren | eTypeIsPointer | eTypeHasValue;
 
   case clang::Type::Record:
-    if (qual_type->getAsCXXRecordDecl())
-      return eTypeHasChildren | eTypeIsClass | eTypeIsCPlusPlus;
+    if (clang::CXXRecordDecl *record_decl = qual_type->getAsCXXRecordDecl()) {
+      if(record_decl->isVariant())
+        return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus;
+      else {
+        bool is_ocaml = true; // CR tnowak: fill this bool
+        if (is_ocaml)
+          return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus;
+        else
+          return eTypeHasChildren | eTypeIsClass | eTypeIsCPlusPlus;
+      }
+    }
     else
       return eTypeHasChildren | eTypeIsStructUnion;
     break;
@@ -5311,7 +5326,7 @@ lldb::Format TypeSystemClang::GetFormat(lldb::opaque_compiler_type_t type) {
   case clang::Type::ObjCInterface:
     break;
   case clang::Type::Record:
-    break;
+    return lldb::eFormatDefault;
   case clang::Type::Enum:
     return lldb::eFormatEnum;
   case clang::Type::DependentSizedArray:
@@ -7398,7 +7413,7 @@ TypeSystemClang::GetAsObjCInterfaceDecl(const CompilerType &type) {
 clang::FieldDecl *TypeSystemClang::AddFieldToRecordType(
     const CompilerType &type, llvm::StringRef name,
     const CompilerType &field_clang_type, AccessType access,
-    uint32_t bitfield_bit_size) {
+    uint32_t bitfield_bit_size, uint64_t variant_discr_value, bool is_artificial) {
   if (!type.IsValid() || !field_clang_type.IsValid())
     return nullptr;
   auto ts = type.GetTypeSystem();
@@ -7429,6 +7444,9 @@ clang::FieldDecl *TypeSystemClang::AddFieldToRecordType(
     field->setType(ClangUtil::GetQualType(field_clang_type));
     if (bit_width)
       field->setBitWidth(bit_width);
+    field->setVariantDiscrValue(variant_discr_value);
+    if (is_artificial)
+      record_decl->setImplicit(false);
     SetMemberOwningModule(field, record_decl);
 
     if (name.empty()) {
@@ -8657,7 +8675,7 @@ void TypeSystemClang::DumpValue(
           field_byte_offset = field_bit_offset / 8;
           assert(field_bit_offset % 8 == 0);
           if (child_idx == 0)
-            s->PutChar('{');
+            s->PutChar('!');
           else
             s->PutChar(',');
 
@@ -8703,7 +8721,7 @@ void TypeSystemClang::DumpValue(
         // Print the starting squiggly bracket (if this is the first member) or
         // comma (for member 2 and beyond) for the struct/union/class member.
         if (child_idx == 0)
-          s->PutChar('{');
+          s->PutChar('$');
         else
           s->PutChar(',');
 
@@ -8825,7 +8843,7 @@ void TypeSystemClang::DumpValue(
         // Print the starting squiggly bracket (if this is the first member) or
         // comman (for member 2 and beyong) for the struct/union/class member.
         if (element_idx == 0)
-          s->PutChar('{');
+          s->PutChar('^');
         else
           s->PutChar(',');
 
@@ -9060,6 +9078,300 @@ static bool DumpEnumValue(const clang::QualType &qual_type, Stream *s,
   return true;
 }
 
+#define ASSERT_USE_FALLBACK_PRINTING(boolean, data, byte_offset) \
+  if (!(boolean)) { \
+      LLDB_LOG(GetLog(LLDBLog::Target), "Failure in DumpTypeValue(): " #boolean); \
+      DumpDataExtractor(data, s, byte_offset, eFormatOCamlValue, 8, 1, \
+                               UINT32_MAX, LLDB_INVALID_ADDRESS, 0, 0, \
+                               exe_scope); \
+      return true; \
+  }
+
+bool DumpTypeVariant(const clang::QualType &qual_type, Stream *s,
+                    const DataExtractor &data, lldb::offset_t byte_offset,
+                    size_t byte_size, ExecutionContextScope *exe_scope,
+                    TypeSystemClang *type_system_clang,
+                    const clang::RecordDecl *record_decl,
+                    const clang::CXXRecordDecl *cxx_record_decl,
+                    Process *process) {
+  // At this point, we know that the record represents a variant.
+  // We first retrieve the CXXRecordDecl in which are the member fields
+  // that contains the DW_AT_discr_value.
+  // Finding the {pointer, idx of child} of the field which contains the discriminant.
+  std::pair<clang::FieldDecl*, uint32_t> discr_field = {nullptr, 0};
+  for (clang::FieldDecl *field_decl : cxx_record_decl->fields()) {
+    if (!field_decl->hasVariantDiscrValue()) {
+      ASSERT_USE_FALLBACK_PRINTING(discr_field.first == nullptr, data, byte_offset);
+      discr_field.first = field_decl;
+      break;
+    }
+    ++discr_field.second;
+  }
+  ASSERT_USE_FALLBACK_PRINTING(discr_field.first != nullptr, data, byte_offset);
+
+  auto get_bit_size = [&](clang::FieldDecl *field, uint32_t field_idx) {
+    clang::QualType field_type = field->getType();
+    CompilerType field_clang_type = type_system_clang->GetType(field_type);
+    unsigned int field_bit_size;
+    if (field->isBitField()) {
+      field_bit_size = field->getBitWidthValue(type_system_clang->getASTContext());
+    }
+    else {
+      std::optional<uint64_t> size = field_clang_type.GetByteSize(exe_scope);
+      assert(size && *size < UINT32_MAX);
+      field_bit_size = 8 * (unsigned int) *size;
+    }
+    return field_bit_size;
+  };
+
+  // Getting the discriminant value.
+  const clang::ASTRecordLayout &record_layout =
+      type_system_clang->getASTContext().getASTRecordLayout(record_decl);
+  unsigned int discr_bit_size = get_bit_size(discr_field.first, discr_field.second);
+  unsigned int discr_bit_offset = record_layout.getFieldOffset(discr_field.second);
+  lldb::offset_t discr_byte_offset = byte_offset;
+  const uint64_t discr_value = data.GetMaxU64Bitfield(&discr_byte_offset, byte_size, discr_bit_size, discr_bit_offset);
+
+  auto print_field = [&](clang::FieldDecl *field, uint32_t field_idx) {
+    clang::QualType field_type = field->getType();
+    CompilerType field_clang_type = type_system_clang->GetType(field_type);
+    const clang::ASTRecordLayout &record_layout =
+        type_system_clang->getASTContext().getASTRecordLayout(record_decl);
+
+    unsigned int field_bit_size = get_bit_size(field, field_idx);
+    unsigned int field_bit_offset = record_layout.getFieldOffset(field_idx);
+    unsigned int field_byte_size = (field_bit_size + 8 - 1) / 8;
+    DataExtractor field_data_extractor;
+    lldb::offset_t data_offset;
+    std::vector<uint8_t> buffer;
+
+    if (data.getDataOriginalSource()) {
+      lldb::addr_t field_addr = data.getDataOriginalSource() + (byte_offset + field_bit_offset / 8);
+      buffer.resize(field_byte_size);
+      size_t bytes_read;
+      Status error;
+      bytes_read =
+          process->ReadMemory(field_addr,
+          &buffer.front(), buffer.size(), error);
+      ASSERT_USE_FALLBACK_PRINTING(bytes_read == buffer.size() && !error.Fail(),
+          data, byte_offset + field_bit_offset / 8);
+      field_data_extractor = DataExtractor(&buffer.front(), buffer.size(),
+          data.GetByteOrder(), data.GetAddressByteSize());
+      data_offset = 0;
+    } else {
+      field_data_extractor = data;
+      data_offset = byte_offset;
+    }
+    field_clang_type.DumpTypeValue(s, field_clang_type.GetFormat(), field_data_extractor, data_offset,
+        field_byte_size, field_bit_size, field_bit_offset,
+        exe_scope);
+    return true;
+  };
+  bool is_artificial = !cxx_record_decl->isImplicit();
+  if (!is_artificial) {
+    // We're assuming that the discriminant is an enum, so we're printing it.
+    s->PutChar('(');
+    print_field(discr_field.first, discr_field.second);
+    s->PutChar(' ');
+  }
+
+  // First checking whether the variant's arguments are a tuple or a record.
+  bool is_tuple = true;
+  int cnt_found_children = 0;
+  for (clang::FieldDecl *field_decl : cxx_record_decl->fields()) {
+    if (field_decl->getVariantDiscrValue() == discr_value) {
+      if (!field_decl->getName().empty())
+        is_tuple = false;
+      ++cnt_found_children;
+    }
+  }
+  ASSERT_USE_FALLBACK_PRINTING(cnt_found_children > 0, data, byte_offset);
+
+  // Printing all the fields with the given discriminant (there can be multiple).
+  if (is_tuple)
+    s->PutCString(cnt_found_children > 1 ? "(" : "");
+  else
+    s->PutCString("{ ");
+  uint32_t field_idx = 0;
+  cnt_found_children = 0;
+  for (clang::FieldDecl *field_decl : cxx_record_decl->fields()) {
+    if (field_decl->getVariantDiscrValue() == discr_value) {
+      if (cnt_found_children++ > 0)
+        s->PutCString(is_tuple ? ", " : "; ");
+      if (!field_decl->getName().empty()) {
+        s->PutCString(field_decl->getName());
+        s->PutCString(" = ");
+      }
+      print_field(field_decl, field_idx);
+    }
+    ++field_idx;
+  }
+  if (is_tuple)
+    s->PutCString(cnt_found_children > 1 ? ")" : "");
+  else
+    s->PutCString(" }");
+  if (!is_artificial)
+    s->PutChar(')');
+  return true;
+}
+
+bool DumpTypeRecord(const clang::QualType &qual_type, Stream *s,
+                    const DataExtractor &data, lldb::offset_t byte_offset,
+                    size_t byte_size, ExecutionContextScope *exe_scope,
+                    TypeSystemClang *type_system_clang,
+                    const clang::RecordDecl *record_decl,
+                    const clang::CXXRecordDecl *cxx_record_decl) {
+  bool is_tuple = true;
+  for (clang::FieldDecl *field_decl : cxx_record_decl->fields())
+    if (!field_decl->getName().empty())
+      is_tuple = false;
+
+  s->PutCString(is_tuple ? "(" : "{ ");
+  unsigned int idx = 0;
+  for (clang::FieldDecl *field_decl : cxx_record_decl->fields()) {
+    if (idx > 0)
+      s->PutCString(is_tuple ? ", " : "; ");
+    if (!field_decl->getName().empty()) {
+      s->PutCString(field_decl->getName());
+      s->PutCString(" = ");
+    }
+    clang::QualType field_type = field_decl->getType();
+    CompilerType field_clang_type = type_system_clang->GetType(field_type);
+    unsigned int field_bit_size;
+    if (field_decl->isBitField()) {
+      field_bit_size = field_decl->getBitWidthValue(type_system_clang->getASTContext());
+    }
+    else {
+      std::optional<uint64_t> size = field_clang_type.GetByteSize(exe_scope);
+      ASSERT_USE_FALLBACK_PRINTING(size && *size < UINT32_MAX, data, byte_offset);
+      field_bit_size = 8 * (unsigned int) *size;
+    }
+    unsigned int field_byte_size = (field_bit_size + 8 - 1) / 8;
+    const clang::ASTRecordLayout &record_layout =
+        type_system_clang->getASTContext().getASTRecordLayout(record_decl);
+    unsigned int field_bit_offset = record_layout.getFieldOffset(idx);
+    unsigned int field_byte_offset = field_bit_offset / 8;
+    field_bit_offset %= 8;
+    field_clang_type.DumpTypeValue(s, field_clang_type.GetFormat(), data, field_byte_offset,
+        field_byte_size, field_bit_size, field_bit_offset,
+        exe_scope);
+    ++idx;
+  }
+  s->PutCString(is_tuple ? ")" : " }");
+  return true;
+}
+
+bool DumpTypeOcamlArray(const clang::QualType &qual_type, Stream *s,
+                        const DataExtractor &data, lldb::offset_t byte_offset,
+                        size_t byte_size, ExecutionContextScope *exe_scope,
+                        CompilerType array_element_type) {
+  std::vector<uint8_t> buffer;
+  ExecutionContext exe_ctx;
+  exe_scope->CalculateExecutionContext(exe_ctx);
+  Process *process = exe_ctx.GetProcessPtr();
+  ASSERT_USE_FALLBACK_PRINTING(process != nullptr, data, byte_offset);
+
+  lldb::addr_t header_addr = data.getDataOriginalSource() - 8;
+  Status error;
+  uint64_t header =
+    process->ReadUnsignedIntegerFromMemory(header_addr, 8, 0, error);
+  ASSERT_USE_FALLBACK_PRINTING(!error.Fail(), data, byte_offset);
+
+  uint64_t num_elements = header >> 10;
+  uint64_t tag = header & 0xff;
+
+  // With the float optimization enabled the DWARF isn't always
+  // accurate, so we need to watch out for Double_array_tag.
+  if (tag == 254) {
+    uint64_t value = data.getDataOriginalSource();
+    DataExtractor data_extractor((const void*) &value, 8, data.GetByteOrder(), data.GetAddressByteSize());
+    return DumpDataExtractor(data_extractor, s, 0, eFormatOCamlValue, 8, 1,
+                            UINT32_MAX, LLDB_INVALID_ADDRESS, 0, 0,
+                            exe_scope);
+  }
+
+
+  buffer.resize(num_elements * 8);
+  size_t bytes_read;
+  lldb::addr_t block_addr = data.getDataOriginalSource();
+  bytes_read =
+      process->ReadMemory(block_addr,
+      &buffer.front(), buffer.size(), error);
+  ASSERT_USE_FALLBACK_PRINTING(bytes_read == buffer.size() && !error.Fail(), data, byte_offset);
+  DataExtractor element_data_extractor(&buffer.front(), buffer.size(),
+      data.GetByteOrder(), data.GetAddressByteSize());
+
+  s->PutCString("[| ");
+  uint64_t field;
+  for (field = 0; field < num_elements; field++) {
+    array_element_type.DumpTypeValue(s, eFormatDefault,
+      element_data_extractor, field * 8, 8, 64, 0, exe_scope);
+    if (field < num_elements - 1) s->PutCString("; ");
+  }
+  s->PutCString(" |]");
+  return true;
+}
+
+bool DumpTypeLValueReference(const clang::QualType &qual_type, Stream *s,
+                             const DataExtractor &data, lldb::offset_t byte_offset,
+                             size_t byte_size, ExecutionContextScope *exe_scope,
+                             TypeSystemClang *type_system_clang) {
+  lldb::offset_t byte_offset_copy = byte_offset;
+  uint64_t value = data.GetU64(&byte_offset_copy);
+  ASSERT_USE_FALLBACK_PRINTING(exe_scope != nullptr, data, byte_offset);
+  ExecutionContext exe_ctx;
+  exe_scope->CalculateExecutionContext(exe_ctx);
+  Process *process = exe_ctx.GetProcessPtr();
+  ASSERT_USE_FALLBACK_PRINTING(process != nullptr, data, byte_offset);
+  clang::QualType underlying_type_qual = qual_type.getTypePtr()->getPointeeType();
+  CompilerType underlying_type_compiler = type_system_clang->GetType(underlying_type_qual);
+
+  clang::QualType record_qual = underlying_type_qual;
+  while (record_qual.getTypePtr()->getTypeClass() == clang::Type::Typedef)
+    record_qual =
+      llvm::cast<clang::TypedefType>(record_qual)
+          ->getDecl()
+          ->getUnderlyingType();
+  if (record_qual.getTypePtr()->isArrayType()) {
+    DataExtractor data2(data);
+    data2.setDataOriginalSource(value);
+    underlying_type_compiler.DumpTypeValue(s, eFormatDefault, data2,
+      0, 8, 64, 0, exe_scope);
+    return true;
+  }
+  ASSERT_USE_FALLBACK_PRINTING(record_qual.getTypePtr()->getTypeClass() == clang::Type::Record,
+      data, byte_offset);
+  const clang::RecordType *record_type =
+      llvm::cast<clang::RecordType>(record_qual.getTypePtr());
+  ASSERT_USE_FALLBACK_PRINTING(record_type != nullptr, data, byte_offset);
+  const clang::RecordDecl *record_decl = record_type->getDecl();
+  ASSERT_USE_FALLBACK_PRINTING(record_decl != nullptr, data, byte_offset);
+  const clang::CXXRecordDecl *cxx_record_decl =
+      llvm::dyn_cast<clang::CXXRecordDecl>(record_decl);
+  ASSERT_USE_FALLBACK_PRINTING(cxx_record_decl != nullptr, data, byte_offset);
+  value += cxx_record_decl->getOffsetRecordFromPointer();
+
+  std::optional<uint64_t> size = underlying_type_compiler.GetByteSize(exe_scope);
+  ASSERT_USE_FALLBACK_PRINTING(size.has_value(), data, byte_offset);
+
+  std::vector<uint8_t> buffer;
+  buffer.resize(*size);
+  size_t bytes_read;
+  Status error;
+  bytes_read =
+      process->ReadMemory(value,
+      &buffer.front(), buffer.size(), error);
+  ASSERT_USE_FALLBACK_PRINTING(bytes_read == buffer.size() && !error.Fail(),
+      data, byte_offset);
+
+  DataExtractor under_pointer(&buffer.front(), *size,
+      process->GetByteOrder(), 8);
+  under_pointer.setDataOriginalSource(value);
+  underlying_type_compiler.DumpTypeValue(s, underlying_type_compiler.GetFormat(),
+      under_pointer, 0, *size, *size * 8, 0, exe_scope);
+  return true;
+}
+
 bool TypeSystemClang::DumpTypeValue(
     lldb::opaque_compiler_type_t type, Stream *s, lldb::Format format,
     const lldb_private::DataExtractor &data, lldb::offset_t byte_offset,
@@ -9067,7 +9379,11 @@ bool TypeSystemClang::DumpTypeValue(
     ExecutionContextScope *exe_scope) {
   if (!type)
     return false;
-  if (IsAggregateType(type)) {
+  bool is_ocaml = true; // XXX mshinwell
+  CompilerType array_element_type;
+  bool is_ocaml_array = is_ocaml
+    && IsArrayType(type, &array_element_type, nullptr, nullptr);
+  if (IsAggregateType(type) && !is_ocaml_array) {
     return false;
   } else {
     clang::QualType qual_type(GetQualType(type));
@@ -9076,6 +9392,11 @@ bool TypeSystemClang::DumpTypeValue(
       return DumpDataExtractor(data, s, byte_offset, eFormatOCamlValue, 8, 1,
                                UINT32_MAX, LLDB_INVALID_ADDRESS,
                                0, 0, exe_scope);
+    }
+
+    if (is_ocaml_array) {
+      return DumpTypeOcamlArray(qual_type, s, data, byte_offset, byte_size,
+          exe_scope, array_element_type);
     }
 
     const clang::Type::TypeClass type_class = qual_type->getTypeClass();
@@ -9110,6 +9431,37 @@ bool TypeSystemClang::DumpTypeValue(
           bitfield_bit_offset, // Offset in bits of a bitfield value if
                                // bitfield_bit_size != 0
           exe_scope);
+    } break;
+
+    case clang::Type::Record: {
+      ASSERT_USE_FALLBACK_PRINTING(GetCompleteType(type) == true, data, byte_offset)
+      const clang::RecordType *record_type =
+          llvm::cast<clang::RecordType>(qual_type.getTypePtr());
+      ASSERT_USE_FALLBACK_PRINTING(record_type != nullptr, data, byte_offset);
+      const clang::RecordDecl *record_decl = record_type->getDecl();
+      ASSERT_USE_FALLBACK_PRINTING(record_decl != nullptr, data, byte_offset);
+      const clang::CXXRecordDecl *cxx_record_decl =
+          llvm::dyn_cast<clang::CXXRecordDecl>(record_decl);
+      ASSERT_USE_FALLBACK_PRINTING(cxx_record_decl != nullptr, data, byte_offset);
+
+      ExecutionContext exe_ctx;
+      exe_scope->CalculateExecutionContext(exe_ctx);
+      Process *process = exe_ctx.GetProcessPtr();
+      ASSERT_USE_FALLBACK_PRINTING(process != nullptr, data, byte_offset);
+
+      if (cxx_record_decl->isVariant()) {
+        return DumpTypeVariant(qual_type, s, data, byte_offset, byte_size, exe_scope,
+            this, record_decl, cxx_record_decl, process);
+      }
+      else {
+        return DumpTypeRecord(qual_type, s, data, byte_offset, byte_size, exe_scope,
+            this, record_decl, cxx_record_decl);
+      }
+    } break;
+
+    case clang::Type::LValueReference: {
+      return DumpTypeLValueReference(qual_type, s, data, byte_offset, byte_size,
+          exe_scope, this);
     } break;
 
     case clang::Type::Enum:

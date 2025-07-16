@@ -515,8 +515,15 @@ bool ValueObject::MightHaveChildren() {
   bool has_children = false;
   const uint32_t type_info = GetTypeInfo();
   if (type_info) {
-    if (type_info & (eTypeHasChildren | eTypeIsPointer | eTypeIsReference))
-      has_children = true;
+    bool is_ocaml = true;
+    if (is_ocaml) {
+      if (type_info & eTypeHasChildren)
+        has_children = true;
+    }
+    else {
+      if (type_info & (eTypeHasChildren | eTypeIsPointer | eTypeIsReference))
+        has_children = true;
+    }
   } else {
     has_children = GetNumChildren() > 0;
   }
@@ -1147,6 +1154,7 @@ bool ValueObject::HasSpecialPrintableRepresentation(
       return true;
 
     if (flags.Test(eTypeIsArray)) {
+      // XXX mshinwell: this should be disabled for OCaml
       if ((custom_format == eFormatBytes) ||
           (custom_format == eFormatBytesWithASCII))
         return true;
@@ -1362,12 +1370,25 @@ bool ValueObject::DumpPrintableRepresentation(
       if (val_obj_display == eValueObjectRepresentationStyleValue)
         str = GetSummaryAsCString();
       else if (val_obj_display == eValueObjectRepresentationStyleSummary) {
+        // XXX mshinwell: need to test for OCaml language here.
+        std::string type_name_str(GetTypeName().AsCString());
+        for (std::string to_erase : {"(&) ", " &"}) {
+          for (auto iter = type_name_str.find(to_erase); iter != std::string::npos;
+              iter = type_name_str.find(to_erase)) {
+            type_name_str.erase(iter, to_erase.size());
+          }
+        }
+
         if (!CanProvideValue()) {
-          strm.Printf("%s @ %s", GetTypeName().AsCString(),
-                      GetLocationAsCString());
+          strm.Printf("<unavailable> : %s", type_name_str.c_str());
+          // strm.Printf("%s @ %s", GetTypeName().AsCString(),
+          //           GetLocationAsCString());
           str = strm.GetString();
-        } else
-          str = GetValueAsCString();
+        } else {
+          strm.Printf("%s : %s", GetValueAsCString(), type_name_str.c_str());
+          str = strm.GetString();
+//          str = GetValueAsCString();
+        }
       }
     }
 

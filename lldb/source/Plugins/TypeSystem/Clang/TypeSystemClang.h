@@ -855,7 +855,9 @@ public:
                                                 llvm::StringRef name,
                                                 const CompilerType &field_type,
                                                 lldb::AccessType access,
-                                                uint32_t bitfield_bit_size);
+                                                uint32_t bitfield_bit_size,
+                                                uint64_t variant_discr_value = UINT64_MAX,
+                                                bool is_artificial = false);
 
   static void BuildIndirectFields(const CompilerType &type);
 
