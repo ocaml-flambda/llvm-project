@@ -558,8 +558,10 @@ static void ParseLangArgs(LangOptions &Opts, InputKind IK, const char *triple) {
 }
 
 TypeSystemClang::TypeSystemClang(llvm::StringRef name,
-                                 llvm::Triple target_triple) {
+                                 llvm::Triple target_triple,
+                                 lldb::LanguageType language) {
   m_display_name = name.str();
+  m_language = language;
   if (!target_triple.str().empty())
     SetTargetTriple(target_triple.str());
   // The caller didn't pass an ASTContext so create a new one for this
@@ -568,8 +570,10 @@ TypeSystemClang::TypeSystemClang(llvm::StringRef name,
 }
 
 TypeSystemClang::TypeSystemClang(llvm::StringRef name,
-                                 ASTContext &existing_ctxt) {
+                                 ASTContext &existing_ctxt,
+                                 lldb::LanguageType language) {
   m_display_name = name.str();
+  m_language = language;
   SetTargetTriple(existing_ctxt.getTargetInfo().getTriple().str());
 
   m_ast_up.reset(&existing_ctxt);
@@ -611,7 +615,7 @@ lldb::TypeSystemSP TypeSystemClang::CreateInstance(lldb::LanguageType language,
   if (module) {
     std::string ast_name =
         "ASTContext for '" + module->GetFileSpec().GetPath() + "'";
-    return std::make_shared<TypeSystemClang>(ast_name, triple);
+    return std::make_shared<TypeSystemClang>(ast_name, triple, language);
   } else if (target && target->IsValid())
     return std::make_shared<ScratchTypeSystemClang>(*target, triple);
   return lldb::TypeSystemSP();
@@ -4000,8 +4004,7 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
           llvm::cast<clang::ReferenceType>(qual_type.getTypePtr())
               ->getPointeeType()
               .getAsOpaquePtr());
-    bool is_ocaml = true;
-    if (is_ocaml)
+    if (isLanguageOCaml())
       return eTypeHasValue;
     else
       return eTypeHasChildren | eTypeIsReference | eTypeHasValue;
@@ -4030,15 +4033,10 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
 
   case clang::Type::Record:
     if (clang::CXXRecordDecl *record_decl = qual_type->getAsCXXRecordDecl()) {
-      if(record_decl->isVariant())
+      if (isLanguageOCaml())
         return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus;
-      else {
-        bool is_ocaml = true; // CR tnowak: fill this bool
-        if (is_ocaml)
-          return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus;
-        else
-          return eTypeHasChildren | eTypeIsClass | eTypeIsCPlusPlus;
-      }
+      else
+        return eTypeHasChildren | eTypeIsClass | eTypeIsCPlusPlus;
     }
     else
       return eTypeHasChildren | eTypeIsStructUnion;
@@ -9379,9 +9377,8 @@ bool TypeSystemClang::DumpTypeValue(
     ExecutionContextScope *exe_scope) {
   if (!type)
     return false;
-  bool is_ocaml = true; // XXX mshinwell
   CompilerType array_element_type;
-  bool is_ocaml_array = is_ocaml
+  bool is_ocaml_array = isLanguageOCaml()
     && IsArrayType(type, &array_element_type, nullptr, nullptr);
   if (IsAggregateType(type) && !is_ocaml_array) {
     return false;
