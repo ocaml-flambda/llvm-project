@@ -220,7 +220,6 @@ bool ValueObjectPrinter::PrintLocationIfNeeded() {
 }
 
 void ValueObjectPrinter::PrintDecl() {
-  bool is_ocaml = true; // XXX
   bool show_type = true;
   // if we are at the root-level and been asked to hide the root's type, then
   // hide it
@@ -258,14 +257,8 @@ void ValueObjectPrinter::PrintDecl() {
           type_name_str.erase(iter, 2);
         }
       }
-      if (is_ocaml) {
-        for (std::string to_erase : {"(&) ", " &"}) {
-          for (auto iter = type_name_str.find(to_erase); iter != std::string::npos;
-              iter = type_name_str.find(to_erase)) {
-            type_name_str.erase(iter, to_erase.size());
-          }
-        }
-      }
+      // FIXME: Previous versions of this code removed ampersands here. But we
+      // probably do not need to do that.
       typeName << type_name_str.c_str();
     }
   }
