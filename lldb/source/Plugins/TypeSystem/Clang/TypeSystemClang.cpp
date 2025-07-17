@@ -4005,7 +4005,7 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
               ->getPointeeType()
               .getAsOpaquePtr());
     if (isLanguageOCaml())
-      return eTypeHasValue;
+      return eTypeHasValue | eTypeIsOCaml;
     else
       return eTypeHasChildren | eTypeIsReference | eTypeHasValue;
   } break;
@@ -4034,7 +4034,7 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
   case clang::Type::Record:
     if (clang::CXXRecordDecl *record_decl = qual_type->getAsCXXRecordDecl()) {
       if (isLanguageOCaml())
-        return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus;
+        return eTypeHasValue | eTypeIsClass | eTypeIsCPlusPlus | eTypeIsOCaml;
       else
         return eTypeHasChildren | eTypeIsClass | eTypeIsCPlusPlus;
     }

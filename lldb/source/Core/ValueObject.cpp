@@ -515,15 +515,12 @@ bool ValueObject::MightHaveChildren() {
   bool has_children = false;
   const uint32_t type_info = GetTypeInfo();
   if (type_info) {
-    bool is_ocaml = true;
-    if (is_ocaml) {
-      if (type_info & eTypeHasChildren)
-        has_children = true;
-    }
-    else {
-      if (type_info & (eTypeHasChildren | eTypeIsPointer | eTypeIsReference))
-        has_children = true;
-    }
+    // FIXME: Previous versions of this code have disabled children for pointers
+    // and references. This did not seem to have any effect. If this becomes
+    // necessary again, information about OCaml can be propagated here via the
+    // the type info, to which we can add `eTypeIsOCaml`.
+    if (type_info & (eTypeHasChildren | eTypeIsPointer | eTypeIsReference))
+      has_children = true;
   } else {
     has_children = GetNumChildren() > 0;
   }

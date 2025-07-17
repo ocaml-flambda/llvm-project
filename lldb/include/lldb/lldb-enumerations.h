@@ -1080,7 +1080,10 @@ FLAGS_ENUM(TypeFlags){
     eTypeIsVector = (1u << 16),         eTypeIsScalar = (1u << 17),
     eTypeIsInteger = (1u << 18),        eTypeIsFloat = (1u << 19),
     eTypeIsComplex = (1u << 20),        eTypeIsSigned = (1u << 21),
-    eTypeInstanceIsPointer = (1u << 22)};
+    eTypeInstanceIsPointer = (1u << 22),eTypeIsOCaml = (1u << 23)};
+
+// FIXME: The info eTypeIsOCaml is currently unused. If this information never
+// becomes useful, remove the flag from the enum above.
 
 FLAGS_ENUM(CommandFlags){
     /// eCommandRequiresTarget
