@@ -688,6 +688,9 @@ void ValueObjectPrinter::PrintChildren(
       PrintChildrenPostamble(print_dotdotdot);
     else {
       if (ShouldPrintEmptyBrackets(value_printed, summary_printed)) {
+        // CR sspies: Is this still relevant? We do or will introduce lots of
+        // type aliases with the names, so getting the printing from the DWARF
+        // right should not be important anymore.
         /* XXX don't want {} after arrays
         if (ShouldPrintValueObject())
           m_stream->PutCString(" {}\n");
@@ -701,6 +704,7 @@ void ValueObjectPrinter::PrintChildren(
     // Aggregate, no children...
     m_stream->PutCString("\n");
 // XXX mshinwell
+// CR sspies: Same here.
 /*
     if (ShouldPrintValueObject()) {
       // if it has a synthetic value, then don't print {}, the synthetic

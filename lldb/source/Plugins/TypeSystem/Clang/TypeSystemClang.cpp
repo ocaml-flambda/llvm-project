@@ -5324,6 +5324,7 @@ lldb::Format TypeSystemClang::GetFormat(lldb::opaque_compiler_type_t type) {
   case clang::Type::ObjCInterface:
     break;
   case clang::Type::Record:
+    // CR sspies: Behavior changed here to use default formatting.
     return lldb::eFormatDefault;
   case clang::Type::Enum:
     return lldb::eFormatEnum;
@@ -8674,6 +8675,7 @@ void TypeSystemClang::DumpValue(
           assert(field_bit_offset % 8 == 0);
           if (child_idx == 0)
             s->PutChar('!');
+            // CR sspies: Not sure why we changed this one from {
           else
             s->PutChar(',');
 
@@ -8720,6 +8722,7 @@ void TypeSystemClang::DumpValue(
         // comma (for member 2 and beyond) for the struct/union/class member.
         if (child_idx == 0)
           s->PutChar('$');
+          // CR sspies: Not sure why we changed this one from {
         else
           s->PutChar(',');
 
@@ -8842,6 +8845,7 @@ void TypeSystemClang::DumpValue(
         // comman (for member 2 and beyong) for the struct/union/class member.
         if (element_idx == 0)
           s->PutChar('^');
+          // CR sspies: Not sure why we changed this one from {
         else
           s->PutChar(',');
 

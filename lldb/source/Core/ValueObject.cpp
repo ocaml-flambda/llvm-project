@@ -1368,6 +1368,8 @@ bool ValueObject::DumpPrintableRepresentation(
         str = GetSummaryAsCString();
       else if (val_obj_display == eValueObjectRepresentationStyleSummary) {
         // XXX mshinwell: need to test for OCaml language here.
+        // CR sspies: We transform the type here. This becomes obsolete, once
+        // we equip the top-level types with a type alias.
         std::string type_name_str(GetTypeName().AsCString());
         for (std::string to_erase : {"(&) ", " &"}) {
           for (auto iter = type_name_str.find(to_erase); iter != std::string::npos;
@@ -1375,7 +1377,8 @@ bool ValueObject::DumpPrintableRepresentation(
             type_name_str.erase(iter, to_erase.size());
           }
         }
-
+        // CR sspies: We print types where LLDB does not printing them usually.
+        // Perhaps we should only print the value, not the type?
         if (!CanProvideValue()) {
           strm.Printf("<unavailable> : %s", type_name_str.c_str());
           // strm.Printf("%s @ %s", GetTypeName().AsCString(),

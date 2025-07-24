@@ -328,7 +328,7 @@ static const llvm::fltSemantics &GetFloatSemantics(const TargetSP &target_sp,
   }
   // No target, just make a reasonable guess
   switch(byte_size) {
-  case 2:
+    case 2:
       return llvm::APFloat::IEEEhalf();
     case 4:
       return llvm::APFloat::IEEEsingle();

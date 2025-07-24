@@ -544,7 +544,9 @@ void TypePrinter::printIncompleteArrayBefore(const IncompleteArrayType *T,
 
 void TypePrinter::printIncompleteArrayAfter(const IncompleteArrayType *T,
                                             raw_ostream &OS) {
-  // XXX mshinwell: need to check the language, but how?
+  // CR sspies: If we stick with this, we should find a way to propagate the
+  // language information here. Once we add a type def with an explicit name
+  // for the top-level type, custom printing will no longer be needed.
   bool is_ocaml = true;
 
   if (is_ocaml) OS << " array";

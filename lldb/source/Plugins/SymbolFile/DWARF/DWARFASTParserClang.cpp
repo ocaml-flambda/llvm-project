@@ -2947,8 +2947,10 @@ void DWARFASTParserClang::ParseSingleMember(
   // FIXME: This check should verify that this is indeed an artificial member
   // we are supposed to ignore.
   // if (attrs.is_artificial)
-    // return; // CR tnowak: make a more permament solution than commenting out code.
-  if (!attrs.is_artificial)
+    // return;
+  // CR sspies: For some reason, a previous version added
+  // if (!attrs.is_artificial) only for the next if instruction. We should
+  // figure out how to get back to the right behavior for artificial fields.
 
   if (!member_clang_type.IsCompleteType())
     member_clang_type.GetCompleteType();
