@@ -720,7 +720,13 @@ def CC_X86_64_OCaml : CallingConv<[
   // Promote i8/i16/i32 arguments to i64.
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
 
-  // Pass in runtime registers first
+  // See https://github.com/oxcaml/oxcaml/blob/main/backend/amd64/proc.ml#L34
+  // for further details on the registers and their meaning. Runtime registers
+  // (registers containing pointers to data structures maintained by the
+  // runtime) must be preserved through the run of the program. To ensure LLVM
+  // doesn't mess with them, they are explicitly threaded through function calls
+  // and returns. These are R14 and R15. Note that R15 isn't listed since it is
+  // not implemented yet.
   CCIfType<[i64], CCAssignToReg<[R14, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
