@@ -244,6 +244,9 @@ namespace CallingConv {
     /// Calling convention for OCaml
     OCaml = 104,
 
+    /// Special case of the C calling convention for calling from OCaml
+    OCaml_C_Call = 105,
+
     /// The highest possible ID. Must be some 2^k - 1.
     MaxID = 1023
   };
