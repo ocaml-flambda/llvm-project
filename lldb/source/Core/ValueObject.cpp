@@ -515,6 +515,10 @@ bool ValueObject::MightHaveChildren() {
   bool has_children = false;
   const uint32_t type_info = GetTypeInfo();
   if (type_info) {
+    // FIXME: Previous versions of this code have disabled children for pointers
+    // and references. This did not seem to have any effect. If this becomes
+    // necessary again, information about OCaml can be propagated here via the
+    // the type info, to which we can add `eTypeIsOCaml`.
     if (type_info & (eTypeHasChildren | eTypeIsPointer | eTypeIsReference))
       has_children = true;
   } else {
@@ -1147,6 +1151,7 @@ bool ValueObject::HasSpecialPrintableRepresentation(
       return true;
 
     if (flags.Test(eTypeIsArray)) {
+      // XXX mshinwell: this should be disabled for OCaml
       if ((custom_format == eFormatBytes) ||
           (custom_format == eFormatBytesWithASCII))
         return true;
@@ -1362,12 +1367,28 @@ bool ValueObject::DumpPrintableRepresentation(
       if (val_obj_display == eValueObjectRepresentationStyleValue)
         str = GetSummaryAsCString();
       else if (val_obj_display == eValueObjectRepresentationStyleSummary) {
+        // XXX mshinwell: need to test for OCaml language here.
+        // CR sspies: We transform the type here. This becomes obsolete, once
+        // we equip the top-level types with a type alias.
+        std::string type_name_str(GetTypeName().AsCString());
+        for (std::string to_erase : {"(&) ", " &"}) {
+          for (auto iter = type_name_str.find(to_erase); iter != std::string::npos;
+              iter = type_name_str.find(to_erase)) {
+            type_name_str.erase(iter, to_erase.size());
+          }
+        }
+        // CR sspies: We print types where LLDB does not printing them usually.
+        // Perhaps we should only print the value, not the type?
         if (!CanProvideValue()) {
-          strm.Printf("%s @ %s", GetTypeName().AsCString(),
-                      GetLocationAsCString());
+          strm.Printf("<unavailable> : %s", type_name_str.c_str());
+          // strm.Printf("%s @ %s", GetTypeName().AsCString(),
+          //           GetLocationAsCString());
           str = strm.GetString();
-        } else
-          str = GetValueAsCString();
+        } else {
+          strm.Printf("%s : %s", GetValueAsCString(), type_name_str.c_str());
+          str = strm.GetString();
+//          str = GetValueAsCString();
+        }
       }
     }
 

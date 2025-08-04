@@ -577,6 +577,9 @@ HANDLE_DW_AT(0x3a00, PGI_lbase, 0, PGI)
 HANDLE_DW_AT(0x3a01, PGI_soffset, 0, PGI)
 HANDLE_DW_AT(0x3a02, PGI_lstride, 0, PGI)
 
+// Ocaml specific.
+HANDLE_DW_AT(0x3106, offset_record_from_pointer, 4, DWARF)
+
 // Borland extensions.
 HANDLE_DW_AT(0x3b11, BORLAND_property_read, 0, BORLAND)
 HANDLE_DW_AT(0x3b12, BORLAND_property_write, 0, BORLAND)

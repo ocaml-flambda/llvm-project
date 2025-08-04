@@ -361,6 +361,10 @@ public:
 
   virtual lldb::ValueType GetValueType() const = 0;
 
+  // XXX mshinwell: why don't any of the following three functions get
+  // called for displaying the type names in parameter lists and
+  // "frame var"?
+
   // Subclasses can implement the functions below.
   virtual ConstString GetTypeName() { return GetCompilerType().GetTypeName(); }
 

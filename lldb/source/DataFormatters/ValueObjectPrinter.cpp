@@ -257,6 +257,8 @@ void ValueObjectPrinter::PrintDecl() {
           type_name_str.erase(iter, 2);
         }
       }
+      // FIXME: Previous versions of this code removed ampersands here. But we
+      // probably do not need to do that.
       typeName << type_name_str.c_str();
     }
   }
@@ -672,6 +674,7 @@ void ValueObjectPrinter::PrintChildren(
     bool any_children_printed = false;
 
     for (size_t idx = 0; idx < num_children; ++idx) {
+      // mshinwell: maybe we could use synthetic children for array printing?
       if (ValueObjectSP child_sp = GenerateChild(synth_m_valobj, idx)) {
         if (!any_children_printed) {
           PrintChildrenPreamble();
@@ -685,15 +688,24 @@ void ValueObjectPrinter::PrintChildren(
       PrintChildrenPostamble(print_dotdotdot);
     else {
       if (ShouldPrintEmptyBrackets(value_printed, summary_printed)) {
+        // CR sspies: Is this still relevant? We do or will introduce lots of
+        // type aliases with the names, so getting the printing from the DWARF
+        // right should not be important anymore.
+        /* XXX don't want {} after arrays
         if (ShouldPrintValueObject())
           m_stream->PutCString(" {}\n");
         else
+        */
           m_stream->EOL();
       } else
         m_stream->EOL();
     }
   } else if (ShouldPrintEmptyBrackets(value_printed, summary_printed)) {
     // Aggregate, no children...
+    m_stream->PutCString("\n");
+// XXX mshinwell
+// CR sspies: Same here.
+/*
     if (ShouldPrintValueObject()) {
       // if it has a synthetic value, then don't print {}, the synthetic
       // children are probably only being used to vend a value
@@ -703,6 +715,7 @@ void ValueObjectPrinter::PrintChildren(
       else
         m_stream->PutCString(" {}\n");
     }
+*/
   } else {
     if (ShouldPrintValueObject())
       m_stream->EOL();
@@ -760,6 +773,7 @@ void ValueObjectPrinter::PrintChildrenIfNeeded(bool value_printed,
 
   DumpValueObjectOptions::PointerDepth curr_ptr_depth = m_ptr_depth;
   const bool print_children =
+      m_valobj->MightHaveChildren() &&
       ShouldPrintChildren(is_failed_description, curr_ptr_depth);
   const bool print_oneline =
       (curr_ptr_depth.CanAllowExpansion() || m_options.m_show_types ||

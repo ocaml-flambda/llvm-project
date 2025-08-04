@@ -246,6 +246,13 @@ private:
                     const lldb_private::CompilerType &class_clang_type,
                     lldb::AccessType default_accessibility,
                     lldb_private::ClangASTImporter::LayoutInfo &layout_info,
+                    FieldInfo &last_field_info, uint64_t variant_discr_value = UINT64_MAX);
+
+  void
+  ParseVariantPart(const DWARFDIE &die, const DWARFDIE &parent_die,
+                    const lldb_private::CompilerType &class_clang_type,
+                    lldb::AccessType default_accessibility,
+                    lldb_private::ClangASTImporter::LayoutInfo &layout_info,
                     FieldInfo &last_field_info);
 
   bool CompleteRecordType(const DWARFDIE &die, lldb_private::Type *type,
@@ -325,6 +332,7 @@ struct ParsedDWARFTypeAttributes {
       clang::RQ_None; ///< Indicates ref-qualifier of
                       ///< C++ member function if present.
                       ///< Is RQ_None otherwise.
+  int64_t offset_record_from_pointer = 0;
 };
 
 #endif // LLDB_SOURCE_PLUGINS_SYMBOLFILE_DWARF_DWARFASTPARSERCLANG_H

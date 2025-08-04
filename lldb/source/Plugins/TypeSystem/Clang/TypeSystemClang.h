@@ -123,7 +123,8 @@ public:
   ///               certain characteristics of the ASTContext and its types
   ///               (e.g., whether certain primitive types exist or what their
   ///               signedness is).
-  explicit TypeSystemClang(llvm::StringRef name, llvm::Triple triple);
+  explicit TypeSystemClang(llvm::StringRef name, llvm::Triple triple,
+                           lldb::LanguageType language = lldb::eLanguageTypeUnknown);
 
   /// Constructs a TypeSystemClang that uses an existing ASTContext internally.
   /// Useful when having an existing ASTContext created by Clang.
@@ -131,7 +132,8 @@ public:
   /// \param name The name for the TypeSystemClang (for logging purposes)
   /// \param existing_ctxt An existing ASTContext.
   explicit TypeSystemClang(llvm::StringRef name,
-                           clang::ASTContext &existing_ctxt);
+                           clang::ASTContext &existing_ctxt,
+                           lldb::LanguageType language = lldb::eLanguageTypeUnknown);
 
   ~TypeSystemClang() override;
 
@@ -157,6 +159,11 @@ public:
   /// Returns the display name of this TypeSystemClang that indicates what
   /// purpose it serves in LLDB. Used for example in logs.
   llvm::StringRef getDisplayName() const { return m_display_name; }
+
+  // Returns the language for which the type system is currently used.
+  lldb::LanguageType getLanguage() const { return m_language; }
+
+  bool isLanguageOCaml() const { return m_language == lldb::eLanguageTypeOCaml; }
 
   /// Returns the clang::ASTContext instance managed by this TypeSystemClang.
   clang::ASTContext &getASTContext();
@@ -855,7 +862,9 @@ public:
                                                 llvm::StringRef name,
                                                 const CompilerType &field_type,
                                                 lldb::AccessType access,
-                                                uint32_t bitfield_bit_size);
+                                                uint32_t bitfield_bit_size,
+                                                uint64_t variant_discr_value = UINT64_MAX,
+                                                bool is_artificial = false);
 
   static void BuildIndirectFields(const CompilerType &type);
 
@@ -1108,6 +1117,9 @@ private:
   /// AST for debug information, an expression, some other utility ClangAST).
   /// Useful for logging and debugging.
   std::string m_display_name;
+
+  /// The language type that this type system was created for.
+  lldb::LanguageType m_language = lldb::eLanguageTypeUnknown;
 
   typedef llvm::DenseMap<const clang::Decl *, ClangASTMetadata> DeclMetadataMap;
   /// Maps Decls to their associated ClangASTMetadata.
