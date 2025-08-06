@@ -1,0 +1,68 @@
+name: Test LLVM Release Binary
+
+on:
+  push:
+    branches:
+      - setup-release-action
+
+env:
+  BRANCH_NAME: setup-release-action
+  RELEASE_TAG: test-release-v7
+
+jobs:
+  test-llvm-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download LLVM release binary
+      run: |
+        echo "Downloading LLVM release binary..."
+        wget -O llvm-release.tar.gz https://github.com/ocaml-flambda/llvm-project/releases/download/${{ env.RELEASE_TAG }}/llvm-linux-x86_64-${{ env.BRANCH_NAME }}.tar.gz
+        
+    - name: Extract LLVM binary
+      run: |
+        echo "Extracting LLVM binary..."
+        mkdir -p llvm-${{ env.BRANCH_NAME }}
+        tar -xzf llvm-release.tar.gz -C llvm-${{ env.BRANCH_NAME }}
+        
+    - name: List extracted contents
+      run: |
+        echo "Contents of extracted LLVM:"
+        ls -la llvm-${{ env.BRANCH_NAME }}/
+        if [ -d "llvm-${{ env.BRANCH_NAME }}/bin" ]; then
+          echo "Contents of bin directory:"
+          ls -la llvm-${{ env.BRANCH_NAME }}/bin/
+        fi
+        
+    - name: Test clang version
+      run: |
+        echo "Testing clang --version..."
+        if [ -f "llvm-${{ env.BRANCH_NAME }}/bin/clang" ]; then
+          ./llvm-${{ env.BRANCH_NAME }}/bin/clang --version
+          echo "clang is available and working!"
+        else
+          echo "clang not found at llvm-${{ env.BRANCH_NAME }}/bin/clang"
+          exit 1
+        fi
+        
+    - name: Additional clang tests
+      run: |
+        echo "Running additional clang tests..."
+        
+        # Test basic compilation
+        echo 'int main() { return 0; }' > test.c
+        ./llvm-${{ env.BRANCH_NAME }}/bin/clang test.c -o test
+        ./test
+        echo "Basic C compilation works!"
+        
+        # Test C++ compilation if clang++ is available
+        if [ -f "llvm-${{ env.BRANCH_NAME }}/bin/clang++" ]; then
+          echo 'int main() { return 0; }' > test.cpp
+          ./llvm-${{ env.BRANCH_NAME }}/bin/clang++ test.cpp -o test-cpp
+          ./test-cpp
+          echo "Basic C++ compilation works!"
+        else
+          echo "clang++ not found"
+        fi
