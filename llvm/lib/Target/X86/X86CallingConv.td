@@ -735,6 +735,15 @@ def CC_X86_64_OCaml : CallingConv<[
   ]>>
 ]>;
 
+def CC_X86_64_OCaml_C_Call : CallingConv<[
+  // OCaml wraps C calls with another function that transfers stack arguments.
+  // RAX contains the function address, and R12 contains the size of the stack arguments.
+  CCIfType<[i64], CCAssignToReg<[RAX, R12]>>,
+
+  // Follow C convention normally otherwise
+  CCDelegateTo<CC_X86_64_C>
+]>;
+
 def CC_X86_64_GHC : CallingConv<[
   // Promote i8/i16/i32 arguments to i64.
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
@@ -1138,6 +1147,7 @@ def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::X86_RegCall", CCDelegateTo<CC_X86_SysV64_RegCall>>,
   CCIfCC<"CallingConv::X86_INTR", CCCustom<"CC_X86_Intr">>,
   CCIfCC<"CallingConv::OCaml", CCDelegateTo<CC_X86_64_OCaml>>,
+  CCIfCC<"CallingConv::OCaml_C_Call", CCDelegateTo<CC_X86_64_OCaml_C_Call>>,
 
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<CC_X86_Win64_C>>,
