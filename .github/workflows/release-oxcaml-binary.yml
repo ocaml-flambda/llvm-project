@@ -67,12 +67,12 @@ jobs:
     - name: Package binaries
       run: |
         cd install
-        tar -czf ../${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz .
+        tar -czf ../${{ github.event.release.tag_name }}-${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz .
 
     - name: Upload to release using GitHub CLI
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         gh release upload ${{ github.event.release.tag_name }} \
-          ${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz \
+          ${{ github.event.release.tag_name }}-${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz \
           --clobber
