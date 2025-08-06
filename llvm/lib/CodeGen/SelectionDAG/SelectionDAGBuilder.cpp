@@ -6287,6 +6287,20 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     DAG.setRoot(DAG.getNode(ISD::EH_SJLJ_SETUP_DISPATCH, sdl, MVT::Other,
                             getRoot()));
     return;
+  case Intrinsic::eh_ocaml_try: {
+    // Always returns 0. To be used with the "returns twice" attribute.
+    // Acts as a black box value to use to branch either to the try block or
+    // handler to give an idea of how control flow would look like to LLVM.
+    // (It would be nice to mark the attribute directly in LLVM, but putting
+    // it in the IR manually suffices for now.)
+    setValue(&I, DAG.getConstant(0, sdl, MVT::i32));
+    return;
+  }
+  case Intrinsic::eh_ocaml_touch: {
+    // A no-op that makes sure its alloca'd pointer argument doesn't get
+    // lowered to a temporary and stays on the stack.
+    return;
+  }
   case Intrinsic::masked_gather:
     visitMaskedGather(I);
     return;
