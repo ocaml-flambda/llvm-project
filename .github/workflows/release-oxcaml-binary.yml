@@ -1,0 +1,78 @@
+name: Build OxCaml LLVM Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            artifact_name: llvm-linux-x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            artifact_name: llvm-linux-aarch64
+          # - os: macos-latest
+          #   arch: arm64
+          #   artifact_name: llvm-macos-arm64
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get branch name from release
+      id: branch
+      run: |
+        BRANCH="${{ github.event.release.target_commitish }}"
+        if [[ -z "$BRANCH" ]]; then
+          echo "Cannot determine the name of the release branch"
+          exit 1
+        fi
+        echo "name=${BRANCH}" >> $GITHUB_OUTPUT
+        echo "Building from branch: ${BRANCH}"
+
+    - name: Install dependencies (Ubuntu)
+      if: startsWith(matrix.os, 'ubuntu')
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build python3 build-essential clang
+
+    - name: Install dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install cmake ninja python3
+
+    - name: Build LLVM
+      env:
+        CC: clang
+        CXX: clang++
+      run: |
+        mkdir build
+        cd build
+        cmake -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DLLVM_ENABLE_PROJECTS="clang;lld;lldb;mlir" \
+              -DLLVM_ENABLE_RUNTIMES="compiler-rt;libcxx;libcxxabi;libunwind" \
+              -DCMAKE_INSTALL_PREFIX=../install \
+              -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+              ../llvm
+        ninja install
+
+    - name: Package binaries
+      run: |
+        cd install
+        tar -czf ../${{ github.event.release.tag_name }}-${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz .
+
+    - name: Upload to release using GitHub CLI
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release upload ${{ github.event.release.tag_name }} \
+          ${{ github.event.release.tag_name }}-${{ matrix.artifact_name }}-${{ steps.branch.outputs.name }}.tar.gz \
+          --clobber
