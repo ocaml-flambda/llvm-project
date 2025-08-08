@@ -3604,8 +3604,10 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
 
   // - The caller and callee prototypes must match.  Pointer types of
   //   parameters or return types may differ in pointee type, but not
-  //   address space.
-  if (!CI.getCalledFunction() || !CI.getCalledFunction()->isIntrinsic()) {
+  //   address space. Note that this is not applicable for OCaml functions,
+  //   since their arguments will not be passed from the stack.
+  if ((!CI.getCalledFunction() || !CI.getCalledFunction()->isIntrinsic()) &&
+      CI.getCallingConv() != CallingConv::OCaml) {
     Check(CallerTy->getNumParams() == CalleeTy->getNumParams(),
           "cannot guarantee tail call due to mismatched parameter counts", &CI);
     for (unsigned I = 0, E = CallerTy->getNumParams(); I != E; ++I) {
