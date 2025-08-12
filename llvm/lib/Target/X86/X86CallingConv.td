@@ -445,7 +445,7 @@ def RetCC_X86_64_OCaml : CallingConv<[
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
 
   // Every function preserves the necessary function arguments
-  CCIfType<[i64], CCAssignToReg<[R14, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
+  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
     XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
@@ -725,9 +725,8 @@ def CC_X86_64_OCaml : CallingConv<[
   // (registers containing pointers to data structures maintained by the
   // runtime) must be preserved through the run of the program. To ensure LLVM
   // doesn't mess with them, they are explicitly threaded through function calls
-  // and returns. These are R14 and R15. Note that R15 isn't listed since it is
-  // not implemented yet.
-  CCIfType<[i64], CCAssignToReg<[R14, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
+  // and returns. These are R14 and R15.
+  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
     XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
