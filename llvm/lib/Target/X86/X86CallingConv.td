@@ -453,6 +453,11 @@ def RetCC_X86_64_OCaml : CallingConv<[
   ]>>
 ]>;
 
+def RetCC_X86_64_OCaml_C_Call : CallingConv<[
+  CCIfType<[i64], CCAssignToReg<[R14, R15]>>,
+
+  CCDelegateTo<RetCC_X86_64_C>
+]>;
 
 defm X86_32_RegCall :
 	 X86_RegCall_base<RC_X86_32_RegCall>;
@@ -509,6 +514,7 @@ def RetCC_X86_64 : CallingConv<[
 
   // Handle OCaml calls
   CCIfCC<"CallingConv::OCaml", CCDelegateTo<RetCC_X86_64_OCaml>>,
+  CCIfCC<"CallingConv::OCaml_C_Call", CCDelegateTo<RetCC_X86_64_OCaml_C_Call>>,
 
   // Otherwise, drop to normal X86-64 CC
   CCDelegateTo<RetCC_X86_64_C>
@@ -737,7 +743,7 @@ def CC_X86_64_OCaml : CallingConv<[
 def CC_X86_64_OCaml_C_Call : CallingConv<[
   // OCaml wraps C calls with another function that transfers stack arguments.
   // RAX contains the function address, and R12 contains the size of the stack arguments.
-  CCIfType<[i64], CCAssignToReg<[RAX, R12]>>,
+  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, R12]>>,
 
   // Follow C convention normally otherwise
   CCDelegateTo<CC_X86_64_C>
@@ -1171,6 +1177,9 @@ def CSR_NoRegs : CalleeSavedRegs<(add)>;
 
 def CSR_32 : CalleeSavedRegs<(add ESI, EDI, EBX, EBP)>;
 def CSR_64 : CalleeSavedRegs<(add RBX, R12, R13, R14, R15, RBP)>;
+
+// R14 and R15 are used as return registers, so they aren't callee saved.
+def CSR_64_OCaml_C_Call : CalleeSavedRegs<(add RBX, R12, R13, RBP)>;
 
 def CSR_64_SwiftError : CalleeSavedRegs<(sub CSR_64, R12)>;
 def CSR_64_SwiftTail : CalleeSavedRegs<(sub CSR_64, R13, R14)>;
