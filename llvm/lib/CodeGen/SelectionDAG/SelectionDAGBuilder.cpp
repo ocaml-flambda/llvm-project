@@ -6293,12 +6293,10 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     // handler to give an idea of how control flow would look like to LLVM.
     // (It would be nice to mark the attribute directly in LLVM, but putting
     // it in the IR manually suffices for now.)
+    //
+    // It would also be nice to make this follow the OCaml calling conventions
+    // directly inside LLVM.
     setValue(&I, DAG.getConstant(0, sdl, MVT::i32));
-    return;
-  }
-  case Intrinsic::eh_ocaml_touch: {
-    // A no-op that makes sure its alloca'd pointer argument doesn't get
-    // lowered to a temporary and stays on the stack.
     return;
   }
   case Intrinsic::masked_gather:
