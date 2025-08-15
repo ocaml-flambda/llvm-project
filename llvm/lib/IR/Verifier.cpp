@@ -3603,6 +3603,9 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
     return;
   }
 
+  // - The caller and callee prototypes must match.  Pointer types of
+  //   parameters or return types may differ in pointee type, but not
+  //   address space.
   if (!CI.getCalledFunction() || !CI.getCalledFunction()->isIntrinsic()) {
     Check(CallerTy->getNumParams() == CalleeTy->getNumParams(),
           "cannot guarantee tail call due to mismatched parameter counts", &CI);
