@@ -444,7 +444,8 @@ def RetCC_X86_64_OCaml : CallingConv<[
   // Promote all types to i64
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
 
-  // Every function preserves the necessary function arguments
+  // Runtime registers (R14, R15) are threaded through function calls
+  // See the argument calling conventions for OCaml for more details
   CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
