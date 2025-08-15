@@ -3580,7 +3580,8 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
   AttributeList CallerAttrs = F->getAttributes();
   AttributeList CalleeAttrs = CI.getAttributes();
   if (CI.getCallingConv() == CallingConv::SwiftTail ||
-      CI.getCallingConv() == CallingConv::Tail) {
+      CI.getCallingConv() == CallingConv::Tail ||
+      CI.getCallingConv() == CallingConv::OCaml) {
     StringRef CCName =
         CI.getCallingConv() == CallingConv::Tail ? "tailcc" : "swifttailcc";
 
@@ -3602,12 +3603,7 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
     return;
   }
 
-  // - The caller and callee prototypes must match.  Pointer types of
-  //   parameters or return types may differ in pointee type, but not
-  //   address space. Note that this is not applicable for OCaml functions,
-  //   since their arguments will not be passed from the stack.
-  if ((!CI.getCalledFunction() || !CI.getCalledFunction()->isIntrinsic()) &&
-      CI.getCallingConv() != CallingConv::OCaml) {
+  if (!CI.getCalledFunction() || !CI.getCalledFunction()->isIntrinsic()) {
     Check(CallerTy->getNumParams() == CalleeTy->getNumParams(),
           "cannot guarantee tail call due to mismatched parameter counts", &CI);
     for (unsigned I = 0, E = CallerTy->getNumParams(); I != E; ++I) {
