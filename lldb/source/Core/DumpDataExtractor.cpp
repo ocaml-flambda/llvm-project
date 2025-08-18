@@ -438,7 +438,9 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
 
   if ((value & 0x1) == 1) {
     /* Tagged immediate */
-    s->Printf("%" PRId64, value >> 1);
+    // Convert to signed int64_t to handle negative values correctly
+    int64_t signed_value = static_cast<int64_t>(value);
+    s->Printf("%" PRId64, signed_value >> 1);
   } else if (pointers_seen.contains(value)) {
     s->Printf("<cyclic value>@");
   } else {
