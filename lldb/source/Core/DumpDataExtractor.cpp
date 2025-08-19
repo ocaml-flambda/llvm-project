@@ -433,9 +433,17 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
   else
     apfloat.toPossiblyShortString(sv);
 
-  s->AsRawOstream() << prefix;
-  s->AsRawOstream() << sv;
   // OCaml Specific:
+  // Handle negative sign placement for OCaml format
+  if (sv.size() > 0 && sv[0] == '-') {
+    s->AsRawOstream() << "-";
+    s->AsRawOstream() << prefix;
+    s->AsRawOstream() << llvm::StringRef(sv.data() + 1, sv.size() - 1);
+  } else {
+    s->AsRawOstream() << prefix;
+    s->AsRawOstream() << sv;
+  }
+
   // Following OCaml conventions, print the trailing ".0" to
   // identify that the integer is in fact a float, but don't
   // print any trailing zeros beyond that.
@@ -963,11 +971,26 @@ lldb::offset_t lldb_private::DumpDataExtractor(
     case eFormatEnum: // Print enum value as a signed integer when we don't get
                       // the enum type
     case eFormatDecimal:
-      if (item_byte_size <= 8)
-        s->Printf("%" PRId64,
-                  DE.GetMaxS64Bitfield(&offset, item_byte_size, item_bit_size,
-                                       item_bit_offset));
-      else {
+      if (item_byte_size <= 8) {
+        int64_t value = DE.GetMaxS64Bitfield(&offset, item_byte_size, item_bit_size,
+                                             item_bit_offset);
+        // CR sspies: This is special cases for OCaml values. Consider wrapping
+        // it in a guard.
+        // Format as unboxed OCaml integer
+        std::string suffix = "";
+        if (item_byte_size == 4) suffix = "l";
+        else if (item_byte_size == 8) suffix = "L";
+        else if (item_byte_size == 2) suffix = ""; // int16 - no specific suffix
+        else if (item_byte_size == 1) suffix = ""; // int8 - no specific suffix
+        // Add "n" suffix for nativeint when it's pointer-sized (could be 4 or 8 bytes)
+
+
+        if (value < 0) {
+          s->Printf("-#%" PRId64 "%s", -value, suffix.c_str());
+        } else {
+          s->Printf("#%" PRId64 "%s", value, suffix.c_str());
+        }
+      } else {
         const bool is_signed = true;
         const unsigned radix = 10;
         offset = DumpAPInt(s, DE, offset, item_byte_size, is_signed, radix);
