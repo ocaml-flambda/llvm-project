@@ -725,7 +725,7 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                     if (int_size == 32)
                       s->Printf("%ld", (long)i);
                     else
-                      s->Printf("%lld", (int64_t)i);
+                      s->Printf("%" PRIi64, (int64_t)i);
                     s->Printf("%s", suffix.c_str());
                     print_default = false;
                   }
