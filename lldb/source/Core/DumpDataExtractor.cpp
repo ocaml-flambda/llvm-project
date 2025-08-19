@@ -436,10 +436,10 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
   s->AsRawOstream() << prefix;
   s->AsRawOstream() << sv;
   // OCaml Specific:
-  // Following OCaml conventions, print the trailing "." to
+  // Following OCaml conventions, print the trailing ".0" to
   // identify that the integer is in fact a float, but don't
-  // print any trailing zeros.
-  bool print_trailing_dot = true;
+  // print any trailing zeros beyond that.
+  bool print_trailing_dot_zero = true;
   for (char c : sv) {
     switch (c) {
       case '-':
@@ -456,14 +456,14 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
         continue;
       default:
         // if we find something that is not a number such as 'e' or 'E' or '.'
-        // there is no need to print the trailing ".".
-        print_trailing_dot = false;
+        // there is no need to print the trailing ".0".
+        print_trailing_dot_zero = false;
     }
     break; // we found something that is not a number, so we will not print
-           // the trailing "."
+           // the trailing ".0"
   }
-  if (print_trailing_dot){
-    s->AsRawOstream() << ".";
+  if (print_trailing_dot_zero){
+    s->AsRawOstream() << ".0";
   }
 
   s->AsRawOstream() << suffix;
