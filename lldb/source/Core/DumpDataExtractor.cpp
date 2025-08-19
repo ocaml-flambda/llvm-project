@@ -215,6 +215,53 @@ static void DumpCharacter(Stream &s, const char c) {
   s.Printf("\\x%2.2x", c);
 }
 
+/// Dump the character to a stream using OCaml string literal format.
+/// This matches OCaml's unsafe_escape function from bytes.ml in the standard library.
+static void DumpEscapedCharacterOCaml(Stream &s, const char c) {
+  switch (c) {
+  case '"':
+    s.Printf("\\\"");
+    return;
+  case '\\':
+    s.Printf("\\\\");
+    return;
+  case '\n':
+    s.Printf("\\n");
+    return;
+  case '\t':
+    s.Printf("\\t");
+    return;
+  case '\r':
+    s.Printf("\\r");
+    return;
+  case '\b':
+    s.Printf("\\b");
+    return;
+  default:
+    break;
+  }
+
+  // Handle printable ASCII range ' ' to '~' (32 to 126)
+  if (c >= ' ' && c <= '~') {
+    s.PutChar(c);
+    return;
+  }
+
+  // Use OCaml's 3-digit decimal escape format for non-printable characters
+  // This matches the logic in bytes.ml unsafe_escape function
+  unsigned char a = (unsigned char)c;
+  s.Printf("\\%03d", a);
+}
+
+/// Dump a C string as an OCaml string literal with proper escaping and quotes.
+static void DumpStringOCaml(Stream *s, const char *data, uint64_t string_length) {
+  s->Printf("\"");
+  for (uint64_t i = 0; i < string_length; ++i) {
+    DumpEscapedCharacterOCaml(*s, data[i]);
+  }
+  s->Printf("\"");
+}
+
 /// Dump a floating point type.
 template <typename FloatT>
 void DumpFloatingPoint(std::ostringstream &ss, FloatT f) {
@@ -574,19 +621,8 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
               if (error.Fail() || bytes_read < string_length) {
                 s->Printf("<could not read string>@");
               } else {
-                const char *c_str = (const char *)&str.front();
-                if (strlen(c_str) == string_length) {
-                  /* String does not contain NUL characters */
-                  s->Printf("\"%s\"", c_str);
-                } else {
-                  s->Printf("\"");
-                  DataExtractor cstr_data(&str.front(), str.size(),
-                                          process->GetByteOrder(), 8);
-                  DumpDataExtractor(cstr_data, s, 0, lldb::eFormatChar, 1,
-                                    string_length, UINT32_MAX,
-                                    LLDB_INVALID_ADDRESS, 0, 0);
-                  s->Printf("\"");
-                }
+                const char *data = (const char *)&str.front();
+                DumpStringOCaml(s, data, string_length);
                 print_default = false;
               }
             }
