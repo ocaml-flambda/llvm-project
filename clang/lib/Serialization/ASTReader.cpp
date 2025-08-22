@@ -6903,6 +6903,10 @@ void TypeLocReader::VisitDependentBitIntTypeLoc(
   TL.setNameLoc(readSourceLocation());
 }
 
+void TypeLocReader::VisitOCamlRawTypeLoc(clang::OCamlRawTypeLoc TL) {
+  TL.setNameLoc(readSourceLocation());
+}
+
 void ASTRecordReader::readTypeLoc(TypeLoc TL, LocSeq *ParentSeq) {
   LocSeq::State Seq(ParentSeq);
   TypeLocReader TLR(*this, Seq);

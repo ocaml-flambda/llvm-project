@@ -3409,6 +3409,12 @@ void MicrosoftCXXNameMangler::mangleType(const DependentBitIntType *T,
   Diags.Report(Range.getBegin(), DiagID) << Range;
 }
 
+void MicrosoftCXXNameMangler::mangleType(const OCamlRawType *T,
+                                         Qualifiers, SourceRange Range) {
+  // This should never be called in practice for lldb usage
+  llvm_unreachable("OCamlRaw types should not be mangled");
+}
+
 // <this-adjustment> ::= <no-adjustment> | <static-adjustment> |
 //                       <virtual-adjustment>
 // <no-adjustment>      ::= A # private near

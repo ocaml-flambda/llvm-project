@@ -424,6 +424,19 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
 }
 
 
+static offset_t FormatOCamlRaw(const DataExtractor &DE, Stream *s,
+                               offset_t start_offset, size_t item_byte_size) {
+  offset_t offset = start_offset;
+
+  for (size_t i = 0; i < item_byte_size; ++i) {
+    if (i > 0)
+      s->PutChar(' ');
+    s->Printf("%02x", DE.GetU8(&offset));
+  }
+
+  return offset;
+}
+
 static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                                  offset_t start_offset, uint64_t base_addr,
                                  ExecutionContextScope *exe_ctx_scope,
@@ -1294,6 +1307,11 @@ lldb::offset_t lldb_private::DumpDataExtractor(
       llvm::DenseSet<lldb::addr_t> pointers_seen;
       offset = FormatOCamlValue(DE, s, offset, base_addr, exe_scope,
                                 pointers_seen, 0);
+      break;
+    }
+
+    case eFormatOCamlRaw: {
+      offset = FormatOCamlRaw(DE, s, offset, item_byte_size);
       break;
     }
     }

@@ -2655,6 +2655,10 @@ class DependentBitIntTypeLoc final
     : public InheritingConcreteTypeLoc<TypeSpecTypeLoc, DependentBitIntTypeLoc,
                                        DependentBitIntType> {};
 
+class OCamlRawTypeLoc final
+    : public InheritingConcreteTypeLoc<TypeSpecTypeLoc, OCamlRawTypeLoc,
+                                       OCamlRawType> {};
+
 class ObjCProtocolLoc {
   ObjCProtocolDecl *Protocol = nullptr;
   SourceLocation Loc = SourceLocation();

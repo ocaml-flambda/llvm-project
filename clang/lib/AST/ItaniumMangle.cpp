@@ -4053,6 +4053,11 @@ void CXXNameMangler::mangleType(const DependentBitIntType *T) {
   Out << "_";
 }
 
+void CXXNameMangler::mangleType(const OCamlRawType *T) {
+  // This should never be called in practice for lldb usage
+  llvm_unreachable("OCamlRaw types should not be mangled");
+}
+
 void CXXNameMangler::mangleIntegerLiteral(QualType T,
                                           const llvm::APSInt &Value) {
   //  <expr-primary> ::= L <type> <value number> E # integer literal

@@ -246,6 +246,7 @@ bool TypePrinter::canPrefixQualifiers(const Type *T,
     case Type::Pipe:
     case Type::BitInt:
     case Type::DependentBitInt:
+    case Type::OCamlRaw:
     case Type::BTFTagAttributed:
       CanPrefixQualifiers = true;
       break;
@@ -1255,6 +1256,13 @@ void TypePrinter::printDependentBitIntBefore(const DependentBitIntType *T,
 
 void TypePrinter::printDependentBitIntAfter(const DependentBitIntType *T,
                                             raw_ostream &OS) {}
+
+void TypePrinter::printOCamlRawBefore(const OCamlRawType *T, raw_ostream &OS) {
+  OS << "ocaml_raw<" << T->getNumBits() << ">";
+  spaceBeforePlaceHolder(OS);
+}
+
+void TypePrinter::printOCamlRawAfter(const OCamlRawType *T, raw_ostream &OS) {}
 
 /// Appends the given scope to the end of a string.
 void TypePrinter::AppendScope(DeclContext *DC, raw_ostream &OS,

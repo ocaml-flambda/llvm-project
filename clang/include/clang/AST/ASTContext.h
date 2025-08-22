@@ -239,6 +239,7 @@ class ASTContext : public RefCountedBase<ASTContext> {
   mutable llvm::FoldingSet<PipeType> PipeTypes;
   mutable llvm::FoldingSet<BitIntType> BitIntTypes;
   mutable llvm::FoldingSet<DependentBitIntType> DependentBitIntTypes;
+  mutable llvm::FoldingSet<OCamlRawType> OCamlRawTypes;
   llvm::FoldingSet<BTFTagAttributedType> BTFTagAttributedTypes;
 
   mutable llvm::FoldingSet<QualifiedTemplateName> QualifiedTemplateNames;
@@ -1367,6 +1368,9 @@ public:
   /// Return a dependent bit-precise integer type with the specified signedness
   /// and bit count.
   QualType getDependentBitIntType(bool Unsigned, Expr *BitsExpr) const;
+
+  /// Return an OCaml raw data type with the specified bit count.
+  QualType getOCamlRawType(unsigned NumBits) const;
 
   /// Gets the struct used to keep track of the extended descriptor for
   /// pointer to blocks.
