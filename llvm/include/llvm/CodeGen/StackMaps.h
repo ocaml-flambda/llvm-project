@@ -318,15 +318,16 @@ public:
   };
 
   struct CallsiteInfo {
+    const MCSymbol *CSLabel = nullptr;
     const MCExpr *CSOffsetExpr = nullptr;
     uint64_t ID = 0;
     LocationVec Locations;
     LiveOutVec LiveOuts;
 
     CallsiteInfo() = default;
-    CallsiteInfo(const MCExpr *CSOffsetExpr, uint64_t ID,
+    CallsiteInfo(const MCSymbol *CSLabel, const MCExpr *CSOffsetExpr, uint64_t ID,
                  LocationVec &&Locations, LiveOutVec &&LiveOuts)
-        : CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
+        : CSLabel(CSLabel), CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
           LiveOuts(std::move(LiveOuts)) {}
   };
 
@@ -392,7 +393,7 @@ private:
   /// STACKMAP, and PATCHPOINT the label is expected to immediately *preceed*
   /// lowering of the MI to MCInsts.  For STATEPOINT, it expected to
   /// immediately *follow*.  It's not clear this difference was intentional,
-  /// but it exists today.  
+  /// but it exists today.
   void recordStackMapOpers(const MCSymbol &L,
                            const MachineInstr &MI, uint64_t ID,
                            MachineInstr::const_mop_iterator MOI,
@@ -410,6 +411,8 @@ private:
 
   /// Emit the callsite info for each stackmap/patchpoint intrinsic call.
   void emitCallsiteEntries(MCStreamer &OS);
+  /// Emit OCaml frametable using stackmap data.
+  void emitOCamlFrametable(MCStreamer &OS);
 
   void print(raw_ostream &OS);
   void debug() { print(dbgs()); }
