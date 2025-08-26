@@ -75,3 +75,4 @@ pythonenv*
 /lldb/docs/python_api/
 build/
 _install/
+.claude
