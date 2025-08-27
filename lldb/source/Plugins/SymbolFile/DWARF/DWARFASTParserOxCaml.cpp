@@ -11,7 +11,10 @@
 #include "DWARFDIE.h"
 #include "DWARFDebugInfoEntry.h"
 #include "DWARFDefines.h"
+#include "SymbolFileDWARF.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+
+#include "lldb/Symbol/Type.h"
 
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
 #include "lldb/Core/Module.h"
@@ -33,13 +36,52 @@ DWARFASTParserOxCaml::~DWARFASTParserOxCaml() = default;
 lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        const DWARFDIE &die,
                                                        bool *type_is_new_ptr) {
-  // For now, return nullptr - we'll implement type parsing incrementally
+  // Add debug output
+  fprintf(stderr, "OxCaml: ParseTypeFromDWARF called, tag=0x%x, name=%s\n", 
+          die.Tag(), die.GetName() ? die.GetName() : "<none>");
+  
+  // Handle DW_TAG_base_type for basic OCaml types
+  if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
+    fprintf(stderr, "OxCaml: Processing DW_TAG_base_type\n");
+    const char *name = die.GetName();
+    if (!name)
+      name = "ocaml_value";
+
+    // Get the SymbolFileDWARF
+    SymbolFileDWARF *dwarf = die.GetDWARF();
+    if (!dwarf)
+      return TypeSP();
+
+    // Create a CompilerType from our TypeSystem
+    CompilerType compiler_type = m_oxcaml_typesystem.GetTypeForFormatters(nullptr);
+
+    // Create the Type object using MakeType
+    fprintf(stderr, "OxCaml: Creating Type with name=%s\n", name);
+    TypeSP type_sp = dwarf->MakeType(
+        die.GetID(),
+        ConstString(name),
+        /*byte_size=*/ 8,  // OCaml values are 64-bit
+        /*context=*/ nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsUID,
+        nullptr,
+        compiler_type,
+        Type::ResolveState::Full
+    );
+
+    if (type_is_new_ptr)
+      *type_is_new_ptr = true;
+
+    return type_sp;
+  }
+
+  // For other tags, return nullptr for now
   if (type_is_new_ptr)
     *type_is_new_ptr = false;
   return TypeSP();
 }
 
-ConstString 
+ConstString
 DWARFASTParserOxCaml::ConstructDemangledNameFromDWARF(const DWARFDIE &die) {
   // For now, just return empty - OCaml names are typically not mangled
   // in the same way as C++
@@ -63,7 +105,7 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   DWARFExpressionList frame_base;
 
   llvm::DWARFAddressRangesVector unused_ranges;
-  
+
   if (!die.GetDIENamesAndRanges(name, mangled, unused_ranges, decl_file,
                                 decl_line, decl_column, call_file, call_line,
                                 call_column, &frame_base)) {
@@ -82,8 +124,8 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   // Note: Declaration info is available but not used in minimal implementation
 
   const user_id_t func_user_id = die.GetID();
-  
-  // Get the function's base address 
+
+  // Get the function's base address
   Address func_addr;
   if (!func_ranges.empty()) {
     func_addr = func_ranges[0].GetBaseAddress();
@@ -122,7 +164,7 @@ void DWARFASTParserOxCaml::EnsureAllDIEsInDeclContextHaveBeenParsed(
   // Not implemented yet
 }
 
-CompilerDeclContext 
+CompilerDeclContext
 DWARFASTParserOxCaml::GetDeclContextForUIDFromDWARF(const DWARFDIE &die) {
   // Not implemented yet - return invalid context
   return CompilerDeclContext();

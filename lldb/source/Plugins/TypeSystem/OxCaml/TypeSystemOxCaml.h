@@ -100,11 +100,11 @@ public:
   uint32_t GetPointerByteSize() override { return 8; }
 
   // Type names and info - essential methods
-  ConstString GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) override { return ConstString(); }
+  ConstString GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) override { return ConstString("ocaml_value"); }
   unsigned GetPtrAuthKey(lldb::opaque_compiler_type_t type) override { return 0; }
   unsigned GetPtrAuthDiscriminator(lldb::opaque_compiler_type_t type) override { return 0; }
   bool GetPtrAuthAddressDiversity(lldb::opaque_compiler_type_t type) override { return false; }
-  ConstString GetDisplayTypeName(lldb::opaque_compiler_type_t type) override { return ConstString(); }
+  ConstString GetDisplayTypeName(lldb::opaque_compiler_type_t type) override { return ConstString("ocaml_value"); }
   const llvm::fltSemantics &GetFloatTypeSemantics(size_t byte_size) override { return llvm::APFloat::IEEEdouble(); }
   lldb::BasicType GetBasicTypeEnumeration(lldb::opaque_compiler_type_t type) override { return lldb::eBasicTypeInvalid; }
   uint32_t GetTypeInfo(lldb::opaque_compiler_type_t type, CompilerType *pointee_or_element_clang_type) override { return 0; }

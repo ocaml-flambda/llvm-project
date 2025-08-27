@@ -23,11 +23,14 @@ LLDB_PLUGIN_DEFINE(TypeSystemOxCaml)
 
 char TypeSystemOxCaml::ID;
 
-TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {}
+TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {
+  fprintf(stderr, "OxCaml: TypeSystemOxCaml constructor called\n");
+}
 
 TypeSystemOxCaml::~TypeSystemOxCaml() = default;
 
 plugin::dwarf::DWARFASTParser *TypeSystemOxCaml::GetDWARFParser() {
+  fprintf(stderr, "OxCaml: GetDWARFParser called\n");
   if (!m_dwarf_parser)
     m_dwarf_parser = std::make_unique<DWARFASTParserOxCaml>(*this);
   return m_dwarf_parser.get();
@@ -35,6 +38,7 @@ plugin::dwarf::DWARFASTParser *TypeSystemOxCaml::GetDWARFParser() {
 
 lldb::TypeSystemSP TypeSystemOxCaml::CreateInstance(lldb::LanguageType language,
                                                     Module *module, Target *target) {
+  fprintf(stderr, "OxCaml: CreateInstance called for language=%d\n", language);
   if (language != eLanguageTypeOCaml)
     return TypeSystemSP();
 
@@ -74,6 +78,7 @@ size_t TypeSystemOxCaml::GetIndexOfChildMemberWithName(lldb::opaque_compiler_typ
 }
 
 CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
+  fprintf(stderr, "OxCaml: GetTypeForFormatters called with type=%p\n", type);
   return CompilerType(weak_from_this(), type);
 }
 
