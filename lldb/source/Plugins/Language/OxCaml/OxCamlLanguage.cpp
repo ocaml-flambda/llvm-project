@@ -53,21 +53,30 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
 
       auto formatter = [](ValueObject &valobj, Stream &stream,
                          const TypeSummaryOptions &options) -> bool {
-        // Get the actual value as unsigned 64-bit
-        auto value = valobj.GetValueAsUnsigned(0);
+        // Get the raw data directly
+        DataExtractor data;
+        Status error;
+        uint64_t data_size = valobj.GetData(data, error);
         
-        // Very simple formatter - just show immediate vs pointer
-        if (value & 1) {
-          // Immediate value - try to show as integer
-          int64_t int_val = ((int64_t)value) >> 1;
-          stream.Printf("%" PRId64, int_val);
-        } else {
-          // Pointer value
-          if (value == 0) {
-            stream.Printf("()"); // unit value
+        if (error.Success() && data_size >= 8) {
+          lldb::offset_t offset = 0;
+          uint64_t value = data.GetU64(&offset);
+          
+          // OCaml value interpretation
+          if (value & 1) {
+            // Immediate value - show as integer
+            int64_t int_val = ((int64_t)value) >> 1;
+            stream.Printf("%" PRId64, int_val);
           } else {
-            stream.Printf("<pointer: 0x%" PRIx64 ">", value);
+            // Pointer value
+            if (value == 0) {
+              stream.Printf("()"); // unit value
+            } else {
+              stream.Printf("<pointer: 0x%" PRIx64 ">", value);
+            }
           }
+        } else {
+          stream.Printf("<unavailable>");
         }
         return true;
       };
@@ -86,8 +95,8 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
 }
 
 void OxCamlLanguage::Initialize() {
-  PluginManager::RegisterPlugin(GetPluginNameStatic(), 
-                                "OxCaml Language", 
+  PluginManager::RegisterPlugin(GetPluginNameStatic(),
+                                "OxCaml Language",
                                 CreateInstance);
 }
 

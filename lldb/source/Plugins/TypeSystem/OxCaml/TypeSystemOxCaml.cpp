@@ -24,7 +24,6 @@ LLDB_PLUGIN_DEFINE(TypeSystemOxCaml)
 char TypeSystemOxCaml::ID;
 
 TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {
-  fprintf(stderr, "OxCaml: TypeSystemOxCaml constructor called\n");
   // Create our single type instance for ocaml_value
   m_ocaml_value_type = std::make_unique<OxCamlType>("ocaml_value", 8);
 }
@@ -32,7 +31,6 @@ TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {
 TypeSystemOxCaml::~TypeSystemOxCaml() = default;
 
 plugin::dwarf::DWARFASTParser *TypeSystemOxCaml::GetDWARFParser() {
-  fprintf(stderr, "OxCaml: GetDWARFParser called\n");
   if (!m_dwarf_parser)
     m_dwarf_parser = std::make_unique<DWARFASTParserOxCaml>(*this);
   return m_dwarf_parser.get();
@@ -40,7 +38,6 @@ plugin::dwarf::DWARFASTParser *TypeSystemOxCaml::GetDWARFParser() {
 
 lldb::TypeSystemSP TypeSystemOxCaml::CreateInstance(lldb::LanguageType language,
                                                     Module *module, Target *target) {
-  fprintf(stderr, "OxCaml: CreateInstance called for language=%d\n", language);
   if (language != eLanguageTypeOCaml)
     return TypeSystemSP();
 
@@ -97,7 +94,6 @@ size_t TypeSystemOxCaml::GetIndexOfChildMemberWithName(lldb::opaque_compiler_typ
 }
 
 CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
-  fprintf(stderr, "OxCaml: GetTypeForFormatters called with type=%p\n", type);
   // Use the provided type pointer directly
   return CompilerType(weak_from_this(), type);
 }
@@ -210,5 +206,6 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
 
 
 CompilerType TypeSystemOxCaml::GetFullyUnqualifiedType(lldb::opaque_compiler_type_t type) {
-  llvm_unreachable("GetFullyUnqualifiedType not implemented for OCaml");
+  // OCaml types don't have qualifiers like const/volatile, so return as-is
+  return CompilerType(weak_from_this(), type);
 }

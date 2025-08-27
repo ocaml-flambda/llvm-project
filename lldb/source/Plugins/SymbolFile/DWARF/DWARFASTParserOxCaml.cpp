@@ -36,13 +36,8 @@ DWARFASTParserOxCaml::~DWARFASTParserOxCaml() = default;
 lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        const DWARFDIE &die,
                                                        bool *type_is_new_ptr) {
-  // Add debug output
-  fprintf(stderr, "OxCaml: ParseTypeFromDWARF called, tag=0x%x, name=%s\n",
-          die.Tag(), die.GetName() ? die.GetName() : "<none>");
-
   // Handle DW_TAG_base_type for basic OCaml types
   if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
-    fprintf(stderr, "OxCaml: Processing DW_TAG_base_type\n");
     const char *name = die.GetName();
     if (!name)
       name = "ocaml_value";
@@ -54,11 +49,9 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
 
     // Get the type pointer from TypeSystem and use it
     void* type_ptr = m_oxcaml_typesystem.GetOxCamlValueType();
-    fprintf(stderr, "OxCaml: Got type_ptr=%p from GetOxCamlValueType\n", type_ptr);
     CompilerType compiler_type = m_oxcaml_typesystem.GetTypeForFormatters(type_ptr);
 
     // Create the Type object using MakeType
-    fprintf(stderr, "OxCaml: Creating Type with name=%s\n", name);
     TypeSP type_sp = dwarf->MakeType(
         die.GetID(),
         ConstString(name),
@@ -77,6 +70,62 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
     return type_sp;
   }
 
+  // Handle DW_TAG_typedef for OCaml type aliases (e.g., "int @ value")
+  if (die.Tag() == llvm::dwarf::DW_TAG_typedef) {
+    const char *typedef_name = die.GetName();
+    
+    // For anonymous typedefs (intermediate in typedef chain), 
+    // skip to the underlying type
+    if (!typedef_name) {
+      DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
+      if (!type_die) {
+        return TypeSP();
+      }
+      // Recursively resolve the underlying type
+      return ParseTypeFromDWARF(sc, type_die, type_is_new_ptr);
+    }
+    
+    // Get the underlying type that this typedef refers to
+    DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
+    if (!type_die) {
+      return TypeSP();
+    }
+    
+    // Get the SymbolFileDWARF
+    SymbolFileDWARF *dwarf = die.GetDWARF();
+    if (!dwarf)
+      return TypeSP();
+    
+    // Resolve the underlying type
+    Type *underlying_type = dwarf->ResolveTypeUID(type_die, true);
+    if (!underlying_type) {
+      return TypeSP();
+    }
+    
+    // Create a typedef Type that references the underlying type
+    // For OCaml, we want to preserve the typedef name (e.g., "int @ value")
+    // but still reference the base ocaml_value type
+    auto byte_size_or_error = underlying_type->GetByteSize(nullptr);
+    uint64_t byte_size = byte_size_or_error ? *byte_size_or_error : 8;
+    
+    TypeSP type_sp = dwarf->MakeType(
+        die.GetID(),
+        ConstString(typedef_name),
+        byte_size,
+        nullptr,  // context
+        type_die.GetID(),  // encoding_uid - reference to the underlying type
+        Type::eEncodingIsTypedefUID,
+        nullptr,  // declaration
+        underlying_type->GetForwardCompilerType(),  // Use the underlying type's CompilerType
+        Type::ResolveState::Full
+    );
+    
+    if (type_is_new_ptr)
+      *type_is_new_ptr = true;
+    
+    return type_sp;
+  }
+  
   // For other tags, return nullptr for now
   if (type_is_new_ptr)
     *type_is_new_ptr = false;
@@ -114,9 +163,6 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
     return nullptr;
   }
 
-  // Debug output for function names
-  fprintf(stderr, "OxCaml: ParseFunctionFromDWARF - name='%s', mangled='%s'\n",
-          name ? name : "<null>", mangled ? mangled : "<null>");
 
   // Create the function name
   // For OCaml, the linkage name is already human-readable (e.g., "Module.function")
@@ -126,13 +172,10 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
     // OCaml's linkage names are already human-readable, so just use SetValue
     // which will treat it as demangled since it doesn't look mangled
     func_name.SetValue(ConstString(mangled));
-    fprintf(stderr, "OxCaml: Using linkage name '%s' (symbol: '%s')\n", mangled, name ? name : "<none>");
   } else if (name && strlen(name) > 0) {
     // Only have the symbol name, use it
     func_name.SetValue(ConstString(name));
-    fprintf(stderr, "OxCaml: Using symbol name only: %s\n", name);
   } else {
-    fprintf(stderr, "OxCaml: No name found for function, returning nullptr\n");
     return nullptr; // Must have a name
   }
 
@@ -143,15 +186,12 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   // Safety check - SymbolFileDWARF should never pass empty ranges
   // If it does, we can't create a valid function
   if (func_ranges.empty()) {
-    fprintf(stderr, "OxCaml: Error - Function has no address ranges, cannot create function\n");
     return nullptr;
   }
 
   // Get the function's base address
   // Following Clang and Swift pattern - ranges should never be empty at this point
   Address func_addr = func_ranges[0].GetBaseAddress();
-  fprintf(stderr, "OxCaml: Function has %zu ranges, base address: 0x%llx\n",
-          func_ranges.size(), func_addr.GetFileAddress());
 
   // Create the Function object
   FunctionSP func_sp = std::make_shared<Function>(
@@ -171,9 +211,6 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
 
     // Add the function to the compile unit - crucial for proper integration!
     comp_unit.AddFunction(func_sp);
-
-    fprintf(stderr, "OxCaml: Successfully created and added Function object for %s\n",
-            func_name.GetName().GetCString());
   }
 
   return func_sp.get();
