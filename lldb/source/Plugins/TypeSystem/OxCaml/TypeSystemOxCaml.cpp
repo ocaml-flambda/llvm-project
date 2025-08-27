@@ -25,6 +25,8 @@ char TypeSystemOxCaml::ID;
 
 TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {
   fprintf(stderr, "OxCaml: TypeSystemOxCaml constructor called\n");
+  // Create our single type instance for ocaml_value
+  m_ocaml_value_type = std::make_unique<OxCamlType>("ocaml_value", 8);
 }
 
 TypeSystemOxCaml::~TypeSystemOxCaml() = default;
@@ -61,8 +63,25 @@ CompilerType TypeSystemOxCaml::GetTypeFromMangledTypename(ConstString mangled_ty
 
 
 
+ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
+  if (type) {
+    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
+    return ConstString(ocaml_type->name);
+  }
+  return ConstString("ocaml_value");  // fallback
+}
+
+ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t type) {
+  // For now, display name is the same as type name
+  return GetTypeName(type, false);
+}
+
 llvm::Expected<uint64_t> TypeSystemOxCaml::GetBitSize(lldb::opaque_compiler_type_t type, ExecutionContextScope *exe_scope) {
-  return 64; // Default OCaml value size
+  if (type) {
+    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
+    return ocaml_type->size * 8;  // Convert bytes to bits
+  }
+  return 64; // Default OCaml value size in bits
 }
 
 llvm::Expected<uint32_t> TypeSystemOxCaml::GetNumChildren(lldb::opaque_compiler_type_t type, bool omit_empty_base_classes, const ExecutionContext *exe_ctx) {
@@ -79,6 +98,7 @@ size_t TypeSystemOxCaml::GetIndexOfChildMemberWithName(lldb::opaque_compiler_typ
 
 CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
   fprintf(stderr, "OxCaml: GetTypeForFormatters called with type=%p\n", type);
+  // Use the provided type pointer directly
   return CompilerType(weak_from_this(), type);
 }
 
@@ -164,11 +184,17 @@ void TypeSystemOxCaml::dump(lldb::opaque_compiler_type_t type) const {
 
 
 void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, lldb::DescriptionLevel level) {
-  llvm_unreachable("DumpTypeDescription not implemented for OCaml");
+  // Nothing to dump for now
 }
 
 void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, Stream &s, lldb::DescriptionLevel level) {
-  llvm_unreachable("DumpTypeDescription not implemented for OCaml");
+  // Simple description for now
+  if (type) {
+    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
+    s.PutCString(ocaml_type->name);
+  } else {
+    s.PutCString("ocaml_value");
+  }
 }
 
 void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {

@@ -70,7 +70,10 @@ public:
   lldb::LanguageType DeclContextGetLanguage(void *opaque_decl_ctx) override { return lldb::eLanguageTypeOCaml; }
 
 #ifndef NDEBUG
-  bool Verify(lldb::opaque_compiler_type_t type) override { return false; }
+  bool Verify(lldb::opaque_compiler_type_t type) override { 
+    // For now, accept any non-null type as valid
+    return type != nullptr;
+  }
 #endif
 
   // Type test functions
@@ -100,11 +103,11 @@ public:
   uint32_t GetPointerByteSize() override { return 8; }
 
   // Type names and info - essential methods
-  ConstString GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) override { return ConstString("ocaml_value"); }
+  ConstString GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) override;
   unsigned GetPtrAuthKey(lldb::opaque_compiler_type_t type) override { return 0; }
   unsigned GetPtrAuthDiscriminator(lldb::opaque_compiler_type_t type) override { return 0; }
   bool GetPtrAuthAddressDiversity(lldb::opaque_compiler_type_t type) override { return false; }
-  ConstString GetDisplayTypeName(lldb::opaque_compiler_type_t type) override { return ConstString("ocaml_value"); }
+  ConstString GetDisplayTypeName(lldb::opaque_compiler_type_t type) override;
   const llvm::fltSemantics &GetFloatTypeSemantics(size_t byte_size) override { return llvm::APFloat::IEEEdouble(); }
   lldb::BasicType GetBasicTypeEnumeration(lldb::opaque_compiler_type_t type) override { return lldb::eBasicTypeInvalid; }
   uint32_t GetTypeInfo(lldb::opaque_compiler_type_t type, CompilerType *pointee_or_element_clang_type) override { return 0; }
@@ -174,9 +177,21 @@ public:
 
   CompilerType GetTypeForFormatters(void *type) override;
 
+  // Simple type representation
+  struct OxCamlType {
+    std::string name;
+    uint64_t size;
+    OxCamlType(const std::string& n, uint64_t s) : name(n), size(s) {}
+  };
+  
+  // Get the type pointer for ocaml_value
+  OxCamlType* GetOxCamlValueType() { return m_ocaml_value_type.get(); }
 
 private:
   std::unique_ptr<plugin::dwarf::DWARFASTParser> m_dwarf_parser;
+  
+  // Single instance for our basic ocaml_value type
+  std::unique_ptr<OxCamlType> m_ocaml_value_type;
 };
 
 } // namespace lldb_private

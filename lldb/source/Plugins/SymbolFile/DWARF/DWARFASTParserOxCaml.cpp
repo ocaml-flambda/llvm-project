@@ -52,8 +52,10 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
     if (!dwarf)
       return TypeSP();
 
-    // Create a CompilerType from our TypeSystem
-    CompilerType compiler_type = m_oxcaml_typesystem.GetTypeForFormatters(nullptr);
+    // Get the type pointer from TypeSystem and use it
+    void* type_ptr = m_oxcaml_typesystem.GetOxCamlValueType();
+    fprintf(stderr, "OxCaml: Got type_ptr=%p from GetOxCamlValueType\n", type_ptr);
+    CompilerType compiler_type = m_oxcaml_typesystem.GetTypeForFormatters(type_ptr);
 
     // Create the Type object using MakeType
     fprintf(stderr, "OxCaml: Creating Type with name=%s\n", name);

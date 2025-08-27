@@ -187,3 +187,5 @@ The OxCaml plugin will need to handle:
 - Rebuild language plugins after header changes: `ninja -C build LLDBLanguagePlugins`
 - Check plugin loading with LLDB's `plugin list` command
 - Use LLDB's logging for debugging: `log enable lldb types` or `log enable lldb expression`
+
+- DO NOT, under any circumstances, use raw integers such as 1 as pointers.

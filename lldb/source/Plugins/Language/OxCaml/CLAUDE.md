@@ -76,13 +76,16 @@ When LLDB loads an OCaml binary with debug information:
 - Plugin registration and initialization
 - OCaml source file recognition (`.ml`, `.mli`)
 - Basic DWARF parsing for `DW_TAG_base_type`
-- Type creation with "ocaml_value" name
-- Simple value formatter for immediate integers and pointers
+- Type creation with proper `OxCamlType` representation
+- Functional type pointer management through TypeSystem
+- Types display correctly as "ocaml_value" instead of "void"
+- Simple value formatter for immediate integers and pointers (registered, ready for variable inspection)
+- Basic typedef recognition (e.g., "int @ value")
 
 ### Known Limitations
-- GetTypeForFormatters returns nullptr (causes "void" display in some contexts)
-- Only DW_TAG_base_type is parsed
+- Only DW_TAG_base_type is fully parsed (typedefs recognized but not processed)
 - No support for complex OCaml types (variants, records, lists, arrays)
+- Formatter not yet tested with actual variables (requires working breakpoints)
 - Limited type introspection capabilities
 
 ## File Structure
@@ -220,6 +223,102 @@ Most TypeSystem query methods can return simple defaults:
 ### Build Errors
 **Problem**: Undefined symbols or missing methods
 **Solution**: Implement all pure virtual methods, even with minimal stubs
+
+## OxCaml DWARF Structure
+
+This section documents the DWARF debug information structure emitted by the OxCaml compiler, based on analysis of compiled binaries.
+
+### DWARF Tags Used
+
+The OxCaml compiler emits the following DWARF tags:
+
+- **`DW_TAG_compile_unit`**: Marks OCaml compilation units with `DW_AT_language = 27` (OCaml)
+- **`DW_TAG_base_type`**: Defines "ocaml_value" as the fundamental type (8 bytes, signed)
+- **`DW_TAG_subprogram`**: Represents OCaml functions with mangled names
+- **`DW_TAG_typedef`**: Creates type aliases like "int @ value", "bool @ value", "string @ value"
+- **`DW_TAG_enumeration_type`**: Defines enum types for bool and char
+- **`DW_TAG_enumerator`**: Lists enum values with OCaml's tagged representation
+- **`DW_TAG_formal_parameter`**: Function parameters with location info
+
+### Function Naming Convention
+
+OCaml functions appear in DWARF with specific naming patterns:
+
+```
+DW_AT_name: camlTest_ocaml_debug__test_unit_0_9_code
+DW_AT_linkage_name: Test_ocaml_debug.test_unit
+```
+
+**Pattern**: `caml<Module>__<function>_<unique_id>_<unique_id>_code`
+- Module name is prefixed with "caml"
+- Function name follows double underscore
+- Two numeric IDs before "_code" suffix
+- Linkage name uses dot notation: `Module.function`
+
+### Type Representation
+
+All OCaml values use a uniform representation:
+
+1. **Base Type**: "ocaml_value" (8 bytes, signed encoding)
+2. **Type Aliases**: Types represented as typedefs with "@ value" suffix
+   - `int @ value` → typedef to ocaml_value
+   - `bool @ value` → typedef to enumeration type
+   - `char @ value` → typedef to enumeration type
+   - `string @ value` → typedef to ocaml_value
+   - Custom types follow same pattern: `my_int @ value`
+
+### Enumeration Encoding
+
+OxCaml uses enumerations for discrete types with tagged values:
+
+**Boolean Type**:
+```
+DW_TAG_enumeration_type (8 bytes)
+  false = 0x1
+  true = 0x3
+```
+
+**Character Type**:
+```
+DW_TAG_enumeration_type (8 bytes)
+  '\000' = 0x1
+  '\001' = 0x3
+  '\002' = 0x5
+  ...
+  'a' = 0xc3
+  'b' = 0xc5
+  ...
+```
+
+All enum values are odd numbers following OCaml's tagged pointer scheme where odd numbers represent immediate values.
+
+### Tagged Value Encoding
+
+The const_value attributes in DWARF follow OCaml's runtime representation:
+- Immediate integers: `(value << 1) | 1`
+- Booleans: false=1, true=3 (following immediate encoding)
+- Characters: ASCII value transformed to odd number
+- Unit type: represented as 1 (immediate zero)
+
+### Example DWARF Structure
+
+For a simple OCaml function:
+```ocaml
+let test_int (x : int) = x
+```
+
+Generates DWARF:
+```
+DW_TAG_subprogram
+  DW_AT_name: camlModule__test_int_1_10_code
+  DW_AT_linkage_name: Module.test_int
+  DW_TAG_typedef
+    DW_AT_name: int @ value
+    DW_AT_type: → ocaml_value
+  DW_TAG_formal_parameter
+    DW_AT_name: x
+    DW_AT_type: → int @ value
+```
 
 ## Safety Considerations
 
