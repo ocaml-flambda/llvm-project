@@ -37,9 +37,9 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        const DWARFDIE &die,
                                                        bool *type_is_new_ptr) {
   // Add debug output
-  fprintf(stderr, "OxCaml: ParseTypeFromDWARF called, tag=0x%x, name=%s\n", 
+  fprintf(stderr, "OxCaml: ParseTypeFromDWARF called, tag=0x%x, name=%s\n",
           die.Tag(), die.GetName() ? die.GetName() : "<none>");
-  
+
   // Handle DW_TAG_base_type for basic OCaml types
   if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
     fprintf(stderr, "OxCaml: Processing DW_TAG_base_type\n");
@@ -114,24 +114,44 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
     return nullptr;
   }
 
+  // Debug output for function names
+  fprintf(stderr, "OxCaml: ParseFunctionFromDWARF - name='%s', mangled='%s'\n",
+          name ? name : "<null>", mangled ? mangled : "<null>");
+
   // Create the function name
+  // For OCaml, the linkage name is already human-readable (e.g., "Module.function")
+  // and the regular name is the assembly-level symbol (e.g., "camlModule__function_1_2_code")
   Mangled func_name;
-  if (mangled && strlen(mangled) > 0)
+  if (mangled && strlen(mangled) > 0) {
+    // OCaml's linkage names are already human-readable, so just use SetValue
+    // which will treat it as demangled since it doesn't look mangled
     func_name.SetValue(ConstString(mangled));
-  else if (name && strlen(name) > 0)
+    fprintf(stderr, "OxCaml: Using linkage name '%s' (symbol: '%s')\n", mangled, name ? name : "<none>");
+  } else if (name && strlen(name) > 0) {
+    // Only have the symbol name, use it
     func_name.SetValue(ConstString(name));
-  else
+    fprintf(stderr, "OxCaml: Using symbol name only: %s\n", name);
+  } else {
+    fprintf(stderr, "OxCaml: No name found for function, returning nullptr\n");
     return nullptr; // Must have a name
+  }
 
   // Note: Declaration info is available but not used in minimal implementation
 
   const user_id_t func_user_id = die.GetID();
 
-  // Get the function's base address
-  Address func_addr;
-  if (!func_ranges.empty()) {
-    func_addr = func_ranges[0].GetBaseAddress();
+  // Safety check - SymbolFileDWARF should never pass empty ranges
+  // If it does, we can't create a valid function
+  if (func_ranges.empty()) {
+    fprintf(stderr, "OxCaml: Error - Function has no address ranges, cannot create function\n");
+    return nullptr;
   }
+
+  // Get the function's base address
+  // Following Clang and Swift pattern - ranges should never be empty at this point
+  Address func_addr = func_ranges[0].GetBaseAddress();
+  fprintf(stderr, "OxCaml: Function has %zu ranges, base address: 0x%llx\n",
+          func_ranges.size(), func_addr.GetFileAddress());
 
   // Create the Function object
   FunctionSP func_sp = std::make_shared<Function>(
@@ -144,7 +164,17 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
       std::move(func_ranges) // All address ranges
   );
 
-  // Note: Function doesn't store declaration directly - it's stored elsewhere
+  if (func_sp) {
+    // Set frame base expression if available
+    if (frame_base.IsValid())
+      func_sp->GetFrameBaseExpression() = frame_base;
+
+    // Add the function to the compile unit - crucial for proper integration!
+    comp_unit.AddFunction(func_sp);
+
+    fprintf(stderr, "OxCaml: Successfully created and added Function object for %s\n",
+            func_name.GetName().GetCString());
+  }
 
   return func_sp.get();
 }

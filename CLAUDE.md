@@ -187,5 +187,9 @@ The OxCaml plugin will need to handle:
 - Rebuild language plugins after header changes: `ninja -C build LLDBLanguagePlugins`
 - Check plugin loading with LLDB's `plugin list` command
 - Use LLDB's logging for debugging: `log enable lldb types` or `log enable lldb expression`
+- Always add functions to compile unit with `comp_unit.AddFunction(func_sp)` after creation
+- Ensure functions have valid address ranges - return nullptr if ranges are empty
 
+### Safety Considerations
 - DO NOT, under any circumstances, use raw integers such as 1 as pointers.
+- Always validate that address ranges exist before creating Function objects

@@ -75,17 +75,20 @@ When LLDB loads an OCaml binary with debug information:
 ### Working Features
 - Plugin registration and initialization
 - OCaml source file recognition (`.ml`, `.mli`)
-- Basic DWARF parsing for `DW_TAG_base_type`
+- Basic DWARF parsing for `DW_TAG_base_type` and `DW_TAG_subprogram`
 - Type creation with proper `OxCamlType` representation
 - Functional type pointer management through TypeSystem
 - Types display correctly as "ocaml_value" instead of "void"
 - Simple value formatter for immediate integers and pointers (registered, ready for variable inspection)
 - Basic typedef recognition (e.g., "int @ value")
+- Function parsing with linkage name extraction (e.g., "Test_ocaml_debug.test_unit")
+- Functions are properly indexed and searchable by linkage name
+- Breakpoints can be set using OCaml module.function syntax
 
 ### Known Limitations
 - Only DW_TAG_base_type is fully parsed (typedefs recognized but not processed)
 - No support for complex OCaml types (variants, records, lists, arrays)
-- Formatter not yet tested with actual variables (requires working breakpoints)
+- Formatter not yet tested with actual variables in stopped frames
 - Limited type introspection capabilities
 
 ## File Structure
@@ -196,6 +199,27 @@ Most TypeSystem query methods can return simple defaults:
 - Type creation → `CompilerType()`
 - Counts → `0` or `-1`
 - Names → `ConstString()`
+
+## Breakpoint Usage
+
+With the current implementation, you can set breakpoints on OCaml functions using their linkage names:
+
+```bash
+# Using the OCaml module.function syntax (linkage name)
+(lldb) breakpoint set -n "Test_ocaml_debug.test_unit"
+(lldb) breakpoint set -n "Module.function_name"
+
+# Using the mangled symbol name (less preferred)
+(lldb) breakpoint set -n "camlTest_ocaml_debug__test_unit_0_9_code"
+```
+
+### Current Breakpoint Status
+- Functions are successfully parsed from DWARF with both symbol names and linkage names
+- The DWARF parser extracts `DW_AT_linkage_name` which contains the OCaml module.function name
+- Functions are indexed and can be found by name
+- Breakpoint resolution finds the correct function and sets breakpoints successfully
+- Breakpoints show correct source location and addresses
+- **Working**: Breakpoints can be set and hit during debugging
 
 ## Troubleshooting
 
