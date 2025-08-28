@@ -70,6 +70,51 @@ When LLDB loads an OCaml binary with debug information:
 2. **CompilerType Creation**: Parser must create valid CompilerType objects for Type construction
 3. **Language Identification**: File extensions and language type must be correctly recognized
 
+## Type Name to Formatter Matching (Critical)
+
+**Discovery**: The communication channel between the TypeSystem and Language plugin formatters is based on exact string matching of type names.
+
+### How It Works
+
+1. **TypeSystem Side**: 
+   - Creates type instances with specific names (e.g., `OxCamlType("ocaml_value", 8)`)
+   - Returns these names via `GetTypeName()` method
+   - This name becomes the type identifier for all variables of that type
+
+2. **Language Plugin Side**:
+   - Registers formatters using `AddTypeSummary(type_name, match_type, formatter)`
+   - The first argument is the exact string to match against
+   - When LLDB needs to display a variable, it queries the TypeSystem for the type name
+   - LLDB then searches registered formatters for an exact match
+
+3. **Matching Process**:
+   ```cpp
+   // In TypeSystemOxCaml constructor:
+   m_ocaml_value_type = std::make_unique<OxCamlType>("ocaml_value", 8);
+   
+   // In OxCamlLanguage GetFormatters:
+   g_category->AddTypeSummary(
+       "ocaml_value",  // Must match the name from TypeSystem
+       eFormatterMatchExact,
+       TypeSummaryImplSP(new CXXFunctionSummaryFormat(...))
+   );
+   ```
+
+### Implications
+
+- **Every type name in TypeSystem must have a corresponding formatter** if you want custom display
+- **Changing type names breaks formatters** unless you update registrations to match
+- **Multiple formatters can coexist** for different type names (e.g., "ocaml_int", "ocaml_bool")
+- **Type aliases and typedefs** will use their resolved type's formatter
+
+### Future Design Considerations
+
+When adding support for more OCaml types:
+1. Create distinct type names in TypeSystem (e.g., "ocaml_list", "ocaml_record", "ocaml_variant")
+2. Register specific formatters for each type name in the Language plugin
+3. Ensure DWARF parser creates types with appropriate names based on debug info
+4. Consider using pattern matching (eFormatterMatchRegex) for type families
+
 ## Current Implementation
 
 ### Working Features
