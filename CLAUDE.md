@@ -229,3 +229,4 @@ ninja -C build lldb
 # Note: Don't break on 'main' - OCaml's main is typically just initialization
 # Break on your actual functions instead
 ```
+- Run lldb commands from the top-level directory.

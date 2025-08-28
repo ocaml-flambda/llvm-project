@@ -13,8 +13,11 @@
 #include "lldb/Core/PluginInterface.h"
 #include "lldb/lldb-private.h"
 #include "lldb/Core/PluginManager.h"
+#include "../../SymbolFile/DWARF/DWARFDIE.h"
 
 #include <memory>
+#include <optional>
+#include <unordered_map>
 
 namespace lldb_private {
 
@@ -23,6 +26,11 @@ namespace dwarf {
 class DWARFASTParser;
 } // namespace dwarf
 } // namespace plugin
+
+using namespace lldb_private::plugin::dwarf;
+
+// Forward declaration
+class OxCamlType;
 
 class TypeSystemOxCaml : public TypeSystem {
   /// LLVM RTTI support.
@@ -178,8 +186,8 @@ public:
   bool IsConst(lldb::opaque_compiler_type_t type) override { return false; }
   uint32_t IsHomogeneousAggregate(lldb::opaque_compiler_type_t type, CompilerType *base_type_ptr) override { return 0; }
   bool IsPolymorphicClass(lldb::opaque_compiler_type_t type) override { return false; }
-  bool IsTypedefType(lldb::opaque_compiler_type_t type) override { return false; }
-  CompilerType GetTypedefedType(lldb::opaque_compiler_type_t type) override { return CompilerType(); }
+  bool IsTypedefType(lldb::opaque_compiler_type_t type) override;
+  CompilerType GetTypedefedType(lldb::opaque_compiler_type_t type) override;
   bool IsVectorType(lldb::opaque_compiler_type_t type, CompilerType *element_type, uint64_t *size) override { return false; }
   CompilerType GetFullyUnqualifiedType(lldb::opaque_compiler_type_t type) override;
 
@@ -189,21 +197,62 @@ public:
   // Currently returns the type wrapped in a CompilerType without modification.
   CompilerType GetTypeForFormatters(void *type) override;
 
-  // Simple type representation
-  struct OxCamlType {
-    std::string name;
-    uint64_t size;
-    OxCamlType(const std::string& n, uint64_t s) : name(n), size(s) {}
-  };
-  
-  // Get the type pointer for ocaml_value
-  OxCamlType* GetOxCamlValueType() { return m_ocaml_value_type.get(); }
+  // Type registry methods
+  std::optional<OxCamlType*> GetType(lldb::user_id_t die_id);
+  void RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> type);
 
 private:
   std::unique_ptr<plugin::dwarf::DWARFASTParser> m_dwarf_parser;
   
-  // Single instance for our basic ocaml_value type
-  std::unique_ptr<OxCamlType> m_ocaml_value_type;
+  // Type registry: maps DIE ID to created OxCamlType
+  std::unordered_map<lldb::user_id_t, std::unique_ptr<OxCamlType>> m_type_registry;
+};
+
+// OxCamlType class hierarchy
+class OxCamlType {
+public:
+  enum Kind { Base, Typedef };
+  
+  OxCamlType(Kind k, const DWARFDIE& die) : m_kind(k), m_die(die) {}
+  virtual ~OxCamlType() = default;
+  
+  Kind GetKind() const { return m_kind; }
+  const DWARFDIE& GetDIE() const { return m_die; }
+  
+  // Pure virtual methods
+  virtual std::string GetName() const = 0;
+  virtual uint64_t GetByteSize() const = 0;
+  
+protected:
+  Kind m_kind;
+  DWARFDIE m_die;
+};
+
+class OxCamlBaseType : public OxCamlType {
+public:
+  OxCamlBaseType(const DWARFDIE& die) : OxCamlType(Base, die) {}
+  
+  std::string GetName() const override { return "ocaml_value"; }
+  uint64_t GetByteSize() const override { return 8; }
+};
+
+class OxCamlTypedefType : public OxCamlType {
+  OxCamlType* m_underlying;  // Non-owning pointer to registry-owned type
+  
+public:
+  OxCamlTypedefType(const DWARFDIE& die, OxCamlType* underlying)
+    : OxCamlType(Typedef, die), m_underlying(underlying) {}
+  
+  OxCamlType* GetUnderlyingType() const { return m_underlying; }
+  
+  std::string GetName() const override {
+    if (const char* name = m_die.GetName())
+      return name;
+    // Anonymous typedef - use underlying type's name
+    return m_underlying->GetName();
+  }
+  
+  uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
 };
 
 } // namespace lldb_private

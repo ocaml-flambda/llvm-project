@@ -36,100 +36,89 @@ DWARFASTParserOxCaml::~DWARFASTParserOxCaml() = default;
 lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        const DWARFDIE &die,
                                                        bool *type_is_new_ptr) {
-  // Handle DW_TAG_base_type for basic OCaml types
-  if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
-    const char *name = die.GetName();
-    if (!name)
-      name = "ocaml_value";
-
-    // Get the SymbolFileDWARF
-    SymbolFileDWARF *dwarf = die.GetDWARF();
-    if (!dwarf)
-      return TypeSP();
-
-    // Get the type pointer from TypeSystem and use it
-    void* type_ptr = m_oxcaml_typesystem.GetOxCamlValueType();
-    CompilerType compiler_type = m_oxcaml_typesystem.GetTypeForFormatters(type_ptr);
-
-    // Create the Type object using MakeType
-    TypeSP type_sp = dwarf->MakeType(
-        die.GetID(),
-        ConstString(name),
-        /*byte_size=*/ 8,  // OCaml values are 64-bit
-        /*context=*/ nullptr,
-        LLDB_INVALID_UID,
-        Type::eEncodingIsUID,
-        nullptr,
-        compiler_type,
-        Type::ResolveState::Full
-    );
-
-    if (type_is_new_ptr)
-      *type_is_new_ptr = true;
-
-    return type_sp;
-  }
-
-  // Handle DW_TAG_typedef for OCaml type aliases (e.g., "int @ value")
-  if (die.Tag() == llvm::dwarf::DW_TAG_typedef) {
-    const char *typedef_name = die.GetName();
-
-    // For anonymous typedefs (intermediate in typedef chain),
-    // skip to the underlying type
-    if (!typedef_name) {
-      DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
-      if (!type_die) {
+  if (!die.IsValid())
+    return TypeSP();
+  
+  user_id_t die_id = die.GetID();
+  
+  // Check if type already exists in registry
+  std::optional<OxCamlType*> existing_type = m_oxcaml_typesystem.GetType(die_id);
+  
+  OxCamlType* oxcaml_type;
+  if (existing_type.has_value()) {
+    // Type already in registry
+    oxcaml_type = existing_type.value();
+  } else {
+    // Type not in registry, create it based on DWARF tag
+    std::unique_ptr<OxCamlType> new_type;
+    
+    if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
+      new_type = std::make_unique<OxCamlBaseType>(die);
+    } 
+    else if (die.Tag() == llvm::dwarf::DW_TAG_typedef) {
+      // Get underlying type DIE
+      DWARFDIE underlying_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
+      if (!underlying_die)
         return TypeSP();
-      }
-      // Recursively resolve the underlying type
-      return ParseTypeFromDWARF(sc, type_die, type_is_new_ptr);
+      
+      // Recursively parse underlying type (ensures it's in registry)
+      TypeSP underlying_type_sp = ParseTypeFromDWARF(sc, underlying_die, nullptr);
+      if (!underlying_type_sp)
+        return TypeSP();
+      
+      // Get the underlying OxCamlType from registry (should exist now)
+      auto underlying_opt = m_oxcaml_typesystem.GetType(underlying_die.GetID());
+      if (!underlying_opt.has_value())
+        return TypeSP();
+      
+      new_type = std::make_unique<OxCamlTypedefType>(die, underlying_opt.value());
     }
-
-    // Get the underlying type that this typedef refers to
-    DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
-    if (!type_die) {
+    else {
+      // Unsupported tag
       return TypeSP();
     }
-
-    // Get the SymbolFileDWARF
-    SymbolFileDWARF *dwarf = die.GetDWARF();
-    if (!dwarf)
-      return TypeSP();
-
-    // Resolve the underlying type
-    Type *underlying_type = dwarf->ResolveTypeUID(type_die, true);
-    if (!underlying_type) {
-      return TypeSP();
-    }
-
-    // Create a typedef Type that references the underlying type
-    // For OCaml, we want to preserve the typedef name (e.g., "int @ value")
-    // but still reference the base ocaml_value type
-    auto byte_size_or_error = underlying_type->GetByteSize(nullptr);
-    uint64_t byte_size = byte_size_or_error ? *byte_size_or_error : 8;
-
-    TypeSP type_sp = dwarf->MakeType(
-        die.GetID(),
-        ConstString(typedef_name),
-        byte_size,
-        nullptr,  // context
-        type_die.GetID(),  // encoding_uid - reference to the underlying type
-        Type::eEncodingIsTypedefUID,
-        nullptr,  // declaration
-        underlying_type->GetForwardCompilerType(),  // Use the underlying type's CompilerType
-        Type::ResolveState::Full
-    );
-
-    if (type_is_new_ptr)
-      *type_is_new_ptr = true;
-
-    return type_sp;
+    
+    // Add to registry and keep raw pointer
+    oxcaml_type = new_type.get();
+    m_oxcaml_typesystem.RegisterType(die_id, std::move(new_type));
   }
-
-  // For other tags, return nullptr for now
+  
+  // Create CompilerType wrapping the registry-owned OxCamlType
+  CompilerType compiler_type(m_oxcaml_typesystem.weak_from_this(), oxcaml_type);
+  
+  // Determine encoding type based on kind
+  Type::EncodingDataType encoding_type;
+  user_id_t encoding_uid = LLDB_INVALID_UID;
+  
+  if (oxcaml_type->GetKind() == OxCamlType::Typedef) {
+    encoding_type = Type::eEncodingIsTypedefUID;
+    auto* typedef_type = static_cast<OxCamlTypedefType*>(oxcaml_type);
+    encoding_uid = typedef_type->GetUnderlyingType()->GetDIE().GetID();
+  } else {
+    encoding_type = Type::eEncodingIsUID;
+  }
+  
+  // Create LLDB Type object
+  SymbolFileDWARF *dwarf = die.GetDWARF();
+  if (!dwarf)
+    return TypeSP();
+    
+  TypeSP type_sp = dwarf->MakeType(
+    die_id,
+    ConstString(oxcaml_type->GetName()),
+    oxcaml_type->GetByteSize(),
+    nullptr,  // context
+    encoding_uid,
+    encoding_type,
+    nullptr,  // declaration
+    compiler_type,
+    Type::ResolveState::Full
+  );
+  
   if (type_is_new_ptr)
-    *type_is_new_ptr = false;
-  return TypeSP();
+    *type_is_new_ptr = true;
+  
+  return type_sp;
 }
 
 ConstString

@@ -12,7 +12,9 @@
 #include "lldb/Symbol/SymbolFile.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Host/StreamFile.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Format.h"
 
 #include "../../SymbolFile/DWARF/DWARFASTParserOxCaml.h"
 
@@ -24,11 +26,13 @@ LLDB_PLUGIN_DEFINE(TypeSystemOxCaml)
 char TypeSystemOxCaml::ID;
 
 TypeSystemOxCaml::TypeSystemOxCaml() : TypeSystem() {
-  // Create our single type instance for ocaml_value
-  m_ocaml_value_type = std::make_unique<OxCamlType>("ocaml_value", 8);
+  // Registry starts empty - types created on demand
 }
 
-TypeSystemOxCaml::~TypeSystemOxCaml() = default;
+TypeSystemOxCaml::~TypeSystemOxCaml() {
+  // Clear registry on destruction
+  m_type_registry.clear();
+}
 
 plugin::dwarf::DWARFASTParser *TypeSystemOxCaml::GetDWARFParser() {
   if (!m_dwarf_parser)
@@ -61,11 +65,9 @@ CompilerType TypeSystemOxCaml::GetTypeFromMangledTypename(ConstString mangled_ty
 
 
 ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
-  if (type) {
-    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
-    return ConstString(ocaml_type->name);
-  }
-  return ConstString("ocaml_value");  // fallback
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+    return ConstString(ocaml_type->GetName());
+  return ConstString();
 }
 
 ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t type) {
@@ -74,11 +76,9 @@ ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t ty
 }
 
 llvm::Expected<uint64_t> TypeSystemOxCaml::GetBitSize(lldb::opaque_compiler_type_t type, ExecutionContextScope *exe_scope) {
-  if (type) {
-    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
-    return ocaml_type->size * 8;  // Convert bytes to bits
-  }
-  return 64; // Default OCaml value size in bits
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+    return ocaml_type->GetByteSize() * 8;  // Convert bytes to bits
+  return llvm::createStringError(llvm::inconvertibleErrorCode(), "Invalid OxCaml type");
 }
 
 llvm::Expected<uint32_t> TypeSystemOxCaml::GetNumChildren(lldb::opaque_compiler_type_t type, bool omit_empty_base_classes, const ExecutionContext *exe_ctx) {
@@ -98,14 +98,34 @@ CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
   return CompilerType(weak_from_this(), type);
 }
 
-// Methods with default implementations in base class are not overridden
+// Type registry methods
+std::optional<OxCamlType*> TypeSystemOxCaml::GetType(lldb::user_id_t die_id) {
+  auto it = m_type_registry.find(die_id);
+  if (it != m_type_registry.end()) {
+    return it->second.get();
+  }
+  return std::nullopt;
+}
 
+void TypeSystemOxCaml::RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> type) {
+  m_type_registry[die_id] = std::move(type);
+}
 
+bool TypeSystemOxCaml::IsTypedefType(lldb::opaque_compiler_type_t type) {
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+    return ocaml_type->GetKind() == OxCamlType::Typedef;
+  return false;
+}
 
-
-
-
-
+CompilerType TypeSystemOxCaml::GetTypedefedType(lldb::opaque_compiler_type_t type) {
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type)) {
+    if (ocaml_type->GetKind() == OxCamlType::Typedef) {
+      auto* typedef_type = static_cast<OxCamlTypedefType*>(ocaml_type);
+      return CompilerType(weak_from_this(), typedef_type->GetUnderlyingType());
+    }
+  }
+  return CompilerType();
+}
 
 
 CompilerType TypeSystemOxCaml::GetArrayElementType(lldb::opaque_compiler_type_t type, ExecutionContextScope *exe_scope) {
@@ -180,29 +200,50 @@ void TypeSystemOxCaml::dump(lldb::opaque_compiler_type_t type) const {
 
 
 void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, lldb::DescriptionLevel level) {
-  // Nothing to dump for now
+  // Call the Stream version with stdout
+  StreamFile s(stdout, false);
+  DumpTypeDescription(type, s, level);
 }
 
 void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, Stream &s, lldb::DescriptionLevel level) {
-  // Simple description for now
-  if (type) {
-    OxCamlType* ocaml_type = static_cast<OxCamlType*>(type);
-    s.PutCString(ocaml_type->name);
-  } else {
-    s.PutCString("ocaml_value");
-  }
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+    s.PutCString(ocaml_type->GetName());
 }
 
 void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
-  // Nothing to dump
+  output << "OxCaml TypeSystem - Type Registry:\n";
+  output << "===================================\n";
+  
+  if (m_type_registry.empty()) {
+    output << "(empty)\n";
+    return;
+  }
+  
+  for (const auto& [die_id, type] : m_type_registry) {
+    std::string type_name = type->GetName();
+    
+    // Apply filter if provided
+    if (!filter.empty() && type_name.find(filter.str()) == std::string::npos)
+      continue;
+      
+    output << "DIE 0x" << llvm::format_hex(die_id, 0) 
+           << ": " << type_name;
+    
+    // Show additional info based on type kind
+    switch (type->GetKind()) {
+      case OxCamlType::Base:
+        output << " (base type, " << type->GetByteSize() << " bytes)";
+        break;
+      case OxCamlType::Typedef:
+        {
+          auto* td = static_cast<OxCamlTypedefType*>(type.get());
+          output << " (typedef -> " << td->GetUnderlyingType()->GetName() << ")";
+        }
+        break;
+    }
+    output << "\n";
+  }
 }
-
-
-
-
-
-
-
 
 
 CompilerType TypeSystemOxCaml::GetFullyUnqualifiedType(lldb::opaque_compiler_type_t type) {
