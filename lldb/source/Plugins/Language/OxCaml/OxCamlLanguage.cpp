@@ -7,13 +7,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "OxCamlLanguage.h"
+#include "OxCamlFormatters.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/DataFormatters/DataVisualization.h"
 #include "lldb/DataFormatters/TypeSummary.h"
 #include "lldb/Utility/Stream.h"
-#include <cinttypes>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -51,35 +51,8 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
            .SetDontShowChildren(false)
            .SetDontShowValue(false);
 
-      auto formatter = [](ValueObject &valobj, Stream &stream,
-                         const TypeSummaryOptions &options) -> bool {
-        // Get the raw data directly
-        DataExtractor data;
-        Status error;
-        uint64_t data_size = valobj.GetData(data, error);
-        
-        if (error.Success() && data_size >= 8) {
-          lldb::offset_t offset = 0;
-          uint64_t value = data.GetU64(&offset);
-          
-          // OCaml value interpretation
-          if (value & 1) {
-            // Immediate value - show as integer
-            int64_t int_val = ((int64_t)value) >> 1;
-            stream.Printf("%" PRId64, int_val);
-          } else {
-            // Pointer value
-            if (value == 0) {
-              stream.Printf("()"); // unit value
-            } else {
-              stream.Printf("<pointer: 0x%" PRIx64 ">", value);
-            }
-          }
-        } else {
-          stream.Printf("<unavailable>");
-        }
-        return true;
-      };
+      // Use the formatter from OxCamlFormatters
+      auto formatter = formatters::oxcaml::OxCamlValue_SummaryProvider;
 
       // Register formatter for base type "ocaml_value"
       g_category->AddTypeSummary(

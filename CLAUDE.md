@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Related Documentation
+
+- **OxCaml Plugin Details**: See `lldb/source/Plugins/Language/OxCaml/CLAUDE.md` for in-depth plugin architecture, implementation details, and DWARF structure documentation.
+- **TypeSystem Implementation**: See `lldb/source/Plugins/TypeSystem/OxCaml/CLAUDE.md` for TypeSystem-specific guidance and implementation notes.
+
 ## Project Overview
 
 This is a fork of the LLVM project focused on adding LLDB support for the OxCaml language. The primary goal is to create a comprehensive LLDB plugin that enables debugging of OxCaml programs with native understanding of OxCaml types, values, and runtime structures.
@@ -214,9 +219,13 @@ The OxCaml plugin will need to handle:
 # Build LLDB
 ninja -C build lldb
 
-# Test with OCaml binary
-./build/bin/lldb your_ocaml_program
-(lldb) break Module.function
-(lldb) run
-(lldb) frame variable  # See variable values
+# Test with OCaml binary using -o options (recommended)
+./build/bin/lldb your_ocaml_program \
+  -o "break Module.function" \
+  -o "run" \
+  -o "frame variable" \
+  -o "quit"
+
+# Note: Don't break on 'main' - OCaml's main is typically just initialization
+# Break on your actual functions instead
 ```

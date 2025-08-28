@@ -130,23 +130,38 @@ ninja -C build check-lldb
 
 ### Testing with OCaml Binaries
 
-Test the plugin:
+Test the plugin efficiently using -o options:
 ```bash
-# Basic testing workflow
-./build/bin/lldb test_program
+# Recommended: Use -o options for quick testing
+./build/bin/lldb test_program \
+  -o "breakpoint set -n Module.function_name" \
+  -o "run" \
+  -o "frame variable" \
+  -o "continue" \
+  -o "frame variable" \
+  -o "quit"
 
-# In LLDB session
-(lldb) breakpoint set -n "Module.function_name"
-(lldb) run
-(lldb) frame variable  # Shows variable values
-(lldb) continue
+# Note: Avoid breaking on 'main' - OCaml's main is often just initialization
+# Instead, break on your actual functions like Test.process_data
 ```
 
 ### Quick Iteration Workflow
 1. Make code changes
 2. `ninja -C build lldb` - rebuild LLDB
-3. Test immediately with test binary
+3. Test immediately using -o options for automation
 4. No debug output needed - variables display correctly
+
+### Interactive Testing
+```bash
+# For interactive exploration
+./build/bin/lldb test_program
+
+# In LLDB session
+(lldb) breakpoint set -n "Module.function_name"  # Not 'main'
+(lldb) run
+(lldb) frame variable  # Shows variable values
+(lldb) continue
+```
 
 
 ## Established Workflow Patterns
