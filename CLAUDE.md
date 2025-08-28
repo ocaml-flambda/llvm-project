@@ -184,12 +184,39 @@ The OxCaml plugin will need to handle:
 - Use `ninja -j<N>` to limit parallel jobs if memory constrained
 
 ### Plugin Development
-- Rebuild language plugins after header changes: `ninja -C build LLDBLanguagePlugins`
+- **Quick rebuild**: `ninja -C build lldb` is sufficient for most changes
 - Check plugin loading with LLDB's `plugin list` command
 - Use LLDB's logging for debugging: `log enable lldb types` or `log enable lldb expression`
 - Always add functions to compile unit with `comp_unit.AddFunction(func_sp)` after creation
 - Ensure functions have valid address ranges - return nullptr if ranges are empty
+- **Variable display issues**: Check raw data with DataExtractor before investigating ValueObject
+- **TypeSystem configuration**: Ensure IsScalarType, IsIntegerType return true for basic types
 
 ### Safety Considerations
 - DO NOT, under any circumstances, use raw integers such as 1 as pointers.
 - Always validate that address ranges exist before creating Function objects
+
+## Current OxCaml Plugin Status
+
+### Fully Working
+- **Breakpoints**: Set using OCaml module.function syntax (e.g., `break Test.main`)
+- **Variable Display**: Integer values display correctly in decimal format
+- **Type System**: Basic ocaml_value type with proper typedef support
+
+### In Progress
+- Support for enumeration types (bool, char)
+- Complex type support (records, variants, lists)
+- Line-based breakpoints
+- Expression evaluation
+
+### Testing Quick Start
+```bash
+# Build LLDB
+ninja -C build lldb
+
+# Test with OCaml binary
+./build/bin/lldb your_ocaml_program
+(lldb) break Module.function
+(lldb) run
+(lldb) frame variable  # See variable values
+```

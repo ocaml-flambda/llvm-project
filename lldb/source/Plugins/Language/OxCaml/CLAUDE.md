@@ -75,21 +75,27 @@ When LLDB loads an OCaml binary with debug information:
 ### Working Features
 - Plugin registration and initialization
 - OCaml source file recognition (`.ml`, `.mli`)
-- Basic DWARF parsing for `DW_TAG_base_type` and `DW_TAG_subprogram`
+- Complete DWARF parsing for:
+  - `DW_TAG_base_type` - OCaml base types
+  - `DW_TAG_subprogram` - Functions with linkage names
+  - `DW_TAG_typedef` - Type aliases (e.g., "int @ value")
+  - `DW_TAG_formal_parameter` - Function parameters
 - Type creation with proper `OxCamlType` representation
 - Functional type pointer management through TypeSystem
-- Types display correctly as "ocaml_value" instead of "void"
-- Simple value formatter for immediate integers and pointers (registered, ready for variable inspection)
-- Basic typedef recognition (e.g., "int @ value")
-- Function parsing with linkage name extraction (e.g., "Test_ocaml_debug.test_unit")
-- Functions are properly indexed and searchable by linkage name
-- Breakpoints can be set using OCaml module.function syntax
+- **Variable Display**: Variables show correct values for immediate integers
+- **Breakpoints**: Full support for OCaml module.function syntax
+- **Value Formatting**: Direct data extraction bypassing ValueObject API issues
+- Critical TypeSystem methods properly configured:
+  - `IsScalarType` returns true
+  - `IsIntegerType` returns true with unsigned
+  - `CanPassInRegisters` returns true
+  - `GetTypeClass` returns `eTypeClassBuiltin`
 
 ### Known Limitations
-- Only DW_TAG_base_type is fully parsed (typedefs recognized but not processed)
+- No support for bool/char enums (encoded as DW_TAG_enumeration_type)
 - No support for complex OCaml types (variants, records, lists, arrays)
-- Formatter not yet tested with actual variables in stopped frames
-- Limited type introspection capabilities
+- Line-based breakpoints not yet supported (need more DWARF parsing)
+- ValueObject's GetValueAsUnsigned() doesn't work (we use raw data instead)
 
 ## File Structure
 
@@ -124,31 +130,46 @@ ninja -C build check-lldb
 
 ### Testing with OCaml Binaries
 
-
 Test the plugin:
 ```bash
-# Run LLDB with stderr visible for debug output
-./build/bin/lldb test_program 2>&1 | grep OxCaml
+# Basic testing workflow
+./build/bin/lldb test_program
 
 # In LLDB session
-(lldb) target create test_program
-(lldb) image lookup -t ocaml_value
-(lldb) breakpoint set --name main
+(lldb) breakpoint set -n "Module.function_name"
 (lldb) run
-(lldb) frame variable
+(lldb) frame variable  # Shows variable values
+(lldb) continue
 ```
 
-### Debug Output
+### Quick Iteration Workflow
+1. Make code changes
+2. `ninja -C build lldb` - rebuild LLDB
+3. Test immediately with test binary
+4. No debug output needed - variables display correctly
 
-The implementation includes fprintf statements for debugging. Expected output:
-```
-OxCaml: TypeSystemOxCaml constructor called
-OxCaml: GetDWARFParser called
-OxCaml: ParseTypeFromDWARF called, tag=0x24, name=ocaml_value
-OxCaml: Processing DW_TAG_base_type
-OxCaml: GetTypeForFormatters called with type=0x0
-OxCaml: Creating Type with name=ocaml_value
-```
+
+## Established Workflow Patterns
+
+### Adding DWARF Support for New Tags
+1. Check the tag type in `ParseTypeFromDWARF`
+2. Extract relevant attributes (name, type references)
+3. Create appropriate Type objects using `dwarf->MakeType()`
+4. For typedefs, resolve underlying types recursively
+5. Handle anonymous types by skipping to underlying type
+
+### Debugging Variable Display Issues
+1. First check if raw data is available via `DataExtractor`
+2. If data exists but ValueObject methods fail, use raw data directly
+3. Ensure TypeSystem methods return appropriate values:
+   - IsScalarType, IsIntegerType for basic types
+   - Proper type class and encoding
+
+### Quick Testing Cycle
+- Keep a test OCaml binary with various types ready
+- Use function breakpoints (line breakpoints not yet supported)
+- Test with `frame variable` to see immediate feedback
+- No need for debug logging - formatters show values directly
 
 ## OCaml Value Representation
 
