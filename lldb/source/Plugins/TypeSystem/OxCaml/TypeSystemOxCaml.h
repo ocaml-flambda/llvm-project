@@ -183,6 +183,10 @@ public:
   bool IsVectorType(lldb::opaque_compiler_type_t type, CompilerType *element_type, uint64_t *size) override { return false; }
   CompilerType GetFullyUnqualifiedType(lldb::opaque_compiler_type_t type) override;
 
+  // GetTypeForFormatters - Prepares a type for the formatter system.
+  // This method is called when LLDB needs to match formatters to a type.
+  // The returned CompilerType is used to get the type name for formatter matching.
+  // Currently returns the type wrapped in a CompilerType without modification.
   CompilerType GetTypeForFormatters(void *type) override;
 
   // Simple type representation

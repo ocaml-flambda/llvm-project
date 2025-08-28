@@ -73,8 +73,8 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
   // Handle DW_TAG_typedef for OCaml type aliases (e.g., "int @ value")
   if (die.Tag() == llvm::dwarf::DW_TAG_typedef) {
     const char *typedef_name = die.GetName();
-    
-    // For anonymous typedefs (intermediate in typedef chain), 
+
+    // For anonymous typedefs (intermediate in typedef chain),
     // skip to the underlying type
     if (!typedef_name) {
       DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
@@ -84,30 +84,30 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
       // Recursively resolve the underlying type
       return ParseTypeFromDWARF(sc, type_die, type_is_new_ptr);
     }
-    
+
     // Get the underlying type that this typedef refers to
     DWARFDIE type_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
     if (!type_die) {
       return TypeSP();
     }
-    
+
     // Get the SymbolFileDWARF
     SymbolFileDWARF *dwarf = die.GetDWARF();
     if (!dwarf)
       return TypeSP();
-    
+
     // Resolve the underlying type
     Type *underlying_type = dwarf->ResolveTypeUID(type_die, true);
     if (!underlying_type) {
       return TypeSP();
     }
-    
+
     // Create a typedef Type that references the underlying type
     // For OCaml, we want to preserve the typedef name (e.g., "int @ value")
     // but still reference the base ocaml_value type
     auto byte_size_or_error = underlying_type->GetByteSize(nullptr);
     uint64_t byte_size = byte_size_or_error ? *byte_size_or_error : 8;
-    
+
     TypeSP type_sp = dwarf->MakeType(
         die.GetID(),
         ConstString(typedef_name),
@@ -119,13 +119,13 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
         underlying_type->GetForwardCompilerType(),  // Use the underlying type's CompilerType
         Type::ResolveState::Full
     );
-    
+
     if (type_is_new_ptr)
       *type_is_new_ptr = true;
-    
+
     return type_sp;
   }
-  
+
   // For other tags, return nullptr for now
   if (type_is_new_ptr)
     *type_is_new_ptr = false;
@@ -134,9 +134,30 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
 
 ConstString
 DWARFASTParserOxCaml::ConstructDemangledNameFromDWARF(const DWARFDIE &die) {
-  // For now, just return empty - OCaml names are typically not mangled
-  // in the same way as C++
-  return ConstString();
+  // CR sspies: This function would be the right place to compute OCaml linkage
+  // names from mangled symbol names if they weren't provided via DW_AT_linkage_name.
+  //
+  // Currently, OxCaml emits both:
+  // - DW_AT_name: mangled symbol (e.g., "camlModule__function_1_2_code")
+  // - DW_AT_linkage_name: OCaml name (e.g., "Module.function")
+  //
+  // If OxCaml stopped emitting DW_AT_linkage_name, we would implement the
+  // demangling logic here.
+  //
+  // ParseFunctionFromDWARF would need modification.
+  // Instead of just using the symbol name when linkage_name is missing:
+  //   if (mangled && strlen(mangled) > 0) {
+  //     func_name.SetValue(ConstString(mangled));
+  //   } else if (name && strlen(name) > 0) {
+  //     ConstString demangled = ConstructDemangledNameFromDWARF(die);
+  //     if (demangled) {
+  //       func_name.SetValue(demangled);
+  //     } else {
+  //       func_name.SetValue(ConstString(name));
+  //     }
+  //   }
+
+  return ConstString();  // Currently returns empty as linkage names are provided
 }
 
 Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
@@ -174,12 +195,20 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
     func_name.SetValue(ConstString(mangled));
   } else if (name && strlen(name) > 0) {
     // Only have the symbol name, use it
+    // CR sspies: Change here for reconstructing linkage names from mangled names.
     func_name.SetValue(ConstString(name));
   } else {
     return nullptr; // Must have a name
   }
 
   // Note: Declaration info is available but not used in minimal implementation
+  // CR sspies: Declaration info could be set here for faster source lookups:
+  //   Declaration decl(comp_unit.GetSupportFiles().GetFileSpecAtIndex(*decl_file),
+  //                    *decl_line, decl_column ? *decl_column : 0);
+  // Currently, LLDB falls back to LineTable lookups for source locations.
+  // See Function::GetStartLineSourceInfo() which calls CompileUnit::GetLineTable()
+  // to find line entries by address. The LineTable is built from DWARF .debug_line
+  // section and provides address-to-source mappings.
 
   const user_id_t func_user_id = die.GetID();
 
@@ -190,7 +219,6 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   }
 
   // Get the function's base address
-  // Following Clang and Swift pattern - ranges should never be empty at this point
   Address func_addr = func_ranges[0].GetBaseAddress();
 
   // Create the Function object
@@ -200,6 +228,9 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
       func_user_id,         // UserID for function Type (same for now)
       func_name,            // Mangled function name
       nullptr,              // FunctionType (we'll add this later)
+                            // CR sspies: FunctionType could parse DW_TAG_formal_parameter children to build
+                            // parameter info, but LLDB already handles parameter display separately via
+                            // direct DWARF DIE inspection when stopped in the function.
       std::move(func_addr), // Base address
       std::move(func_ranges) // All address ranges
   );
