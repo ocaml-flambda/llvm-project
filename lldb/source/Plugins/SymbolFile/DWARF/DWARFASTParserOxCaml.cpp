@@ -73,6 +73,32 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
       
       new_type = std::make_unique<OxCamlTypedefType>(die, underlying_opt.value());
     }
+    else if (die.Tag() == llvm::dwarf::DW_TAG_enumeration_type) {
+      // Parse enum from DWARF
+      std::string name;
+      if (const char* die_name = die.GetName())
+        name = die_name;
+      
+      // Get byte size
+      uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 for OCaml
+      
+      // Parse enumerators
+      std::vector<OxCamlEnumType::Enumerator> enumerators;
+      for (DWARFDIE child : die.children()) {
+        if (child.Tag() == llvm::dwarf::DW_TAG_enumerator) {
+          const char* enum_name = child.GetName();
+          if (!enum_name)
+            continue;
+          
+          // Get the enumerator value - OCaml uses unsigned values (odd numbers)
+          int64_t enum_value = child.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_const_value, 0);
+          
+          enumerators.push_back({enum_name, enum_value});
+        }
+      }
+      
+      new_type = std::make_unique<OxCamlEnumType>(die, std::move(name), byte_size, std::move(enumerators));
+    }
     else {
       // Unsupported tag
       return TypeSP();

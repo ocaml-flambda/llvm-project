@@ -72,48 +72,61 @@ When LLDB loads an OCaml binary with debug information:
 
 ## Type Name to Formatter Matching (Critical)
 
-**Discovery**: The communication channel between the TypeSystem and Language plugin formatters is based on exact string matching of type names.
+**Key Insight**: The type name serves as a universal format specifier, not a descriptive name. All OCaml types return "ocaml_value" from `GetTypeName()`, and a single formatter handles all type classes dynamically.
 
 ### How It Works
 
 1. **TypeSystem Side**: 
-   - Creates type instances with specific names (e.g., `OxCamlType("ocaml_value", 8)`)
-   - Returns these names via `GetTypeName()` method
-   - This name becomes the type identifier for all variables of that type
+   - All OCaml types return "ocaml_value" from `GetTypeName()`
+   - This acts as a universal format specifier for the formatter system
+   - Actual type information is preserved in the OxCamlType class hierarchy
 
 2. **Language Plugin Side**:
-   - Registers formatters using `AddTypeSummary(type_name, match_type, formatter)`
-   - The first argument is the exact string to match against
-   - When LLDB needs to display a variable, it queries the TypeSystem for the type name
-   - LLDB then searches registered formatters for an exact match
+   - Single formatter registered for "ocaml_value"
+   - Formatter accesses the actual type via CompilerType's opaque pointer
+   - Dispatches formatting based on the OxCamlType class (Base, Typedef, Enum)
 
-3. **Matching Process**:
+3. **Implementation**:
    ```cpp
-   // In TypeSystemOxCaml constructor:
-   m_ocaml_value_type = std::make_unique<OxCamlType>("ocaml_value", 8);
+   // In TypeSystemOxCaml::GetTypeName:
+   ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
+     if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+       return ConstString("ocaml_value");  // Universal format specifier
+     return ConstString();
+   }
    
-   // In OxCamlLanguage GetFormatters:
+   // Single formatter registration in OxCamlLanguage:
    g_category->AddTypeSummary(
-       "ocaml_value",  // Must match the name from TypeSystem
+       "ocaml_value",  // All OCaml types match this
        eFormatterMatchExact,
        TypeSummaryImplSP(new CXXFunctionSummaryFormat(...))
    );
+   
+   // Formatter examines actual type class:
+   auto* oxcaml_type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
+   while (oxcaml_type->GetKind() == OxCamlType::Typedef) {
+     // Resolve through typedefs
+     oxcaml_type = static_cast<OxCamlTypedefType*>(oxcaml_type)->GetUnderlyingType();
+   }
+   if (oxcaml_type->GetKind() == OxCamlType::Enum) {
+     // Display enum value by name
+   }
    ```
 
-### Implications
+### Architectural Benefits
 
-- **Every type name in TypeSystem must have a corresponding formatter** if you want custom display
-- **Changing type names breaks formatters** unless you update registrations to match
-- **Multiple formatters can coexist** for different type names (e.g., "ocaml_int", "ocaml_bool")
-- **Type aliases and typedefs** will use their resolved type's formatter
+- **Single Registration Point**: One formatter handles all OCaml types
+- **Dynamic Dispatch**: Formatter examines actual type class at runtime
+- **Clean Extensibility**: New type classes added without changing registration
+- **Type Information Preserved**: Full type details available via opaque pointer
 
-### Future Design Considerations
+### Future Design Pattern
 
 When adding support for more OCaml types:
-1. Create distinct type names in TypeSystem (e.g., "ocaml_list", "ocaml_record", "ocaml_variant")
-2. Register specific formatters for each type name in the Language plugin
-3. Ensure DWARF parser creates types with appropriate names based on debug info
-4. Consider using pattern matching (eFormatterMatchRegex) for type families
+1. Extend the OxCamlType hierarchy (e.g., OxCamlRecordType, OxCamlVariantType)
+2. Add handling in the single formatter's dispatch logic
+3. No need for additional formatter registrations
+4. Type name remains "ocaml_value" for all types
 
 ## Current Implementation
 
@@ -127,7 +140,8 @@ When adding support for more OCaml types:
   - `DW_TAG_formal_parameter` - Function parameters
 - Type creation with proper `OxCamlType` representation
 - Functional type pointer management through TypeSystem
-- **Variable Display**: Variables show correct values for immediate integers
+- **Variable Display**: Variables show correct values for all immediate types (integers, bools, chars)
+- **Enum Support**: Full support for OCaml enumerations with proper value display
 - **Breakpoints**: Full support for OCaml module.function syntax
 - **Value Formatting**: Direct data extraction bypassing ValueObject API issues
 - Critical TypeSystem methods properly configured:
@@ -137,10 +151,59 @@ When adding support for more OCaml types:
   - `GetTypeClass` returns `eTypeClassBuiltin`
 
 ### Known Limitations
-- No support for bool/char enums (encoded as DW_TAG_enumeration_type)
 - No support for complex OCaml types (variants, records, lists, arrays)
 - Line-based breakpoints not yet supported (need more DWARF parsing)
 - ValueObject's GetValueAsUnsigned() doesn't work (we use raw data instead)
+
+## Formatter Architecture
+
+The OxCaml formatter uses a single-formatter, multi-type dispatch pattern:
+
+### Type Dispatch Process
+1. **Type Resolution**: Formatter receives a ValueObject with a CompilerType
+2. **Type Extraction**: Gets the OxCamlType via `compiler_type.GetOpaqueQualType()`
+3. **Typedef Resolution**: Follows typedef chains to reach the actual type
+4. **Type-Based Display**: Formats value based on the resolved type class
+
+### Supported Type Classes
+- **OxCamlBaseType**: Display as integer (immediate value >> 1)
+- **OxCamlTypedefType**: Transparently resolved to underlying type
+- **OxCamlEnumType**: Display enumerator name if found, else numeric value
+
+### Example Flow
+```
+Variable "x" of type "bool @ value"
+  → GetTypeName() returns "ocaml_value" 
+  → Formatter matches and is invoked
+  → Extracts OxCamlTypedefType from CompilerType
+  → Resolves to underlying OxCamlEnumType
+  → Looks up value in enum's enumerators
+  → Displays "true" or "false"
+```
+
+## Type System Design
+
+The TypeSystemOxCaml implements a clean type hierarchy:
+
+### OxCamlType Class Hierarchy
+```cpp
+OxCamlType (abstract base)
+├── OxCamlBaseType      // The fundamental "ocaml_value" type
+├── OxCamlTypedefType   // Type aliases (e.g., "int @ value")
+└── OxCamlEnumType      // Enumerations with name/value pairs
+```
+
+### Type Registry
+- Types are created once and stored in `m_type_registry`
+- Indexed by DWARF DIE ID for efficient lookup
+- Registry owns all type instances via `std::unique_ptr`
+- Non-owning pointers used for type references
+
+### Key Design Decisions
+1. **Universal Type Name**: All types return "ocaml_value" from GetTypeName()
+2. **Type Information Preservation**: Actual type details accessible via opaque pointer
+3. **Lazy Type Creation**: Types created on-demand during DWARF parsing
+4. **Memory Safety**: Registry owns all types, preventing dangling pointers
 
 ## File Structure
 

@@ -66,7 +66,7 @@ CompilerType TypeSystemOxCaml::GetTypeFromMangledTypename(ConstString mangled_ty
 
 ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
   if (auto* ocaml_type = static_cast<OxCamlType*>(type))
-    return ConstString(ocaml_type->GetName());
+    return ConstString("ocaml_value");  // Universal format specifier for all OCaml types
   return ConstString();
 }
 
@@ -133,7 +133,14 @@ CompilerType TypeSystemOxCaml::GetArrayElementType(lldb::opaque_compiler_type_t 
 }
 
 CompilerType TypeSystemOxCaml::GetEnumerationIntegerType(lldb::opaque_compiler_type_t type) {
-  llvm_unreachable("GetEnumerationIntegerType not implemented for OCaml");
+  // For OCaml enums, return the same type since they're already integer-like
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type)) {
+    if (ocaml_type->GetKind() == OxCamlType::Enum) {
+      // OCaml enums are essentially tagged integers, return self
+      return CompilerType(weak_from_this(), type);
+    }
+  }
+  return CompilerType();
 }
 
 CompilerType TypeSystemOxCaml::GetNonReferenceType(lldb::opaque_compiler_type_t type) {

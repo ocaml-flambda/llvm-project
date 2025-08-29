@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace lldb_private {
 
@@ -211,7 +212,7 @@ private:
 // OxCamlType class hierarchy
 class OxCamlType {
 public:
-  enum Kind { Base, Typedef };
+  enum Kind { Base, Typedef, Enum };
   
   OxCamlType(Kind k, const DWARFDIE& die) : m_kind(k), m_die(die) {}
   virtual ~OxCamlType() = default;
@@ -253,6 +254,48 @@ public:
   }
   
   uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
+};
+
+class OxCamlEnumType : public OxCamlType {
+public:
+  struct Enumerator {
+    std::string name;
+    int64_t value;
+  };
+  
+private:
+  std::vector<Enumerator> m_enumerators;
+  uint64_t m_byte_size;
+  std::string m_name;
+  
+public:
+  OxCamlEnumType(const DWARFDIE& die, std::string name, uint64_t byte_size,
+                 std::vector<Enumerator> enumerators)
+    : OxCamlType(Enum, die), m_name(std::move(name)), 
+      m_byte_size(byte_size), m_enumerators(std::move(enumerators)) {}
+  
+  std::string GetName() const override { return m_name; }
+  uint64_t GetByteSize() const override { return m_byte_size; }
+  
+  const std::vector<Enumerator>& GetEnumerators() const { return m_enumerators; }
+  
+  // Find enumerator by value
+  std::optional<std::string> GetEnumeratorName(int64_t value) const {
+    for (const auto& e : m_enumerators) {
+      if (e.value == value)
+        return e.name;
+    }
+    return std::nullopt;
+  }
+  
+  // Find enumerator by name
+  std::optional<int64_t> GetEnumeratorValue(const std::string& name) const {
+    for (const auto& e : m_enumerators) {
+      if (e.name == name)
+        return e.value;
+    }
+    return std::nullopt;
+  }
 };
 
 } // namespace lldb_private
