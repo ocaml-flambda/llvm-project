@@ -19,6 +19,8 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Mangler.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -29,6 +31,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -521,9 +524,6 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
       MCSymbolRefExpr::create(&MILabel, OutContext),
       MCSymbolRefExpr::create(AP.CurrentFnSymForSize, OutContext), OutContext);
 
-  CSInfos.emplace_back(&MILabel, CSOffsetExpr, ID, std::move(Locations),
-                       std::move(LiveOuts));
-
   // Record the stack size of the current function and update callsite count.
   const MachineFrameInfo &MFI = AP.MF->getFrameInfo();
   const TargetRegisterInfo *RegInfo = AP.MF->getSubtarget().getRegisterInfo();
@@ -536,6 +536,9 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
     CurrentIt->second.RecordCount++;
   else
     FnInfos.insert(std::make_pair(AP.CurrentFnSym, FunctionInfo(FrameSize)));
+
+  CSInfos.emplace_back(&MILabel, CSOffsetExpr, FunctionInfo(FrameSize),
+                       ID, std::move(Locations), std::move(LiveOuts));
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
@@ -771,7 +774,40 @@ static unsigned mapLLVMDwarfRegToOCamlIndex(unsigned DwarfRegNum) {
   }
 }
 
-void StackMaps::emitOCamlFrametable(MCStreamer &OS) {
+static std::string camlGlobalSymName(const Module &M, const char *Id) {
+  const std::string &MId = M.getModuleIdentifier();
+
+  std::string SymName;
+  SymName += "caml";
+  size_t Letter = SymName.size();
+  SymName.append(MId.begin(), llvm::find(MId, '.'));
+  SymName += "__";
+  SymName += Id;
+
+  // Capitalize the first letter of the module name.
+  SymName[Letter] = toupper(SymName[Letter]);
+
+  return SymName;
+}
+
+static void emitCamlGlobal(const Module &M, MCStreamer &OS, const char *Id) {
+  std::string SymName = camlGlobalSymName(M, Id);
+
+  SmallString<128> TmpStr;
+  Mangler::getNameWithPrefix(TmpStr, SymName, M.getDataLayout());
+
+  MCSymbol *Sym = OS.getContext().getOrCreateSymbol(TmpStr);
+
+  OS.emitSymbolAttribute(Sym, MCSA_Global);
+  OS.emitLabel(Sym);
+}
+
+void StackMaps::emitOCamlFrametable(Module &M) {
+  // Print even if empty
+
+  MCStreamer &OS = *AP.OutStreamer;
+  emitCamlGlobal(M, OS, "frametable");
+
   // Number of records
   OS.emitInt64(CSInfos.size());
 
@@ -793,10 +829,8 @@ void StackMaps::emitOCamlFrametable(MCStreamer &OS) {
     OS.emitValue(RelativeAddr, 4);
 
     // frame_data
-    uint64_t FrameSize = 0;
-    if (auto It = FnInfos.find(AP.CurrentFnSym); It != FnInfos.end()) {
-      FrameSize = It->second.StackSize;
-    }
+    // +8 for the return address
+    uint64_t FrameSize = CSI.CSFunctionInfo.StackSize + 8;
 
     if (FrameSize >= 1 << 16) {
       report_fatal_error(
@@ -806,7 +840,7 @@ void StackMaps::emitOCamlFrametable(MCStreamer &OS) {
     OS.emitInt16(FrameSize);
 
     // num_live
-    uint16_t LiveCount = 0;
+    uint64_t LiveCount = 0;
     for (const auto &Loc : CSI.Locations) {
       if (Loc.Type == Location::Register || Loc.Type == Location::Direct ||
           Loc.Type == Location::Indirect) {
@@ -844,8 +878,14 @@ void StackMaps::emitOCamlFrametable(MCStreamer &OS) {
     }
 
     // Align to pointer size
-    OS.emitValueToAlignment(Align(AP.getPointerSize()));
+    OS.emitValueToAlignment(Align(8));
   }
+
+  OS.addBlankLine();
+
+  // Clean up.
+  CSInfos.clear();
+  ConstPool.clear();
 }
 
 /// Serialize the stackmap data.

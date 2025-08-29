@@ -343,6 +343,10 @@ static bool isHandledGCPointerType(Type *T) {
   if (auto VT = dyn_cast<VectorType>(T))
     if (isGCPointerType(VT->getElementType()))
       return true;
+
+  // Being naughty here... This will work out juuuust fine >:]
+  if (StructType *ST = dyn_cast<StructType>(T))
+    return true;
   return false;
 }
 

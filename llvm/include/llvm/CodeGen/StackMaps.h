@@ -320,14 +320,17 @@ public:
   struct CallsiteInfo {
     const MCSymbol *CSLabel = nullptr;
     const MCExpr *CSOffsetExpr = nullptr;
+    const FunctionInfo CSFunctionInfo;
     uint64_t ID = 0;
     LocationVec Locations;
     LiveOutVec LiveOuts;
 
     CallsiteInfo() = default;
-    CallsiteInfo(const MCSymbol *CSLabel, const MCExpr *CSOffsetExpr, uint64_t ID,
+    CallsiteInfo(const MCSymbol *CSLabel, const MCExpr *CSOffsetExpr,
+                 const FunctionInfo CSFunctionInfo, uint64_t ID,
                  LocationVec &&Locations, LiveOutVec &&LiveOuts)
-        : CSLabel(CSLabel), CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
+        : CSLabel(CSLabel), CSOffsetExpr(CSOffsetExpr),
+          CSFunctionInfo(CSFunctionInfo), ID(ID), Locations(std::move(Locations)),
           LiveOuts(std::move(LiveOuts)) {}
   };
 
@@ -358,6 +361,9 @@ public:
 
   /// Get function info.
   FnInfoMap &getFnInfos() { return FnInfos; }
+
+  /// Emit OCaml frametable using stackmap data.
+  void emitOCamlFrametable(Module &M);
 
 private:
   static const char *WSMP;
@@ -411,8 +417,7 @@ private:
 
   /// Emit the callsite info for each stackmap/patchpoint intrinsic call.
   void emitCallsiteEntries(MCStreamer &OS);
-  /// Emit OCaml frametable using stackmap data.
-  void emitOCamlFrametable(MCStreamer &OS);
+
 
   void print(raw_ostream &OS);
   void debug() { print(dbgs()); }
