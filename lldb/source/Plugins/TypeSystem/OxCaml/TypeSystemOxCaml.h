@@ -222,15 +222,15 @@ public:
   lldb::user_id_t GetDieId() const { return m_die_id; }
   
   // Non-virtual - uses DWARF name if present, otherwise falls back to default
-  std::string GetName() const { 
-    return m_name.value_or(GetDefaultName()); 
+  std::string GetDisplayName() const { 
+    return m_name.value_or(GetDefaultDisplayName()); 
   }
   
   virtual uint64_t GetByteSize() const = 0;
   
 protected:
   // Derived classes provide their fallback name
-  virtual std::string GetDefaultName() const = 0;
+  virtual std::string GetDefaultDisplayName() const = 0;
   
   Kind m_kind;
   lldb::user_id_t m_die_id;
@@ -245,7 +245,7 @@ public:
   uint64_t GetByteSize() const override { return 8; }
   
 protected:
-  std::string GetDefaultName() const override { 
+  std::string GetDefaultDisplayName() const override { 
     return "ocaml_value";  // Default for base types without names
   }
 };
@@ -263,9 +263,9 @@ public:
   uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
   
 protected:
-  std::string GetDefaultName() const override {
+  std::string GetDefaultDisplayName() const override {
     // Anonymous typedef uses underlying type's name
-    return m_underlying->GetName();
+    return m_underlying->GetDisplayName();
   }
 };
 
@@ -308,7 +308,7 @@ public:
   }
   
 protected:
-  std::string GetDefaultName() const override { 
+  std::string GetDefaultDisplayName() const override { 
     return "enum";  // Generic name for anonymous enums
   }
 };

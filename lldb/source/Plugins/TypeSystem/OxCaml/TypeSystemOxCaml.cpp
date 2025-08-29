@@ -74,7 +74,7 @@ ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t ty
   // Return the actual DWARF type name for display purposes
   // (while GetTypeName returns "ocaml_value" for formatter matching)
   if (auto* ocaml_type = static_cast<OxCamlType*>(type))
-    return ConstString(ocaml_type->GetName());
+    return ConstString(ocaml_type->GetDisplayName());
   return ConstString();
 }
 
@@ -217,7 +217,7 @@ void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, ll
 
 void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, Stream &s, lldb::DescriptionLevel level) {
   if (auto* ocaml_type = static_cast<OxCamlType*>(type))
-    s.PutCString(ocaml_type->GetName());
+    s.PutCString(ocaml_type->GetDisplayName());
 }
 
 void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
@@ -230,7 +230,7 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
   }
   
   for (const auto& [die_id, type] : m_type_registry) {
-    std::string type_name = type->GetName();
+    std::string type_name = type->GetDisplayName();
     
     // Apply filter if provided
     if (!filter.empty() && type_name.find(filter.str()) == std::string::npos)
@@ -247,7 +247,7 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
       case OxCamlType::Typedef:
         {
           auto* td = static_cast<OxCamlTypedefType*>(type.get());
-          output << " (typedef -> " << td->GetUnderlyingType()->GetName() << ")";
+          output << " (typedef -> " << td->GetUnderlyingType()->GetDisplayName() << ")";
         }
         break;
       case OxCamlType::Enum:

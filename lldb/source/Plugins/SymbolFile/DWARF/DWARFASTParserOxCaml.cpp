@@ -161,7 +161,7 @@ lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_priv
     
   TypeSP type_sp = dwarf->MakeType(
     die.GetID(),
-    ConstString(oxcaml_type->GetName()),
+    ConstString(oxcaml_type->GetDisplayName()),
     oxcaml_type->GetByteSize(),
     nullptr,  // context
     encoding_uid,
