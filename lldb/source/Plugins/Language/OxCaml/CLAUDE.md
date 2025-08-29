@@ -79,6 +79,7 @@ When LLDB loads an OCaml binary with debug information:
 1. **TypeSystem Side**: 
    - All OCaml types return "ocaml_value" from `GetTypeName()`
    - This acts as a universal format specifier for the formatter system
+   - `GetDisplayTypeName()` returns the actual DWARF type name (e.g., "int @ value") for display in frame variables
    - Actual type information is preserved in the OxCamlType class hierarchy
 
 2. **Language Plugin Side**:

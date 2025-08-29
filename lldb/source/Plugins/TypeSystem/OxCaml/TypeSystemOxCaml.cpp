@@ -250,6 +250,12 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
           output << " (typedef -> " << td->GetUnderlyingType()->GetName() << ")";
         }
         break;
+      case OxCamlType::Enum:
+        {
+          auto* et = static_cast<OxCamlEnumType*>(type.get());
+          output << " (enum type, " << et->GetEnumerators().size() << " enumerators, " << type->GetByteSize() << " bytes)";
+        }
+        break;
     }
     output << "\n";
   }
