@@ -14,6 +14,7 @@
 
 namespace lldb_private {
 class TypeSystemOxCaml;
+class OxCamlType;
 }
 
 class DWARFASTParserOxCaml : public lldb_private::plugin::dwarf::DWARFASTParser {
@@ -60,6 +61,12 @@ public:
 
 private:
   [[maybe_unused]] lldb_private::TypeSystemOxCaml &m_oxcaml_typesystem;
+  
+  // Helper methods for parsing different DWARF DIE types
+  std::unique_ptr<lldb_private::OxCamlType> ParseBaseType(const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseTypedefType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseEnumType(const DWARFDIE &die);
+  lldb::TypeSP CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type);
 };
 
 #endif // LLDB_SOURCE_PLUGINS_SYMBOLFILE_DWARF_DWARFASTPARSEROXCAML_H

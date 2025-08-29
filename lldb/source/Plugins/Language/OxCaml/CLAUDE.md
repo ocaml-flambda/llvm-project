@@ -76,7 +76,7 @@ When LLDB loads an OCaml binary with debug information:
 
 ### How It Works
 
-1. **TypeSystem Side**: 
+1. **TypeSystem Side**:
    - All OCaml types return "ocaml_value" from `GetTypeName()`
    - This acts as a universal format specifier for the formatter system
    - `GetDisplayTypeName()` returns the actual DWARF type name (e.g., "int @ value") for display in frame variables
@@ -95,14 +95,14 @@ When LLDB loads an OCaml binary with debug information:
        return ConstString("ocaml_value");  // Universal format specifier
      return ConstString();
    }
-   
+
    // Single formatter registration in OxCamlLanguage:
    g_category->AddTypeSummary(
        "ocaml_value",  // All OCaml types match this
        eFormatterMatchExact,
        TypeSummaryImplSP(new CXXFunctionSummaryFormat(...))
    );
-   
+
    // Formatter examines actual type class:
    auto* oxcaml_type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
    while (oxcaml_type->GetKind() == OxCamlType::Typedef) {
@@ -174,7 +174,7 @@ The OxCaml formatter uses a single-formatter, multi-type dispatch pattern:
 ### Example Flow
 ```
 Variable "x" of type "bool @ value"
-  → GetTypeName() returns "ocaml_value" 
+  → GetTypeName() returns "ocaml_value"
   → Formatter matches and is invoked
   → Extracts OxCamlTypedefType from CompilerType
   → Resolves to underlying OxCamlEnumType
@@ -276,11 +276,11 @@ Test the plugin efficiently using -o options:
 ## Established Workflow Patterns
 
 ### Adding DWARF Support for New Tags
-1. Check the tag type in `ParseTypeFromDWARF`
-2. Extract relevant attributes (name, type references)
-3. Create appropriate Type objects using `dwarf->MakeType()`
-4. For typedefs, resolve underlying types recursively
-5. Handle anonymous types by skipping to underlying type
+1. Add a new case to the switch statement in `ParseTypeFromDWARF`
+2. Implement a new `Parse[TagType]` helper method following the established pattern
+3. Create the appropriate `OxCaml[TagType]` class in the TypeSystem hierarchy
+4. Add the new helper method declaration to `DWARFASTParserOxCaml.h`
+5. Update the formatter dispatch logic if needed for the new type class
 
 ### Debugging Variable Display Issues
 1. First check if raw data is available via `DataExtractor`
@@ -333,9 +333,15 @@ Pointer:   [63-1 bits: address][1 bit: 0]
 - `GetEncoding` - Specify how values are encoded
 
 **DWARF Parser Methods:**
-- `ParseTypeFromDWARF` - Main entry point for type parsing
+- `ParseTypeFromDWARF` - Main entry point for type parsing (dispatcher pattern with helper methods)
+- `ParseBaseType` - Handle DW_TAG_base_type DIEs
+- `ParseTypedefType` - Handle DW_TAG_typedef DIEs with recursive type resolution
+- `ParseEnumType` - Handle DW_TAG_enumeration_type DIEs
+- `CreateLLDBType` - Common LLDB Type object creation logic
 - `ParseTypeModifier` - Handle type qualifiers
 - `CompleteTypeFromDWARF` - Fill in type details
+
+The parser uses a modular design where `ParseTypeFromDWARF` dispatches to specialized helper methods based on DWARF tag type, improving maintainability and extensibility.
 
 ### Methods That Can Stay Minimal
 

@@ -52,63 +52,91 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
     // Type not in registry, create it based on DWARF tag
     std::unique_ptr<OxCamlType> new_type;
     
-    if (die.Tag() == llvm::dwarf::DW_TAG_base_type) {
-      new_type = std::make_unique<OxCamlBaseType>(die);
-    } 
-    else if (die.Tag() == llvm::dwarf::DW_TAG_typedef) {
-      // Get underlying type DIE
-      DWARFDIE underlying_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
-      if (!underlying_die)
+    switch (die.Tag()) {
+      case llvm::dwarf::DW_TAG_base_type:
+        new_type = ParseBaseType(die);
+        break;
+      case llvm::dwarf::DW_TAG_typedef:
+        new_type = ParseTypedefType(sc, die);
+        break;
+      case llvm::dwarf::DW_TAG_enumeration_type:
+        new_type = ParseEnumType(die);
+        break;
+      default:
+        // Unsupported tag
         return TypeSP();
-      
-      // Recursively parse underlying type (ensures it's in registry)
-      TypeSP underlying_type_sp = ParseTypeFromDWARF(sc, underlying_die, nullptr);
-      if (!underlying_type_sp)
-        return TypeSP();
-      
-      // Get the underlying OxCamlType from registry (should exist now)
-      auto underlying_opt = m_oxcaml_typesystem.GetType(underlying_die.GetID());
-      if (!underlying_opt.has_value())
-        return TypeSP();
-      
-      new_type = std::make_unique<OxCamlTypedefType>(die, underlying_opt.value());
     }
-    else if (die.Tag() == llvm::dwarf::DW_TAG_enumeration_type) {
-      // Parse enum from DWARF
-      std::string name;
-      if (const char* die_name = die.GetName())
-        name = die_name;
-      
-      // Get byte size
-      uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 for OCaml
-      
-      // Parse enumerators
-      std::vector<OxCamlEnumType::Enumerator> enumerators;
-      for (DWARFDIE child : die.children()) {
-        if (child.Tag() == llvm::dwarf::DW_TAG_enumerator) {
-          const char* enum_name = child.GetName();
-          if (!enum_name)
-            continue;
-          
-          // Get the enumerator value - OCaml uses unsigned values (odd numbers)
-          int64_t enum_value = child.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_const_value, 0);
-          
-          enumerators.push_back({enum_name, enum_value});
-        }
-      }
-      
-      new_type = std::make_unique<OxCamlEnumType>(die, std::move(name), byte_size, std::move(enumerators));
-    }
-    else {
-      // Unsupported tag
+    
+    if (!new_type)
       return TypeSP();
-    }
     
     // Add to registry and keep raw pointer
     oxcaml_type = new_type.get();
     m_oxcaml_typesystem.RegisterType(die_id, std::move(new_type));
   }
   
+  // Create LLDB Type object using helper method
+  TypeSP type_sp = CreateLLDBType(die, oxcaml_type);
+  
+  if (type_is_new_ptr)
+    *type_is_new_ptr = true;
+  
+  return type_sp;
+}
+
+// Helper methods for parsing different DWARF DIE types
+
+std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(const DWARFDIE &die) {
+  return std::make_unique<OxCamlBaseType>(die);
+}
+
+std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType(const SymbolContext &sc, const DWARFDIE &die) {
+  // Get underlying type DIE
+  DWARFDIE underlying_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
+  if (!underlying_die)
+    return nullptr;
+  
+  // Recursively parse underlying type (ensures it's in registry)
+  TypeSP underlying_type_sp = ParseTypeFromDWARF(sc, underlying_die, nullptr);
+  if (!underlying_type_sp)
+    return nullptr;
+  
+  // Get the underlying OxCamlType from registry (should exist now)
+  auto underlying_opt = m_oxcaml_typesystem.GetType(underlying_die.GetID());
+  if (!underlying_opt.has_value())
+    return nullptr;
+  
+  return std::make_unique<OxCamlTypedefType>(die, underlying_opt.value());
+}
+
+std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(const DWARFDIE &die) {
+  // Parse enum from DWARF
+  std::string name;
+  if (const char* die_name = die.GetName())
+    name = die_name;
+  
+  // Get byte size
+  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 for OCaml
+  
+  // Parse enumerators
+  std::vector<OxCamlEnumType::Enumerator> enumerators;
+  for (DWARFDIE child : die.children()) {
+    if (child.Tag() == llvm::dwarf::DW_TAG_enumerator) {
+      const char* enum_name = child.GetName();
+      if (!enum_name)
+        continue;
+      
+      // Get the enumerator value - OCaml uses unsigned values (odd numbers)
+      int64_t enum_value = child.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_const_value, 0);
+      
+      enumerators.push_back({enum_name, enum_value});
+    }
+  }
+  
+  return std::make_unique<OxCamlEnumType>(die, std::move(name), byte_size, std::move(enumerators));
+}
+
+lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type) {
   // Create CompilerType wrapping the registry-owned OxCamlType
   CompilerType compiler_type(m_oxcaml_typesystem.weak_from_this(), oxcaml_type);
   
@@ -130,7 +158,7 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
     return TypeSP();
     
   TypeSP type_sp = dwarf->MakeType(
-    die_id,
+    die.GetID(),
     ConstString(oxcaml_type->GetName()),
     oxcaml_type->GetByteSize(),
     nullptr,  // context
@@ -140,9 +168,6 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
     compiler_type,
     Type::ResolveState::Full
   );
-  
-  if (type_is_new_ptr)
-    *type_is_new_ptr = true;
   
   return type_sp;
 }
