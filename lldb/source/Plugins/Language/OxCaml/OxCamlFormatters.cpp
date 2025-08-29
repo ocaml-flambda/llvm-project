@@ -7,10 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "OxCamlFormatters.h"
+#include "LogChannelOxCaml.h"
 #include "lldb/ValueObject/ValueObject.h"
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/Symbol/CompilerType.h"
+#include "lldb/Utility/Log.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
 #include <cinttypes>
 
@@ -21,12 +23,19 @@ using namespace lldb_private::formatters::oxcaml;
 
 bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
     ValueObject &valobj, Stream &stream, const TypeSummaryOptions &options) {
+  Log *log = GetLog(OxCamlLog::Formatting);
+  
   // Get the raw data directly
   DataExtractor data;
   Status error;
   uint64_t data_size = valobj.GetData(data, error);
   
+  LLDB_LOG(log, "OxCamlValue_SummaryProvider: Processing value '{0}', data_size={1}", 
+           valobj.GetName().GetCString(), data_size);
+  
   if (!error.Success() || data_size < 8) {
+    LLDB_LOG(log, "OxCamlValue_SummaryProvider: Failed to get data, error: {0}", 
+             error.AsCString());
     stream.Printf("<unavailable>");
     return true;
   }

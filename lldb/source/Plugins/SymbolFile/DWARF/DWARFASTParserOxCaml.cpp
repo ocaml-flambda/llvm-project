@@ -22,6 +22,7 @@
 #include "lldb/Symbol/Function.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Utility/Log.h"
+#include "../../Language/OxCaml/LogChannelOxCaml.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -36,10 +37,18 @@ DWARFASTParserOxCaml::~DWARFASTParserOxCaml() = default;
 lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        const DWARFDIE &die,
                                                        bool *type_is_new_ptr) {
-  if (!die.IsValid())
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  
+  if (!die.IsValid()) {
+    LLDB_LOG(log, "ParseTypeFromDWARF: Invalid DIE");
     return TypeSP();
+  }
   
   user_id_t die_id = die.GetID();
+  const char* die_name = die.GetName();
+  
+  LLDB_LOG(log, "ParseTypeFromDWARF: DIE 0x{0:x16} tag={1} name=\"{2}\"", 
+           die_id, die.Tag(), die_name ? die_name : "<anonymous>");
   
   // Check if type already exists in registry
   std::optional<OxCamlType*> existing_type = m_oxcaml_typesystem.GetType(die_id);
@@ -48,34 +57,45 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
   if (existing_type.has_value()) {
     // Type already in registry
     oxcaml_type = existing_type.value();
+    LLDB_LOG(log, "ParseTypeFromDWARF: Found existing type in registry: {0}", 
+             oxcaml_type->GetDisplayName());
   } else {
     // Type not in registry, create it based on DWARF tag
     std::unique_ptr<OxCamlType> new_type;
     
     switch (die.Tag()) {
       case llvm::dwarf::DW_TAG_base_type:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing base type");
         new_type = ParseBaseType(die);
         break;
       case llvm::dwarf::DW_TAG_typedef:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing typedef type");
         new_type = ParseTypedefType(sc, die);
         break;
       case llvm::dwarf::DW_TAG_enumeration_type:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing enum type");
         new_type = ParseEnumType(die);
         break;
       default:
-        // Unsupported tag
+        LLDB_LOG(log, "ParseTypeFromDWARF: Unsupported DWARF tag: {0}", die.Tag());
         return TypeSP();
     }
     
-    if (!new_type)
+    if (!new_type) {
+      LLDB_LOG(log, "ParseTypeFromDWARF: Failed to create type");
       return TypeSP();
+    }
     
     // Add to registry and keep raw pointer
     oxcaml_type = new_type.get();
+    LLDB_LOG(log, "ParseTypeFromDWARF: Created new type: {0}, registering in type system", 
+             oxcaml_type->GetDisplayName());
     m_oxcaml_typesystem.RegisterType(die_id, std::move(new_type));
   }
   
   // Create LLDB Type object using helper method
+  LLDB_LOG(log, "ParseTypeFromDWARF: Creating LLDB Type object for {0}", 
+           oxcaml_type->GetDisplayName());
   TypeSP type_sp = CreateLLDBType(die, oxcaml_type);
   
   if (type_is_new_ptr)
@@ -205,8 +225,12 @@ DWARFASTParserOxCaml::ConstructDemangledNameFromDWARF(const DWARFDIE &die) {
 Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
                                                         const DWARFDIE &die,
                                                         AddressRanges func_ranges) {
-  if (die.Tag() != llvm::dwarf::DW_TAG_subprogram)
+  Log *log = GetLog(OxCamlLog::Functions);
+  
+  if (die.Tag() != llvm::dwarf::DW_TAG_subprogram) {
+    LLDB_LOG(log, "ParseFunctionFromDWARF: Not a subprogram DIE, tag={0}", die.Tag());
     return nullptr;
+  }
 
   const char *name = nullptr;
   const char *mangled = nullptr;
@@ -223,8 +247,12 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   if (!die.GetDIENamesAndRanges(name, mangled, unused_ranges, decl_file,
                                 decl_line, decl_column, call_file, call_line,
                                 call_column, &frame_base)) {
+    LLDB_LOG(log, "ParseFunctionFromDWARF: Failed to extract DIE names and ranges");
     return nullptr;
   }
+  
+  LLDB_LOG(log, "ParseFunctionFromDWARF: DIE 0x{0:x16} name=\"{1}\" mangled=\"{2}\"", 
+           die.GetID(), name ? name : "<null>", mangled ? mangled : "<null>");
 
 
   // Create the function name
@@ -257,8 +285,12 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
   // Safety check - SymbolFileDWARF should never pass empty ranges
   // If it does, we can't create a valid function
   if (func_ranges.empty()) {
+    LLDB_LOG(log, "ParseFunctionFromDWARF: Empty address ranges, cannot create function");
     return nullptr;
   }
+  
+  LLDB_LOG(log, "ParseFunctionFromDWARF: Creating function with {0} address ranges", 
+           func_ranges.size());
 
   // Get the function's base address
   Address func_addr = func_ranges[0].GetBaseAddress();
@@ -284,6 +316,11 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(CompileUnit &comp_unit,
 
     // Add the function to the compile unit - crucial for proper integration!
     comp_unit.AddFunction(func_sp);
+    
+    LLDB_LOG(log, "ParseFunctionFromDWARF: Successfully created and added function \"{0}\" to compile unit", 
+             func_sp->GetName().GetCString());
+  } else {
+    LLDB_LOG(log, "ParseFunctionFromDWARF: Failed to create Function object");
   }
 
   return func_sp.get();

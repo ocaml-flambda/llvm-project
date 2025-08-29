@@ -8,12 +8,14 @@
 
 #include "OxCamlLanguage.h"
 #include "OxCamlFormatters.h"
+#include "LogChannelOxCaml.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/DataFormatters/DataVisualization.h"
 #include "lldb/DataFormatters/TypeSummary.h"
 #include "lldb/Utility/Stream.h"
+#include "lldb/Utility/Log.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -40,9 +42,13 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
   static TypeCategoryImplSP g_category;
 
   llvm::call_once(g_initialize, [this]() -> void {
+    Log *log = GetLog(OxCamlLog::Formatting);
+    LLDB_LOG(log, "GetFormatters: Initializing OxCaml formatters");
+
     DataVisualization::Categories::GetCategory(ConstString(GetPluginName()),
                                                g_category);
     if (g_category) {
+      LLDB_LOG(log, "GetFormatters: Successfully created category '{0}'", GetPluginName());
       // Create formatter for ocaml_value base type
       TypeSummaryImpl::Flags flags;
       flags.SetCascades(true)
@@ -55,6 +61,7 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
       auto formatter = formatters::oxcaml::OxCamlValue_SummaryProvider;
 
       // Register formatter for base type "ocaml_value"
+      LLDB_LOG(log, "GetFormatters: Registering formatter for type 'ocaml_value'");
       g_category->AddTypeSummary(
           "ocaml_value",
           eFormatterMatchExact,
@@ -68,6 +75,7 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
 }
 
 void OxCamlLanguage::Initialize() {
+  LogChannelOxCaml::Initialize();
   PluginManager::RegisterPlugin(GetPluginNameStatic(),
                                 "OxCaml Language",
                                 CreateInstance);
@@ -75,6 +83,7 @@ void OxCamlLanguage::Initialize() {
 
 void OxCamlLanguage::Terminate() {
   PluginManager::UnregisterPlugin(CreateInstance);
+  LogChannelOxCaml::Terminate();
 }
 
 lldb_private::Language *OxCamlLanguage::CreateInstance(lldb::LanguageType language) {

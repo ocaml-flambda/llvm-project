@@ -197,6 +197,34 @@ The OxCaml plugin will need to handle:
 - **Variable display issues**: Check raw data with DataExtractor before investigating ValueObject
 - **TypeSystem configuration**: Ensure IsScalarType, IsIntegerType return true for basic types
 
+### OxCaml Plugin Logging
+
+The OxCaml plugin provides comprehensive logging through the "oxcaml" log channel with the following categories:
+
+- **`types`** - DWARF type parsing
+- **`functions`** - Function parsing and name resolution
+- **`formatting`** - Value formatting and display operations
+- **`registry`** - Type registry operations (add/lookup)
+- **`verbose`** - Verbose debugging information
+
+**Usage:**
+```bash
+# Enable all OxCaml logging
+(lldb) log enable oxcaml all
+
+# Enable specific categories
+(lldb) log enable oxcaml types functions registry
+
+# Enable with verbose details (shows cache hits, etc.)
+(lldb) log enable -v oxcaml registry
+
+# Log to file
+(lldb) log enable -f /tmp/oxcaml.log oxcaml all
+
+# Disable logging
+(lldb) log disable oxcaml
+```
+
 ### Safety Considerations
 - DO NOT, under any circumstances, use raw integers such as 1 as pointers.
 - Always validate that address ranges exist before creating Function objects

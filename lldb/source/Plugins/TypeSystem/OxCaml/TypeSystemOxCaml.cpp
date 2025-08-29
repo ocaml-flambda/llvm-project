@@ -17,6 +17,7 @@
 #include "llvm/Support/Format.h"
 
 #include "../../SymbolFile/DWARF/DWARFASTParserOxCaml.h"
+#include "../../Language/OxCaml/LogChannelOxCaml.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -65,16 +66,23 @@ CompilerType TypeSystemOxCaml::GetTypeFromMangledTypename(ConstString mangled_ty
 
 
 ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
-  if (static_cast<OxCamlType*>(type))
+  if (static_cast<OxCamlType*>(type)) {
     return ConstString("ocaml_value");  // Universal format specifier for all OCaml types
+  }
   return ConstString();
 }
 
 ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t type) {
+  Log *log = GetLog(OxCamlLog::Formatting);
   // Return the actual DWARF type name for display purposes
   // (while GetTypeName returns "ocaml_value" for formatter matching)
-  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
-    return ConstString(ocaml_type->GetDisplayName());
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type)) {
+    std::string display_name = ocaml_type->GetDisplayName();
+    LLDB_LOGV(log, "GetDisplayTypeName: Returning display name '{0}' for type kind {1}",
+              display_name, static_cast<int>(ocaml_type->GetKind()));
+    return ConstString(display_name);
+  }
+  LLDB_LOGV(log, "GetDisplayTypeName: Invalid type, returning empty name");
   return ConstString();
 }
 
@@ -103,14 +111,21 @@ CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
 
 // Type registry methods
 std::optional<OxCamlType*> TypeSystemOxCaml::GetType(lldb::user_id_t die_id) {
+  Log *log = GetLog(OxCamlLog::TypeRegistry);
   auto it = m_type_registry.find(die_id);
   if (it != m_type_registry.end()) {
+    LLDB_LOGV(log, "GetType: DIE 0x{0:x16} -> cache hit: {1}",
+              die_id, it->second->GetDisplayName());
     return it->second.get();
   }
+  LLDB_LOG(log, "GetType: DIE 0x{0:x16} -> cache miss", die_id);
   return std::nullopt;
 }
 
 void TypeSystemOxCaml::RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> type) {
+  Log *log = GetLog(OxCamlLog::TypeRegistry);
+  LLDB_LOG(log, "RegisterType: DIE 0x{0:x16} -> {1} (kind: {2})",
+           die_id, type->GetDisplayName(), static_cast<int>(type->GetKind()));
   m_type_registry[die_id] = std::move(type);
 }
 
@@ -223,22 +238,22 @@ void TypeSystemOxCaml::DumpTypeDescription(lldb::opaque_compiler_type_t type, St
 void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
   output << "OxCaml TypeSystem - Type Registry:\n";
   output << "===================================\n";
-  
+
   if (m_type_registry.empty()) {
     output << "(empty)\n";
     return;
   }
-  
+
   for (const auto& [die_id, type] : m_type_registry) {
     std::string type_name = type->GetDisplayName();
-    
+
     // Apply filter if provided
     if (!filter.empty() && type_name.find(filter.str()) == std::string::npos)
       continue;
-      
-    output << "DIE 0x" << llvm::format_hex(die_id, 0) 
+
+    output << "DIE 0x" << llvm::format_hex(die_id, 0)
            << ": " << type_name;
-    
+
     // Show additional info based on type kind
     switch (type->GetKind()) {
       case OxCamlType::Base:
