@@ -37,6 +37,8 @@ public:
   static llvm::StringRef GetPluginNameStatic();
   
   llvm::StringRef GetPluginName() override;
+  
+  bool ShouldShowTypesInFunctionArguments() const override { return true; }
 };
 
 } // namespace lldb_private

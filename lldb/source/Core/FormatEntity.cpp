@@ -2635,10 +2635,28 @@ void FormatEntity::PrettyPrintFunctionArguments(
       var_representation = ss.GetString();
     if (arg_idx > 0)
       out_stream.PutCString(", ");
+    
+    // Check if types should be shown for this language
+    bool show_types = false;
+    if (var_value_sp) {
+      lldb::LanguageType lang_type = var_value_sp->GetObjectRuntimeLanguage();
+      if (lang_type == lldb::eLanguageTypeUnknown)
+        lang_type = var_value_sp->GetPreferredDisplayLanguage();
+      if (Language *language_plugin = Language::FindPlugin(lang_type))
+        show_types = language_plugin->ShouldShowTypesInFunctionArguments();
+    }
+    
     if (var_value_sp->GetError().Success()) {
-      if (!var_representation.empty())
+      if (!var_representation.empty()) {
         out_stream.Printf("%s=%s", var_name, var_representation.str().c_str());
-      else
+        
+        // Append type information if requested and available
+        if (show_types) {
+          ConstString type_name = var_value_sp->GetDisplayTypeName();
+          if (type_name)
+            out_stream.Printf(" : %s", type_name.GetCString());
+        }
+      } else
         out_stream.Printf("%s=%s at %s", var_name,
                           var_value_sp->GetTypeName().GetCString(),
                           var_value_sp->GetLocationAsCString());
