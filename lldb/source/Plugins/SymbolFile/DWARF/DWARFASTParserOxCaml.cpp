@@ -86,8 +86,15 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
 
 // Helper methods for parsing different DWARF DIE types
 
+// Helper to extract optional name from DIE
+std::optional<std::string> DWARFASTParserOxCaml::ExtractTypeName(const DWARFDIE &die) {
+  if (const char* name = die.GetName())
+    return std::string(name);
+  return std::nullopt;
+}
+
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(const DWARFDIE &die) {
-  return std::make_unique<OxCamlBaseType>(die);
+  return std::make_unique<OxCamlBaseType>(die.GetID(), ExtractTypeName(die));
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType(const SymbolContext &sc, const DWARFDIE &die) {
@@ -106,15 +113,10 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType
   if (!underlying_opt.has_value())
     return nullptr;
   
-  return std::make_unique<OxCamlTypedefType>(die, underlying_opt.value());
+  return std::make_unique<OxCamlTypedefType>(die.GetID(), ExtractTypeName(die), underlying_opt.value());
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(const DWARFDIE &die) {
-  // Parse enum from DWARF
-  std::string name;
-  if (const char* die_name = die.GetName())
-    name = die_name;
-  
   // Get byte size
   uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 for OCaml
   
@@ -133,7 +135,7 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(co
     }
   }
   
-  return std::make_unique<OxCamlEnumType>(die, std::move(name), byte_size, std::move(enumerators));
+  return std::make_unique<OxCamlEnumType>(die.GetID(), ExtractTypeName(die), byte_size, std::move(enumerators));
 }
 
 lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type) {
@@ -147,7 +149,7 @@ lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_priv
   if (oxcaml_type->GetKind() == OxCamlType::Typedef) {
     encoding_type = Type::eEncodingIsTypedefUID;
     auto* typedef_type = static_cast<OxCamlTypedefType*>(oxcaml_type);
-    encoding_uid = typedef_type->GetUnderlyingType()->GetDIE().GetID();
+    encoding_uid = typedef_type->GetUnderlyingType()->GetDieId();
   } else {
     encoding_type = Type::eEncodingIsUID;
   }

@@ -62,6 +62,9 @@ public:
 private:
   [[maybe_unused]] lldb_private::TypeSystemOxCaml &m_oxcaml_typesystem;
   
+  // Helper to extract optional name from DIE
+  std::optional<std::string> ExtractTypeName(const DWARFDIE &die);
+  
   // Helper methods for parsing different DWARF DIE types
   std::unique_ptr<lldb_private::OxCamlType> ParseBaseType(const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseTypedefType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);

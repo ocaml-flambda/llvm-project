@@ -214,46 +214,59 @@ class OxCamlType {
 public:
   enum Kind { Base, Typedef, Enum };
   
-  OxCamlType(Kind k, const DWARFDIE& die) : m_kind(k), m_die(die) {}
+  OxCamlType(Kind k, lldb::user_id_t die_id, std::optional<std::string> name) 
+    : m_kind(k), m_die_id(die_id), m_name(std::move(name)) {}
   virtual ~OxCamlType() = default;
   
   Kind GetKind() const { return m_kind; }
-  const DWARFDIE& GetDIE() const { return m_die; }
+  lldb::user_id_t GetDieId() const { return m_die_id; }
   
-  // Pure virtual methods
-  virtual std::string GetName() const = 0;
+  // Non-virtual - uses DWARF name if present, otherwise falls back to default
+  std::string GetName() const { 
+    return m_name.value_or(GetDefaultName()); 
+  }
+  
   virtual uint64_t GetByteSize() const = 0;
   
 protected:
+  // Derived classes provide their fallback name
+  virtual std::string GetDefaultName() const = 0;
+  
   Kind m_kind;
-  DWARFDIE m_die;
+  lldb::user_id_t m_die_id;
+  std::optional<std::string> m_name;  // From DW_AT_name if present
 };
 
 class OxCamlBaseType : public OxCamlType {
 public:
-  OxCamlBaseType(const DWARFDIE& die) : OxCamlType(Base, die) {}
+  OxCamlBaseType(lldb::user_id_t die_id, std::optional<std::string> name)
+    : OxCamlType(Base, die_id, std::move(name)) {}
   
-  std::string GetName() const override { return "ocaml_value"; }
   uint64_t GetByteSize() const override { return 8; }
+  
+protected:
+  std::string GetDefaultName() const override { 
+    return "ocaml_value";  // Default for base types without names
+  }
 };
 
 class OxCamlTypedefType : public OxCamlType {
   OxCamlType* m_underlying;  // Non-owning pointer to registry-owned type
   
 public:
-  OxCamlTypedefType(const DWARFDIE& die, OxCamlType* underlying)
-    : OxCamlType(Typedef, die), m_underlying(underlying) {}
+  OxCamlTypedefType(lldb::user_id_t die_id, std::optional<std::string> name, 
+                    OxCamlType* underlying)
+    : OxCamlType(Typedef, die_id, std::move(name)), 
+      m_underlying(underlying) {}
   
   OxCamlType* GetUnderlyingType() const { return m_underlying; }
+  uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
   
-  std::string GetName() const override {
-    if (const char* name = m_die.GetName())
-      return name;
-    // Anonymous typedef - use underlying type's name
+protected:
+  std::string GetDefaultName() const override {
+    // Anonymous typedef uses underlying type's name
     return m_underlying->GetName();
   }
-  
-  uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
 };
 
 class OxCamlEnumType : public OxCamlType {
@@ -264,19 +277,16 @@ public:
   };
   
 private:
-  std::string m_name;
   uint64_t m_byte_size;
   std::vector<Enumerator> m_enumerators;
   
 public:
-  OxCamlEnumType(const DWARFDIE& die, std::string name, uint64_t byte_size,
-                 std::vector<Enumerator> enumerators)
-    : OxCamlType(Enum, die), m_name(std::move(name)), 
+  OxCamlEnumType(lldb::user_id_t die_id, std::optional<std::string> name,
+                 uint64_t byte_size, std::vector<Enumerator> enumerators)
+    : OxCamlType(Enum, die_id, std::move(name)), 
       m_byte_size(byte_size), m_enumerators(std::move(enumerators)) {}
   
-  std::string GetName() const override { return m_name; }
   uint64_t GetByteSize() const override { return m_byte_size; }
-  
   const std::vector<Enumerator>& GetEnumerators() const { return m_enumerators; }
   
   // Find enumerator by value
@@ -295,6 +305,11 @@ public:
         return e.value;
     }
     return std::nullopt;
+  }
+  
+protected:
+  std::string GetDefaultName() const override { 
+    return "enum";  // Generic name for anonymous enums
   }
 };
 
