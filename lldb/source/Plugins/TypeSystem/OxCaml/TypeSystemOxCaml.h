@@ -264,9 +264,9 @@ public:
   };
   
 private:
-  std::vector<Enumerator> m_enumerators;
-  uint64_t m_byte_size;
   std::string m_name;
+  uint64_t m_byte_size;
+  std::vector<Enumerator> m_enumerators;
   
 public:
   OxCamlEnumType(const DWARFDIE& die, std::string name, uint64_t byte_size,
