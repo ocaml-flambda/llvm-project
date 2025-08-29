@@ -71,8 +71,11 @@ ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, boo
 }
 
 ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t type) {
-  // For now, display name is the same as type name
-  return GetTypeName(type, false);
+  // Return the actual DWARF type name for display purposes
+  // (while GetTypeName returns "ocaml_value" for formatter matching)
+  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+    return ConstString(ocaml_type->GetName());
+  return ConstString();
 }
 
 llvm::Expected<uint64_t> TypeSystemOxCaml::GetBitSize(lldb::opaque_compiler_type_t type, ExecutionContextScope *exe_scope) {
