@@ -24,23 +24,30 @@ using namespace lldb_private::formatters::oxcaml;
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::ProcessSP process_sp);
 static bool FormatBase(Stream &stream, uint64_t value);
+static bool FormatFallback(Stream &stream, uint64_t value);
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value);
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, uint64_t value, lldb::ProcessSP process_sp);
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, uint64_t value, lldb::ProcessSP process_sp);
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, uint64_t value, lldb::ProcessSP process_sp);
 
-// Format base/immediate values
+// Format fallback - just print hex value (indicates error/unknown)
+static bool FormatFallback(Stream &stream, uint64_t value) {
+  stream.Printf("0x%" PRIx64, value);
+  return true;
+}
+
+// Format base OCaml values
 static bool FormatBase(Stream &stream, uint64_t value) {
-  if (value & 1) {
+  if (value == 1) {
+    // Unit value (immediate 0)
+    stream.Printf("()");
+  } else if (value & 1) {
     // Immediate integer - shift and print
     int64_t int_val = ((int64_t)value) >> 1;
     stream.Printf("%" PRId64, int_val);
-  } else if (value == 0) {
-    // Unit value
-    stream.Printf("()");
   } else {
-    // Pointer (shouldn't happen for base, but be safe)
-    stream.Printf("<0x%" PRIx64 ">", value);
+    // Pointer value
+    stream.Printf("0x%" PRIx64, value);
   }
   return true;
 }
@@ -51,8 +58,10 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value
   if (name_opt.has_value()) {
     stream.PutCString(name_opt.value());
   } else {
-    // Fallback to base formatting
-    FormatBase(stream, value);
+    // Fallback: log and use fallback formatter
+    Log *log = GetLog(OxCamlLog::Formatting);
+    LLDB_LOG(log, "FormatEnum: Enumerator not found for value 0x{0:x}, using fallback formatting", value);
+    return FormatFallback(stream, value);
   }
   return true;
 }
@@ -60,11 +69,6 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value
 // Format pointer values by dereferencing
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, 
                          uint64_t value, lldb::ProcessSP process_sp) {
-  if (value == 0) {
-    stream.Printf("()");  // unit
-    return true;
-  }
-  
   if (value & 1) {
     stream.Printf("<invalid pointer: 0x%" PRIx64 ">", value);
     return true;
@@ -129,11 +133,14 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
 // Main dispatcher function
 static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::ProcessSP process_sp) {
   if (!type) {
-    return FormatBase(stream, value);  // Fallback to base formatting
+    Log *log = GetLog(OxCamlLog::Formatting);
+    LLDB_LOG(log, "FormatValue: No type information available, using fallback formatter for value 0x{0:x}", value);
+    return FormatFallback(stream, value);
   }
   
   switch (type->GetKind()) {
     case OxCamlType::Base:
+      // Normal case - no logging needed
       return FormatBase(stream, value);
     case OxCamlType::Enum:
       return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), value);
@@ -144,7 +151,11 @@ static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::
     case OxCamlType::Structure:
       return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), value, process_sp);
     default:
-      return FormatBase(stream, value);  // Fallback
+      {
+        Log *log = GetLog(OxCamlLog::Formatting);
+        LLDB_LOG(log, "FormatValue: Unknown type kind, using fallback formatter for value 0x{0:x}", value);
+        return FormatFallback(stream, value);
+      }
   }
 }
 
