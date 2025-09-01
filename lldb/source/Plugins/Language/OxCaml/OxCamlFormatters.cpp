@@ -21,21 +21,141 @@ using namespace lldb_private;
 using namespace lldb_private::formatters;
 using namespace lldb_private::formatters::oxcaml;
 
+// Forward declarations
+static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::ProcessSP process_sp);
+static bool FormatBase(Stream &stream, uint64_t value);
+static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value);
+static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, uint64_t value, lldb::ProcessSP process_sp);
+static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, uint64_t value, lldb::ProcessSP process_sp);
+static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, uint64_t value, lldb::ProcessSP process_sp);
+
+// Format base/immediate values
+static bool FormatBase(Stream &stream, uint64_t value) {
+  if (value & 1) {
+    // Immediate integer - shift and print
+    int64_t int_val = ((int64_t)value) >> 1;
+    stream.Printf("%" PRId64, int_val);
+  } else if (value == 0) {
+    // Unit value
+    stream.Printf("()");
+  } else {
+    // Pointer (shouldn't happen for base, but be safe)
+    stream.Printf("<0x%" PRIx64 ">", value);
+  }
+  return true;
+}
+
+// Format enum values
+static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value) {
+  auto name_opt = enum_type->GetEnumeratorName(value);
+  if (name_opt.has_value()) {
+    stream.PutCString(name_opt.value());
+  } else {
+    // Fallback to base formatting
+    FormatBase(stream, value);
+  }
+  return true;
+}
+
+// Format pointer values by dereferencing
+static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, 
+                         uint64_t value, lldb::ProcessSP process_sp) {
+  if (value == 0) {
+    stream.Printf("()");  // unit
+    return true;
+  }
+  
+  if (value & 1) {
+    stream.Printf("<invalid pointer: 0x%" PRIx64 ">", value);
+    return true;
+  }
+  
+  OxCamlType* pointed_to = ptr_type->GetPointedToType();
+  if (!pointed_to || !process_sp) {
+    stream.Printf("<0x%" PRIx64 ">", value);
+    return true;
+  }
+  
+  // Read the pointed-to value
+  uint64_t deref_value;
+  Status error;
+  size_t bytes_read = process_sp->ReadMemory(value, &deref_value, 8, error);
+  
+  if (bytes_read == 8 && error.Success()) {
+    // Recursively format the dereferenced value
+    return FormatValue(stream, pointed_to, deref_value, process_sp);
+  }
+  
+  stream.Printf("<0x%" PRIx64 ">", value);
+  return true;
+}
+
+// Format typedef by looking through to underlying type
+static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type,
+                         uint64_t value, lldb::ProcessSP process_sp) {
+  // Simply look through to underlying type
+  return FormatValue(stream, typedef_type->GetUnderlyingType(), value, process_sp);
+}
+
+// Format structure values (simplified - placeholders for now)
+static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
+                           uint64_t value, lldb::ProcessSP process_sp) {
+  const auto& members = struct_type->GetMembers();
+  
+  if (struct_type->IsTuple()) {
+    // Print tuple: (_, ..., _)
+    stream.Printf("(");
+    for (size_t i = 0; i < members.size(); ++i) {
+      if (i > 0) stream.Printf(", ");
+      stream.Printf("_");
+    }
+    stream.Printf(")");
+  } else {
+    // Print record: {field1: _; ...; fieldN: _}
+    stream.Printf("{");
+    for (size_t i = 0; i < members.size(); ++i) {
+      if (i > 0) stream.Printf("; ");
+      if (members[i].name.has_value()) {
+        stream.Printf("%s: _", members[i].name.value().c_str());
+      } else {
+        stream.Printf("_: _");  // Shouldn't happen for records
+      }
+    }
+    stream.Printf("}");
+  }
+  return true;
+}
+
+// Main dispatcher function
+static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::ProcessSP process_sp) {
+  if (!type) {
+    return FormatBase(stream, value);  // Fallback to base formatting
+  }
+  
+  switch (type->GetKind()) {
+    case OxCamlType::Base:
+      return FormatBase(stream, value);
+    case OxCamlType::Enum:
+      return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), value);
+    case OxCamlType::Pointer:
+      return FormatPointer(stream, static_cast<OxCamlPointerType*>(type), value, process_sp);
+    case OxCamlType::Typedef:
+      return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), value, process_sp);
+    case OxCamlType::Structure:
+      return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), value, process_sp);
+    default:
+      return FormatBase(stream, value);  // Fallback
+  }
+}
+
 bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
     ValueObject &valobj, Stream &stream, const TypeSummaryOptions &options) {
-  Log *log = GetLog(OxCamlLog::Formatting);
-  
-  // Get the raw data directly
+  // Get raw data
   DataExtractor data;
   Status error;
-  uint64_t data_size = valobj.GetData(data, error);
-  
-  LLDB_LOG(log, "OxCamlValue_SummaryProvider: Processing value '{0}', data_size={1}", 
-           valobj.GetName().GetCString(), data_size);
+  size_t data_size = valobj.GetData(data, error);
   
   if (!error.Success() || data_size < 8) {
-    LLDB_LOG(log, "OxCamlValue_SummaryProvider: Failed to get data, error: {0}", 
-             error.AsCString());
     stream.Printf("<unavailable>");
     return true;
   }
@@ -44,48 +164,13 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   lldb::offset_t offset = 0;
   uint64_t value = data.GetU64(&offset);
   
-  // Get the type information
+  // Get type and format using the new dispatcher
   CompilerType compiler_type = valobj.GetCompilerType();
+  OxCamlType* type = nullptr;
   if (compiler_type.IsValid()) {
-    // Extract the OxCamlType from the CompilerType
-    auto* oxcaml_type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
-    if (oxcaml_type) {
-      // Resolve through typedefs to get the actual type
-      while (oxcaml_type->GetKind() == OxCamlType::Typedef) {
-        auto* typedef_type = static_cast<OxCamlTypedefType*>(oxcaml_type);
-        oxcaml_type = typedef_type->GetUnderlyingType();
-      }
-      
-      // Handle enum types
-      if (oxcaml_type->GetKind() == OxCamlType::Enum) {
-        auto* enum_type = static_cast<OxCamlEnumType*>(oxcaml_type);
-        
-        // Look up the enumerator name
-        int64_t enum_value = static_cast<int64_t>(value);
-        auto name_opt = enum_type->GetEnumeratorName(enum_value);
-        if (name_opt.has_value()) {
-          // Found the enumerator - show its name
-          stream.PutCString(name_opt.value());
-          return true;
-        }
-        // Fall through to show as integer if enumerator not found
-      }
-    }
+    type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
   }
   
-  // Default OCaml value interpretation
-  if (value & 1) {
-    // Immediate value - show as integer
-    int64_t int_val = ((int64_t)value) >> 1;
-    stream.Printf("%" PRId64, int_val);
-  } else {
-    // Pointer value
-    if (value == 0) {
-      stream.Printf("()"); // unit value
-    } else {
-      stream.Printf("<pointer: 0x%" PRIx64 ">", value);
-    }
-  }
-  
-  return true;
+  lldb::ProcessSP process_sp = valobj.GetProcessSP();
+  return FormatValue(stream, type, value, process_sp);
 }

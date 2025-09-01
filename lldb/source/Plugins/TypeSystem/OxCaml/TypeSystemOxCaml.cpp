@@ -271,6 +271,18 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
           output << " (enum type, " << et->GetEnumerators().size() << " enumerators, " << type->GetByteSize() << " bytes)";
         }
         break;
+      case OxCamlType::Pointer:
+        {
+          auto* pt = static_cast<OxCamlPointerType*>(type.get());
+          output << " (pointer -> " << pt->GetPointedToType()->GetDisplayName() << ", " << type->GetByteSize() << " bytes)";
+        }
+        break;
+      case OxCamlType::Structure:
+        {
+          auto* st = static_cast<OxCamlStructureType*>(type.get());
+          output << " (structure, " << st->GetMembers().size() << " members, " << type->GetByteSize() << " bytes)";
+        }
+        break;
     }
     output << "\n";
   }

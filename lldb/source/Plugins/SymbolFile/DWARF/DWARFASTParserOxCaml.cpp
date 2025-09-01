@@ -76,6 +76,18 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
         LLDB_LOG(log, "ParseTypeFromDWARF: Parsing enum type");
         new_type = ParseEnumType(die);
         break;
+      case llvm::dwarf::DW_TAG_pointer_type:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing pointer type");
+        new_type = ParsePointerType(sc, die);
+        break;
+      case llvm::dwarf::DW_TAG_reference_type:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing reference type");
+        new_type = ParseReferenceType(sc, die);
+        break;
+      case llvm::dwarf::DW_TAG_structure_type:
+        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing structure type");
+        new_type = ParseStructureType(sc, die);
+        break;
       default:
         LLDB_LOG(log, "ParseTypeFromDWARF: Unsupported DWARF tag: {0}", die.Tag());
         return TypeSP();
@@ -358,4 +370,120 @@ DWARFASTParserOxCaml::GetDeclContextContainingUIDFromDWARF(const DWARFDIE &die) 
 std::string DWARFASTParserOxCaml::GetDIEClassTemplateParams(DWARFDIE die) {
   // OCaml doesn't have C++-style templates
   return {};
+}
+
+std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParsePointerType(const SymbolContext &sc, const DWARFDIE &die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  user_id_t die_id = die.GetID();
+  
+  LLDB_LOG(log, "ParsePointerType: DIE 0x{0:x16}", die_id);
+  
+  // Get the pointed-to type via DW_AT_type
+  DWARFDIE pointed_to_die = die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_type);
+  if (!pointed_to_die.IsValid()) {
+    LLDB_LOG(log, "ParsePointerType: No valid pointed-to type found");
+    return nullptr;
+  }
+  
+  // Parse the pointed-to type (recursively)
+  bool type_is_new = false;
+  TypeSP pointed_to_type_sp = ParseTypeFromDWARF(sc, pointed_to_die, &type_is_new);
+  if (!pointed_to_type_sp) {
+    LLDB_LOG(log, "ParsePointerType: Failed to parse pointed-to type");
+    return nullptr;
+  }
+  
+  // Get the OxCamlType from the pointed-to TypeSP
+  CompilerType pointed_to_compiler_type = pointed_to_type_sp->GetForwardCompilerType();
+  auto* pointed_to_oxcaml_type = static_cast<OxCamlType*>(pointed_to_compiler_type.GetOpaqueQualType());
+  if (!pointed_to_oxcaml_type) {
+    LLDB_LOG(log, "ParsePointerType: Failed to get OxCamlType from pointed-to type");
+    return nullptr;
+  }
+  
+  // Extract optional name
+  std::optional<std::string> name = ExtractTypeName(die);
+  
+  LLDB_LOG(log, "ParsePointerType: Creating OxCamlPointerType pointing to {0}",
+           pointed_to_oxcaml_type->GetDisplayName());
+  
+  return std::make_unique<OxCamlPointerType>(die_id, std::move(name), pointed_to_oxcaml_type);
+}
+
+std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseReferenceType(const SymbolContext &sc, const DWARFDIE &die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  user_id_t die_id = die.GetID();
+  
+  LLDB_LOG(log, "ParseReferenceType: DIE 0x{0:x16} (treating as pointer)", die_id);
+  
+  // In OxCaml, references are essentially pointers, so we treat them the same way
+  return ParsePointerType(sc, die);
+}
+
+std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const SymbolContext &sc, const DWARFDIE &die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  user_id_t die_id = die.GetID();
+  
+  LLDB_LOG(log, "ParseStructureType: DIE 0x{0:x16}", die_id);
+  
+  // Get structure size from DW_AT_byte_size
+  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 0);
+  if (byte_size == 0) {
+    LLDB_LOG(log, "ParseStructureType: No byte size found or zero size");
+    return nullptr;
+  }
+  
+  // Extract optional name
+  std::optional<std::string> name = ExtractTypeName(die);
+  
+  // Parse member DIEs
+  std::vector<OxCamlStructureType::Member> members;
+  DWARFDIE child_die = die.GetFirstChild();
+  while (child_die.IsValid()) {
+    if (child_die.Tag() == llvm::dwarf::DW_TAG_member) {
+      // Get member name (optional for tuples)
+      std::optional<std::string> member_name = ExtractTypeName(child_die);
+      
+      // Get member type
+      DWARFDIE member_type_die = child_die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_type);
+      if (!member_type_die.IsValid()) {
+        LLDB_LOG(log, "ParseStructureType: Member has no valid type, skipping");
+        child_die = child_die.GetSibling();
+        continue;
+      }
+      
+      // Parse member type
+      bool type_is_new = false;
+      TypeSP member_type_sp = ParseTypeFromDWARF(sc, member_type_die, &type_is_new);
+      if (!member_type_sp) {
+        LLDB_LOG(log, "ParseStructureType: Failed to parse member type, skipping");
+        child_die = child_die.GetSibling();
+        continue;
+      }
+      
+      // Get OxCamlType from member TypeSP
+      CompilerType member_compiler_type = member_type_sp->GetForwardCompilerType();
+      auto* member_oxcaml_type = static_cast<OxCamlType*>(member_compiler_type.GetOpaqueQualType());
+      if (!member_oxcaml_type) {
+        LLDB_LOG(log, "ParseStructureType: Failed to get OxCamlType from member type, skipping");
+        child_die = child_die.GetSibling();
+        continue;
+      }
+      
+      // Get member offset
+      uint64_t member_offset = child_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_member_location, 0);
+      
+      // Add member to vector
+      members.push_back({member_name, member_oxcaml_type, member_offset});
+      
+      LLDB_LOG(log, "ParseStructureType: Added member {0} at offset {1}, type {2}",
+               member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName());
+    }
+    child_die = child_die.GetSibling();
+  }
+  
+  LLDB_LOG(log, "ParseStructureType: Creating OxCamlStructureType with {0} members, size {1}",
+           members.size(), byte_size);
+  
+  return std::make_unique<OxCamlStructureType>(die_id, std::move(name), byte_size, std::move(members));
 }

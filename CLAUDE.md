@@ -235,12 +235,31 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 - **Breakpoints**: Set using OCaml module.function syntax (e.g., `break Test.main`)
 - **Variable Display**: Integer values display correctly in decimal format
 - **Type System**: Basic ocaml_value type with proper typedef support
+- **Enumeration Types**: Full support for bool, char with value display
+- **Records**: Display as `{field1 = value1; field2 = value2}`
+- **Tuples**: Display as `(value1, value2, value3)`
 
 ### In Progress
-- Support for enumeration types (bool, char)
-- Complex type support (records, variants, lists)
+- Complex type support (variants, lists, arrays)
 - Line-based breakpoints
 - Expression evaluation
+- String dereferencing (currently show as hex addresses)
+
+## DWARF Type Encoding
+
+### Records and Tuples
+OxCaml uses: `DW_TAG_typedef → DW_TAG_reference_type → DW_TAG_structure_type`
+
+- **Type names**: End with `@ value` (e.g., `point @ value`, `int * string @ value`)
+- **Records**: Structure members have `DW_AT_name` attributes  
+- **Tuples**: Structure members have no names
+- **Layout**: 8-byte members, 8-byte aligned offsets
+
+### Current Display
+- Records: `{x = 1; y = 2}`
+- Tuples: `(42, <0x4c59c0>)`
+- Immediate values: Show as integers
+- Pointers: Show as hex addresses
 
 ### Testing Quick Start
 ```bash

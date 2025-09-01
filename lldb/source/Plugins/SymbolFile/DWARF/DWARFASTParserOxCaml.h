@@ -69,6 +69,9 @@ private:
   std::unique_ptr<lldb_private::OxCamlType> ParseBaseType(const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseTypedefType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseEnumType(const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParsePointerType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseReferenceType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseStructureType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   lldb::TypeSP CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type);
 };
 
