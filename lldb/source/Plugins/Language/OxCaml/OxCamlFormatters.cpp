@@ -71,6 +71,7 @@
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Utility/Log.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
+#include <cassert>
 #include <cinttypes>
 #include <cstring>
 #include <vector>
@@ -82,27 +83,37 @@ using namespace lldb_private::formatters::oxcaml;
 
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatBase(Stream &stream, DataExtractor& data);
+static bool FormatBase(Stream &stream, DataExtractor& data, OxCamlBaseType* base_type);
 static bool FormatFallback(Stream &stream, DataExtractor& data);
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data);
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp);
 
-// Format fallback - just print hex value (indicates error/unknown)
+// Format fallback - print raw bytes as hex
 static bool FormatFallback(Stream &stream, DataExtractor& data) {
-  lldb::offset_t offset = 0;
-  if (data.GetByteSize() >= 8) {
-    uint64_t value = data.GetU64(&offset);
-    stream.Printf("0x%" PRIx64, value);
-  } else {
-    stream.Printf("<insufficient data>");
+  size_t byte_size = data.GetByteSize();
+  if (byte_size == 0) {
+    stream.Printf("<no data>");
+    return true;
   }
+
+  // Print raw bytes in hex
+  stream.Printf("<");
+  for (size_t i = 0; i < byte_size; ++i) {
+    if (i > 0) stream.Printf(" ");
+    lldb::offset_t offset = i;
+    uint8_t byte = data.GetU8(&offset);
+    stream.Printf("%02x", byte);
+  }
+  stream.Printf(">");
   return true;
 }
 
 // Format base OCaml values
-static bool FormatBase(Stream &stream, DataExtractor& data) {
+static bool FormatBase(Stream &stream, DataExtractor& data, OxCamlBaseType* base_type) {
+  assert(base_type->GetByteSize() == 8 && "OCaml base types must be 8 bytes");
+
   lldb::offset_t offset = 0;
   uint64_t value = data.GetU64(&offset);
 
@@ -119,6 +130,8 @@ static bool FormatBase(Stream &stream, DataExtractor& data) {
 
 // Format enum values
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data) {
+  assert(enum_type->GetByteSize() == 8 && "OCaml enum types must be 8 bytes");
+
   lldb::offset_t offset = 0;
   uint64_t value = data.GetU64(&offset);
 
@@ -137,6 +150,8 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor&
 // Format pointer values by dereferencing
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
                          DataExtractor& data, lldb::ProcessSP process_sp) {
+  assert(ptr_type->GetByteSize() == 8 && "OCaml pointer types must be 8 bytes");
+
   lldb::offset_t offset = 0;
   uint64_t ptr_value = data.GetU64(&offset);
 
@@ -188,31 +203,26 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
                            DataExtractor& data, lldb::ProcessSP process_sp) {
   const auto& members = struct_type->GetMembers();
 
-  if (struct_type->IsTuple()) {
-    stream.Printf("(");
-    for (size_t i = 0; i < members.size(); ++i) {
-      if (i > 0) stream.Printf(", ");
+  // Determine formatting based on type
+  bool is_tuple = struct_type->IsTuple();
+  const char* open_delim = is_tuple ? "(" : "{ ";
+  const char* close_delim = is_tuple ? ")" : " }";
+  const char* separator = is_tuple ? ", " : "; ";
 
-      DataExtractor member_data(data, members[i].offset, members[i].type->GetByteSize());
-      FormatValue(stream, members[i].type, member_data, process_sp);
+  stream.Printf("%s", open_delim);
+
+  for (size_t i = 0; i < members.size(); ++i) {
+    if (i > 0) stream.Printf("%s", separator);
+
+    if (members[i].name.has_value()) {
+      stream.Printf("%s = ", members[i].name.value().c_str());
     }
-    stream.Printf(")");
-  } else {
-    stream.Printf("{");
-    for (size_t i = 0; i < members.size(); ++i) {
-      if (i > 0) stream.Printf("; ");
 
-      if (members[i].name.has_value()) {
-        stream.Printf("%s = ", members[i].name.value().c_str());
-      } else {
-        stream.Printf("field = ");  // Shouldn't happen for records
-      }
-
-      DataExtractor member_data(data, members[i].offset, members[i].type->GetByteSize());
-      FormatValue(stream, members[i].type, member_data, process_sp);
-    }
-    stream.Printf("}");
+    DataExtractor member_data(data, members[i].offset, members[i].type->GetByteSize());
+    FormatValue(stream, members[i].type, member_data, process_sp);
   }
+
+  stream.Printf("%s", close_delim);
 
   return true;
 }
@@ -227,7 +237,7 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
 
   switch (type->GetKind()) {
     case OxCamlType::Base:
-      return FormatBase(stream, data);
+      return FormatBase(stream, data, static_cast<OxCamlBaseType*>(type));
     case OxCamlType::Enum:
       return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), data);
     case OxCamlType::Pointer:
@@ -236,12 +246,6 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
       return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), data, process_sp);
     case OxCamlType::Structure:
       return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), data, process_sp);
-    default:
-      {
-        Log *log = GetLog(OxCamlLog::Formatting);
-        LLDB_LOG(log, "FormatValue: Unknown type kind, using fallback formatter");
-        return FormatFallback(stream, data);
-      }
   }
 }
 
@@ -250,9 +254,9 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   // Get raw data
   DataExtractor data;
   Status error;
-  size_t data_size = valobj.GetData(data, error);
+  valobj.GetData(data, error);
 
-  if (!error.Success() || data_size < 8) {
+  if (!error.Success()) {
     stream.Printf("<unavailable>");
     return true;
   }
