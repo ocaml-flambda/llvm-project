@@ -38,10 +38,7 @@ static bool FormatFallback(Stream &stream, uint64_t value) {
 
 // Format base OCaml values
 static bool FormatBase(Stream &stream, uint64_t value) {
-  if (value == 1) {
-    // Unit value (immediate 0)
-    stream.Printf("()");
-  } else if (value & 1) {
+  if (value & 1) {
     // Immediate integer - shift and print
     int64_t int_val = ((int64_t)value) >> 1;
     stream.Printf("%" PRId64, int_val);
@@ -67,29 +64,29 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, uint64_t value
 }
 
 // Format pointer values by dereferencing
-static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, 
+static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
                          uint64_t value, lldb::ProcessSP process_sp) {
   if (value & 1) {
     stream.Printf("<invalid pointer: 0x%" PRIx64 ">", value);
     return true;
   }
-  
+
   OxCamlType* pointed_to = ptr_type->GetPointedToType();
   if (!pointed_to || !process_sp) {
     stream.Printf("<0x%" PRIx64 ">", value);
     return true;
   }
-  
+
   // Read the pointed-to value
   uint64_t deref_value;
   Status error;
   size_t bytes_read = process_sp->ReadMemory(value, &deref_value, 8, error);
-  
+
   if (bytes_read == 8 && error.Success()) {
     // Recursively format the dereferenced value
     return FormatValue(stream, pointed_to, deref_value, process_sp);
   }
-  
+
   stream.Printf("<0x%" PRIx64 ">", value);
   return true;
 }
@@ -105,7 +102,7 @@ static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type,
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
                            uint64_t value, lldb::ProcessSP process_sp) {
   const auto& members = struct_type->GetMembers();
-  
+
   if (struct_type->IsTuple()) {
     // Print tuple: (_, ..., _)
     stream.Printf("(");
@@ -137,7 +134,7 @@ static bool FormatValue(Stream &stream, OxCamlType* type, uint64_t value, lldb::
     LLDB_LOG(log, "FormatValue: No type information available, using fallback formatter for value 0x{0:x}", value);
     return FormatFallback(stream, value);
   }
-  
+
   switch (type->GetKind()) {
     case OxCamlType::Base:
       // Normal case - no logging needed
@@ -165,23 +162,23 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   DataExtractor data;
   Status error;
   size_t data_size = valobj.GetData(data, error);
-  
+
   if (!error.Success() || data_size < 8) {
     stream.Printf("<unavailable>");
     return true;
   }
-  
+
   // Read the value
   lldb::offset_t offset = 0;
   uint64_t value = data.GetU64(&offset);
-  
+
   // Get type and format using the new dispatcher
   CompilerType compiler_type = valobj.GetCompilerType();
   OxCamlType* type = nullptr;
   if (compiler_type.IsValid()) {
     type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
   }
-  
+
   lldb::ProcessSP process_sp = valobj.GetProcessSP();
   return FormatValue(stream, type, value, process_sp);
 }
