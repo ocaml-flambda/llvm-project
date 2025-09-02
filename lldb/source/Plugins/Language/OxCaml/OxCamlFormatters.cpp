@@ -83,15 +83,15 @@ using namespace lldb_private::formatters::oxcaml;
 
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatBase(Stream &stream, DataExtractor& data, OxCamlBaseType* base_type);
-static bool FormatFallback(Stream &stream, DataExtractor& data);
-static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data);
+static bool FormatBase(Stream &stream, OxCamlBaseType* base_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp);
 
 // Format fallback - print raw bytes as hex
-static bool FormatFallback(Stream &stream, DataExtractor& data) {
+static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp) {
   size_t byte_size = data.GetByteSize();
   if (byte_size == 0) {
     stream.Printf("<no data>");
@@ -111,7 +111,7 @@ static bool FormatFallback(Stream &stream, DataExtractor& data) {
 }
 
 // Format base OCaml values
-static bool FormatBase(Stream &stream, DataExtractor& data, OxCamlBaseType* base_type) {
+static bool FormatBase(Stream &stream, OxCamlBaseType* base_type, DataExtractor& data, lldb::ProcessSP process_sp) {
   assert(base_type->GetByteSize() == 8 && "OCaml base types must be 8 bytes");
 
   lldb::offset_t offset = 0;
@@ -129,7 +129,7 @@ static bool FormatBase(Stream &stream, DataExtractor& data, OxCamlBaseType* base
 }
 
 // Format enum values
-static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data) {
+static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp) {
   assert(enum_type->GetByteSize() == 8 && "OCaml enum types must be 8 bytes");
 
   lldb::offset_t offset = 0;
@@ -142,7 +142,7 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor&
     // Fallback: log and use fallback formatter
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(log, "FormatEnum: Enumerator not found for value 0x{0:x}, using fallback formatting", value);
-    return FormatFallback(stream, data);
+    return FormatFallback(stream, enum_type, data, process_sp);
   }
   return true;
 }
@@ -232,14 +232,14 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
   if (!type) {
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(log, "FormatValue: No type information available, using fallback formatter");
-    return FormatFallback(stream, data);
+    return FormatFallback(stream, type, data, process_sp);
   }
 
   switch (type->GetKind()) {
     case OxCamlType::Base:
-      return FormatBase(stream, data, static_cast<OxCamlBaseType*>(type));
+      return FormatBase(stream, static_cast<OxCamlBaseType*>(type), data, process_sp);
     case OxCamlType::Enum:
-      return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), data);
+      return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), data, process_sp);
     case OxCamlType::Pointer:
       return FormatPointer(stream, static_cast<OxCamlPointerType*>(type), data, process_sp);
     case OxCamlType::Typedef:
