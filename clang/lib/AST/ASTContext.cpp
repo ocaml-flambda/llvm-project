@@ -2326,6 +2326,12 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
     Width = llvm::alignTo(EIT->getNumBits(), Align);
     break;
   }
+  case Type::OCamlRaw: {
+    const auto *ORT = cast<OCamlRawType>(T);
+    Align = std::min(8U, static_cast<unsigned>(llvm::PowerOf2Ceil(ORT->getNumBits())));
+    Width = ORT->getNumBits();
+    break;
+  }
   case Type::Record:
   case Type::Enum: {
     const auto *TT = cast<TagType>(T);
@@ -4583,6 +4589,20 @@ QualType ASTContext::getBitIntType(bool IsUnsigned, unsigned NumBits) const {
 
   auto *New = new (*this, TypeAlignment) BitIntType(IsUnsigned, NumBits);
   BitIntTypes.InsertNode(New, InsertPos);
+  Types.push_back(New);
+  return QualType(New, 0);
+}
+
+QualType ASTContext::getOCamlRawType(unsigned NumBits) const {
+  llvm::FoldingSetNodeID ID;
+  OCamlRawType::Profile(ID, NumBits);
+
+  void *InsertPos = nullptr;
+  if (OCamlRawType *ORT = OCamlRawTypes.FindNodeOrInsertPos(ID, InsertPos))
+    return QualType(ORT, 0);
+
+  auto *New = new (*this, TypeAlignment) OCamlRawType(NumBits);
+  OCamlRawTypes.InsertNode(New, InsertPos);
   Types.push_back(New);
   return QualType(New, 0);
 }

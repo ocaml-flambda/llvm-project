@@ -6387,6 +6387,10 @@ bool UnnamedLocalNoLinkageFinder::VisitDependentBitIntType(
   return false;
 }
 
+bool UnnamedLocalNoLinkageFinder::VisitOCamlRawType(const OCamlRawType *T) {
+  return false;
+}
+
 bool UnnamedLocalNoLinkageFinder::VisitTagDecl(const TagDecl *Tag) {
   if (Tag->getDeclContext()->isFunctionOrMethod()) {
     S.Diag(SR.getBegin(),

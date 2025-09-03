@@ -6541,6 +6541,33 @@ public:
   static bool classof(const Type *T) { return T->getTypeClass() == BitInt; }
 };
 
+/// OCaml raw data type with specified bit width for LLDB debugging
+class OCamlRawType final : public Type, public llvm::FoldingSetNode {
+  friend class ASTContext;
+  unsigned NumBits : 24;
+
+protected:
+  OCamlRawType(unsigned NumBits);
+
+public:
+  unsigned getNumBits() const { return NumBits; }
+  
+  bool isSugared() const { return false; }
+  QualType desugar() const { return QualType(this, 0); }
+  
+  void Profile(llvm::FoldingSetNodeID &ID) {
+    Profile(ID, getNumBits());
+  }
+  
+  static void Profile(llvm::FoldingSetNodeID &ID, unsigned NumBits) {
+    ID.AddInteger(NumBits);
+  }
+  
+  static bool classof(const Type *T) { 
+    return T->getTypeClass() == OCamlRaw; 
+  }
+};
+
 class DependentBitIntType final : public Type, public llvm::FoldingSetNode {
   friend class ASTContext;
   const ASTContext &Context;

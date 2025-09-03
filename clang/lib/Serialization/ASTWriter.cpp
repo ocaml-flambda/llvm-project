@@ -606,6 +606,10 @@ void TypeLocWriter::VisitDependentBitIntTypeLoc(
   addSourceLocation(TL.getNameLoc());
 }
 
+void TypeLocWriter::VisitOCamlRawTypeLoc(clang::OCamlRawTypeLoc TL) {
+  addSourceLocation(TL.getNameLoc());
+}
+
 void ASTWriter::WriteTypeAbbrevs() {
   using namespace llvm;
 

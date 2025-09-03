@@ -946,3 +946,13 @@ let Class = DependentBitIntType in {
     return ctx.getDependentBitIntType(isUnsigned, numBitsExpr);
   }]>;
 }
+
+let Class = OCamlRawType in {
+  def : Property<"numBits", UInt32> {
+    let Read = [{ node->getNumBits() }];
+  }
+
+  def : Creator<[{
+    return ctx.getOCamlRawType(numBits);
+  }]>;
+}

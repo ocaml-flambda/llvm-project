@@ -72,6 +72,7 @@ static constexpr FormatInfo g_format_infos[] = {
     {eFormatVoid, 'v', "void"},
     {eFormatUnicode8, 'u', "unicode8"},
     {eFormatOCamlValue, '\0', "ocaml_value"},
+    {eFormatOCamlRaw, '\0', "ocaml_raw"},
 };
 
 static_assert((sizeof(g_format_infos) / sizeof(g_format_infos[0])) ==

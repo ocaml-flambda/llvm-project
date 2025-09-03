@@ -6662,6 +6662,18 @@ QualType TreeTransform<Derived>::TransformDependentBitIntType(
   return Result;
 }
 
+template <typename Derived>
+QualType TreeTransform<Derived>::TransformOCamlRawType(TypeLocBuilder &TLB,
+                                                       OCamlRawTypeLoc TL) {
+  // OCamlRaw types are never used in template contexts, so just return unchanged
+  const OCamlRawType *T = TL.getTypePtr();
+  QualType Result = QualType(T, 0);
+  
+  OCamlRawTypeLoc NewTL = TLB.push<OCamlRawTypeLoc>(Result);
+  NewTL.setNameLoc(TL.getNameLoc());
+  return Result;
+}
+
   /// Simple iterator that traverses the template arguments in a
   /// container that provides a \c getArgLoc() member function.
   ///

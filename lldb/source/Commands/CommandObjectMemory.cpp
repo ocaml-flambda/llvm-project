@@ -1421,6 +1421,7 @@ protected:
       case eFormatVectorOfFloat64:
       case eFormatVectorOfUInt128:
       case eFormatOCamlValue:
+      case eFormatOCamlRaw:
       case eFormatOSType:
       case eFormatComplexInteger:
       case eFormatAddressInfo:

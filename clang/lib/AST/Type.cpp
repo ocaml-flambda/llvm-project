@@ -342,6 +342,9 @@ BitIntType::BitIntType(bool IsUnsigned, unsigned NumBits)
     : Type(BitInt, QualType{}, TypeDependence::None), IsUnsigned(IsUnsigned),
       NumBits(NumBits) {}
 
+OCamlRawType::OCamlRawType(unsigned NumBits)
+    : Type(OCamlRaw, QualType{}, TypeDependence::None), NumBits(NumBits) {}
+
 DependentBitIntType::DependentBitIntType(const ASTContext &Context,
                                          bool IsUnsigned, Expr *NumBitsExpr)
     : Type(DependentBitInt, QualType{},

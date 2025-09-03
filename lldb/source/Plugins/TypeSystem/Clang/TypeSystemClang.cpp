@@ -1060,6 +1060,11 @@ CompilerType TypeSystemClang::GetBuiltinTypeForDWARFEncodingAndBitSize(
       }
       if (type_name == "ocaml_value")
         return GetType(ast.OCamlValueTy);
+
+      if (type_name == "ocaml_raw") {
+        // Create OCamlRawType with the correct bit size
+        return GetType(ast.getOCamlRawType(bit_size));
+      }
     }
     // We weren't able to match up a type name, just search by size
     if (QualTypeMatchesBitSize(bit_size, ast, ast.CharTy))
@@ -4069,6 +4074,8 @@ TypeSystemClang::GetTypeInfo(lldb::opaque_compiler_type_t type,
     }
     return vector_type_flags;
   }
+  case clang::Type::OCamlRaw:
+    return eTypeHasValue | eTypeIsBuiltIn;
   default:
     return 0;
   }
@@ -9396,6 +9403,16 @@ bool TypeSystemClang::DumpTypeValue(
 
     if (qual_type == getASTContext ().OCamlValueTy) {
       return DumpDataExtractor(data, s, byte_offset, eFormatOCamlValue, 8, 1,
+                               UINT32_MAX, LLDB_INVALID_ADDRESS,
+                               0, 0, exe_scope);
+    }
+
+    if (qual_type->getTypeClass() == clang::Type::OCamlRaw) {
+      const clang::OCamlRawType *ocaml_raw_type =
+        llvm::cast<clang::OCamlRawType>(qual_type.getTypePtr());
+      size_t ocaml_raw_byte_size = ocaml_raw_type->getNumBits() / 8;
+      return DumpDataExtractor(data, s, byte_offset, eFormatOCamlRaw,
+                               ocaml_raw_byte_size, 1,
                                UINT32_MAX, LLDB_INVALID_ADDRESS,
                                0, 0, exe_scope);
     }

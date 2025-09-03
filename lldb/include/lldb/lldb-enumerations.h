@@ -201,6 +201,7 @@ enum Format {
   eFormatVoid,        ///< Do not print this
   eFormatUnicode8,
   eFormatOCamlValue,
+  eFormatOCamlRaw,
   kNumFormats
 };
 
