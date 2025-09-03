@@ -5264,6 +5264,11 @@ lldb::Format TypeSystemClang::GetFormat(lldb::opaque_compiler_type_t type) {
       return lldb::eFormatBoolean;
     case clang::BuiltinType::Char_S:
     case clang::BuiltinType::SChar:
+      // For OCaml, treat signed 8-bit integers as decimal numbers (like int16, int32, int64)
+      // rather than characters to ensure consistent SIMD vector display
+      if (isLanguageOCaml())
+        return lldb::eFormatDecimal;
+      return lldb::eFormatChar;
     case clang::BuiltinType::WChar_S:
     case clang::BuiltinType::Char_U:
     case clang::BuiltinType::UChar:

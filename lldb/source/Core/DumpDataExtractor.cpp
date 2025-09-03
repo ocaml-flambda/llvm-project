@@ -215,6 +215,53 @@ static void DumpCharacter(Stream &s, const char c) {
   s.Printf("\\x%2.2x", c);
 }
 
+/// Dump the character to a stream using OCaml string literal format.
+/// This matches OCaml's unsafe_escape function from bytes.ml in the standard library.
+static void DumpEscapedCharacterOCaml(Stream &s, const char c) {
+  switch (c) {
+  case '"':
+    s.Printf("\\\"");
+    return;
+  case '\\':
+    s.Printf("\\\\");
+    return;
+  case '\n':
+    s.Printf("\\n");
+    return;
+  case '\t':
+    s.Printf("\\t");
+    return;
+  case '\r':
+    s.Printf("\\r");
+    return;
+  case '\b':
+    s.Printf("\\b");
+    return;
+  default:
+    break;
+  }
+
+  // Handle printable ASCII range ' ' to '~' (32 to 126)
+  if (c >= ' ' && c <= '~') {
+    s.PutChar(c);
+    return;
+  }
+
+  // Use OCaml's 3-digit decimal escape format for non-printable characters
+  // This matches the logic in bytes.ml unsafe_escape function
+  unsigned char a = (unsigned char)c;
+  s.Printf("\\%03d", a);
+}
+
+/// Dump a C string as an OCaml string literal with proper escaping and quotes.
+static void DumpStringOCaml(Stream *s, const char *data, uint64_t string_length) {
+  s->Printf("\"");
+  for (uint64_t i = 0; i < string_length; ++i) {
+    DumpEscapedCharacterOCaml(*s, data[i]);
+  }
+  s->Printf("\"");
+}
+
 /// Dump a floating point type.
 template <typename FloatT>
 void DumpFloatingPoint(std::ostringstream &ss, FloatT f) {
@@ -386,13 +433,21 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
   else
     apfloat.toPossiblyShortString(sv);
 
-  s->AsRawOstream() << prefix;
-  s->AsRawOstream() << sv;
   // OCaml Specific:
-  // Following OCaml conventions, print the trailing "." to
+  // Handle negative sign placement for OCaml format
+  if (sv.size() > 0 && sv[0] == '-') {
+    s->AsRawOstream() << "-";
+    s->AsRawOstream() << prefix;
+    s->AsRawOstream() << llvm::StringRef(sv.data() + 1, sv.size() - 1);
+  } else {
+    s->AsRawOstream() << prefix;
+    s->AsRawOstream() << sv;
+  }
+
+  // Following OCaml conventions, print the trailing ".0" to
   // identify that the integer is in fact a float, but don't
-  // print any trailing zeros.
-  bool print_trailing_dot = true;
+  // print any trailing zeros beyond that.
+  bool print_trailing_dot_zero = true;
   for (char c : sv) {
     switch (c) {
       case '-':
@@ -409,14 +464,14 @@ void PrintAPIntAsFloat(Stream *s, llvm::APInt apint,
         continue;
       default:
         // if we find something that is not a number such as 'e' or 'E' or '.'
-        // there is no need to print the trailing ".".
-        print_trailing_dot = false;
+        // there is no need to print the trailing ".0".
+        print_trailing_dot_zero = false;
     }
     break; // we found something that is not a number, so we will not print
-           // the trailing "."
+           // the trailing ".0"
   }
-  if (print_trailing_dot){
-    s->AsRawOstream() << ".";
+  if (print_trailing_dot_zero){
+    s->AsRawOstream() << ".0";
   }
 
   s->AsRawOstream() << suffix;
@@ -574,19 +629,8 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
               if (error.Fail() || bytes_read < string_length) {
                 s->Printf("<could not read string>@");
               } else {
-                const char *c_str = (const char *)&str.front();
-                if (strlen(c_str) == string_length) {
-                  /* String does not contain NUL characters */
-                  s->Printf("\"%s\"", c_str);
-                } else {
-                  s->Printf("\"");
-                  DataExtractor cstr_data(&str.front(), str.size(),
-                                          process->GetByteOrder(), 8);
-                  DumpDataExtractor(cstr_data, s, 0, lldb::eFormatChar, 1,
-                                    string_length, UINT32_MAX,
-                                    LLDB_INVALID_ADDRESS, 0, 0);
-                  s->Printf("\"");
-                }
+                const char *data = (const char *)&str.front();
+                DumpStringOCaml(s, data, string_length);
                 print_default = false;
               }
             }
@@ -681,7 +725,7 @@ static offset_t FormatOCamlValue(const DataExtractor &DE, Stream *s,
                     if (int_size == 32)
                       s->Printf("%ld", (long)i);
                     else
-                      s->Printf("%lld", (int64_t)i);
+                      s->Printf("%" PRIi64, (int64_t)i);
                     s->Printf("%s", suffix.c_str());
                     print_default = false;
                   }
@@ -927,11 +971,26 @@ lldb::offset_t lldb_private::DumpDataExtractor(
     case eFormatEnum: // Print enum value as a signed integer when we don't get
                       // the enum type
     case eFormatDecimal:
-      if (item_byte_size <= 8)
-        s->Printf("%" PRId64,
-                  DE.GetMaxS64Bitfield(&offset, item_byte_size, item_bit_size,
-                                       item_bit_offset));
-      else {
+      if (item_byte_size <= 8) {
+        int64_t value = DE.GetMaxS64Bitfield(&offset, item_byte_size, item_bit_size,
+                                             item_bit_offset);
+        // CR sspies: This is special cases for OCaml values. Consider wrapping
+        // it in a guard.
+        // Format as unboxed OCaml integer
+        std::string suffix = "";
+        if (item_byte_size == 4) suffix = "l";
+        else if (item_byte_size == 8) suffix = "L";
+        else if (item_byte_size == 2) suffix = ""; // int16 - no specific suffix
+        else if (item_byte_size == 1) suffix = ""; // int8 - no specific suffix
+        // Add "n" suffix for nativeint when it's pointer-sized (could be 4 or 8 bytes)
+
+
+        if (value < 0) {
+          s->Printf("-#%" PRId64 "%s", -value, suffix.c_str());
+        } else {
+          s->Printf("#%" PRId64 "%s", value, suffix.c_str());
+        }
+      } else {
         const bool is_signed = true;
         const unsigned radix = 10;
         offset = DumpAPInt(s, DE, offset, item_byte_size, is_signed, radix);
