@@ -44,6 +44,9 @@ Mangled::ManglingScheme Mangled::GetManglingScheme(llvm::StringRef const name) {
   if (name.startswith("?"))
     return Mangled::eManglingSchemeMSVC;
 
+  if (name.startswith("_O"))
+    return Mangled::eManglingSchemeOxCaml;
+
   if (name.startswith("_R"))
     return Mangled::eManglingSchemeRustV0;
 
@@ -167,6 +170,19 @@ static char *GetItaniumDemangledStr(const char *M) {
   return demangled_cstr;
 }
 
+static char *GetOxCamlDemangledStr(const char *M) {
+  char *demangled_cstr = llvm::oxcamlDemangle(M);
+
+  if (Log *log = GetLog(LLDBLog::Demangle)) {
+    if (demangled_cstr && demangled_cstr[0])
+      LLDB_LOG(log, "demangled oxcaml: {0} -> \"{1}\"", M, demangled_cstr);
+    else
+      LLDB_LOG(log, "demangled oxcaml: {0} -> error: failed to demangle", M);
+  }
+
+  return demangled_cstr;
+}
+
 static char *GetRustV0DemangledStr(const char *M) {
   char *demangled_cstr = llvm::rustDemangle(M);
 
@@ -242,6 +258,7 @@ bool Mangled::GetRichManglingInfo(RichManglingContext &context,
     }
   }
 
+  case eManglingSchemeOxCaml:
   case eManglingSchemeRustV0:
   case eManglingSchemeD:
     // Rich demangling scheme is not supported
@@ -275,6 +292,9 @@ ConstString Mangled::GetDemangledName() const {
         demangled_name = GetItaniumDemangledStr(mangled_name);
         break;
       }
+      case eManglingSchemeOxCaml:
+        demangled_name = GetOxCamlDemangledStr(mangled_name);
+        break;
       case eManglingSchemeRustV0:
         demangled_name = GetRustV0DemangledStr(mangled_name);
         break;
