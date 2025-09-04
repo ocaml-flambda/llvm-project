@@ -173,10 +173,21 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
     return true;
   }
 
-  // Create buffer and read memory
+  // Apply base offset from the pointed-to type
+  int64_t base_offset = pointed_to->GetPointerAdjustmentOffset();
+  uint64_t adjusted_address = ptr_value + base_offset;
+  
+  // Log when applying non-zero offset
+  if (base_offset != 0) {
+    Log *log = GetLog(OxCamlLog::Formatting);
+    LLDB_LOG(log, "FormatPointer: Applying base offset {0} to pointer 0x{1:x}, adjusted address: 0x{2:x}", 
+             base_offset, ptr_value, adjusted_address);
+  }
+
+  // Create buffer and read memory from adjusted address
   std::vector<uint8_t> buffer(size);
   Status error;
-  size_t bytes_read = process_sp->ReadMemory(ptr_value, buffer.data(), size, error);
+  size_t bytes_read = process_sp->ReadMemory(adjusted_address, buffer.data(), size, error);
 
   if (bytes_read != size || !error.Success()) {
     stream.Printf("<0x%" PRIx64 ">", ptr_value);

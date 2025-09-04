@@ -36,6 +36,11 @@ public:
 
   virtual uint64_t GetByteSize() const = 0;
 
+  // Virtual method to get pointer adjustment offset for this type
+  // Returns the offset to apply when dereferencing a pointer to this type
+  // Most types return 0, but some (like structures with custom base offset) may return non-zero
+  virtual int64_t GetPointerAdjustmentOffset() const { return 0; }
+
 protected:
   // Derived classes provide their fallback name
   virtual std::string GetDefaultDisplayName() const = 0;
@@ -151,14 +156,29 @@ private:
   uint64_t m_byte_size;
   std::vector<Member> m_members;
 
+  // Custom base offset from DW_AT_ocaml_offset_record_from_pointer. This is
+  // specific to the DWARF encoding used by the OxCaml compiler. It supports an
+  // ad-hoc attribute (see DW_AT_ocaml_offset_record_from_pointer in
+  // DWARFASTParserOxCaml.cpp) that specifies a byte offset to apply when
+  // dealing with a pointer to a structure. This allows one to factor in the 
+  // header field of a block when the actual pointer points to the first entry 
+  // in the block.
+  int64_t m_base_offset;
+
 public:
   OxCamlStructureType(lldb::user_id_t die_id, std::optional<std::string> name,
-                      uint64_t byte_size, std::vector<Member> members)
+                      uint64_t byte_size, std::vector<Member> members,
+                      int64_t base_offset = 0)
     : OxCamlType(Structure, die_id, std::move(name)),
-      m_byte_size(byte_size), m_members(std::move(members)) {}
+      m_byte_size(byte_size), m_members(std::move(members)), m_base_offset(base_offset) {}
 
   uint64_t GetByteSize() const override { return m_byte_size; }
   const std::vector<Member>& GetMembers() const { return m_members; }
+
+  // Override to return custom base offset from DW_AT_ocaml_offset_record_from_pointer
+  int64_t GetPointerAdjustmentOffset() const override {
+    return m_base_offset;
+  }
 
   // Check if this is likely a tuple (no member names)
   bool IsTuple() const {

@@ -28,6 +28,14 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::plugin::dwarf;
 
+// Custom OCaml DWARF attribute DW_AT_ocaml_offset_record_from_pointer
+// This attribute indicates the offset to apply when dereferencing pointers to this type
+// CR sspies: Technically, this requires an extension of the DWARF standard. If 
+// we want to upstream this, we should think about whether the attribute should
+// be on the structure or on the pointer itself (indicating a base offset).
+// For now, we declare it as an ad-hoc attribute here. 
+static constexpr uint32_t DW_AT_ocaml_offset_record_from_pointer = 0x3106;
+
 DWARFASTParserOxCaml::DWARFASTParserOxCaml(TypeSystemOxCaml &oxcaml_typesystem)
     : DWARFASTParser(Kind::DWARFASTParserOxCaml),
       m_oxcaml_typesystem(oxcaml_typesystem) {}
@@ -436,6 +444,15 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const Symbo
   // Extract optional name
   std::optional<std::string> name = ExtractTypeName(die);
   
+  // Check for custom DW_AT_ocaml_offset_record_from_pointer attribute
+  auto ocaml_attr = static_cast<llvm::dwarf::Attribute>(DW_AT_ocaml_offset_record_from_pointer);
+  uint64_t attr_value = die.GetAttributeValueAsUnsigned(ocaml_attr, 0);
+  int64_t base_offset = static_cast<int64_t>(attr_value);
+  
+  if (base_offset != 0) {
+    LLDB_LOG(log, "ParseStructureType: Found DW_AT_ocaml_offset_record_from_pointer: {0}", base_offset);
+  }
+  
   // Parse member DIEs
   std::vector<OxCamlStructureType::Member> members;
   DWARFDIE child_die = die.GetFirstChild();
@@ -485,5 +502,5 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const Symbo
   LLDB_LOG(log, "ParseStructureType: Creating OxCamlStructureType with {0} members, size {1}",
            members.size(), byte_size);
   
-  return std::make_unique<OxCamlStructureType>(die_id, std::move(name), byte_size, std::move(members));
+  return std::make_unique<OxCamlStructureType>(die_id, std::move(name), byte_size, std::move(members), base_offset);
 }
