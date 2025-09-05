@@ -21,6 +21,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -529,7 +530,7 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
   const TargetRegisterInfo *RegInfo = AP.MF->getSubtarget().getRegisterInfo();
   bool HasDynamicFrameSize =
       MFI.hasVarSizedObjects() || RegInfo->hasStackRealignment(*(AP.MF));
-  uint64_t FrameSize = HasDynamicFrameSize ? UINT64_MAX : MFI.getStackSize();
+  uint64_t FrameSize = /* HasDynamicFrameSize ? UINT64_MAX : */ MFI.getStackSize();
 
   auto CurrentIt = FnInfos.find(AP.CurrentFnSym);
   if (CurrentIt != FnInfos.end())
@@ -829,8 +830,10 @@ void StackMaps::emitOCamlFrametable(Module &M) {
     OS.emitValue(RelativeAddr, 4);
 
     // frame_data
-    // +8 for the return address
-    uint64_t FrameSize = CSI.CSFunctionInfo.StackSize + 8;
+    uint64_t FrameSize = CSI.CSFunctionInfo.StackSize; // static size
+    if (CSI.ID != StatepointDirectives::DefaultStatepointID)
+      FrameSize += CSI.ID; // adjustments from ocaml if needed
+    FrameSize += 8; // return address
 
     if (FrameSize >= 1 << 16) {
       report_fatal_error(
@@ -847,6 +850,8 @@ void StackMaps::emitOCamlFrametable(Module &M) {
         LiveCount++;
       }
     }
+
+    LiveCount += CSI.LiveOuts.size();
 
     if (LiveCount >= 1 << 16) {
       report_fatal_error("Too many live locations for OCaml GC: " + Twine(LiveCount));
@@ -865,8 +870,16 @@ void StackMaps::emitOCamlFrametable(Module &M) {
         OS.emitInt16(EncodedReg);
       } else if (Loc.Type == Location::Direct || Loc.Type == Location::Indirect) {
         // For stack locations (Direct/Indirect): emit offset directly
-        // CR yusumez: Are these rsp or rbp relative?
         int64_t Offset = Loc.Offset;
+
+        // BP-relative addressing -> SP
+        if (Offset < 0) {
+          int64_t TempFrameSize =
+            FrameSize - 8 /* return address */ - 8 /* pushed rbp */;
+          
+          Offset += TempFrameSize;
+        }
+        
         if (Offset < -(1 << 15) || Offset >= (1 << 15)) {
           report_fatal_error("Stack offset too large for OCaml GC: " + Twine(Offset));
         }
@@ -875,6 +888,12 @@ void StackMaps::emitOCamlFrametable(Module &M) {
         // CR yusumez: Do we need anything else?
       }
 
+    }
+
+    for (const auto &LO : CSI.LiveOuts) {
+      unsigned OCamlIndex = mapLLVMDwarfRegToOCamlIndex(LO.DwarfRegNum);
+      uint16_t EncodedReg = (OCamlIndex << 1) + 1;
+      OS.emitInt16(EncodedReg);
     }
 
     // Align to pointer size
