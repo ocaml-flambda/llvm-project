@@ -90,6 +90,121 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtra
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp);
 
+
+// CR sspies: There are a lot of helper functions in this file that should be factored out.
+// They have to do with the formatting of variants, which can be a bit subtle.
+
+
+// Helper to read discriminator value from data
+static uint64_t ReadDiscriminatorValue(const OxCamlVariantPart& variant_part, DataExtractor& data) {
+  // Read discriminator from its specified location
+  lldb::offset_t discr_offset = variant_part.GetDiscriminator().data_member_location;
+
+  // Read discriminator value based on enum type byte size
+  uint64_t discriminator_byte_size = variant_part.GetDiscriminator().enum_type->GetByteSize();
+  uint64_t value;
+
+  if (discriminator_byte_size == 1) {
+    value = data.GetU8(&discr_offset);
+  } else {
+    value = data.GetU64(&discr_offset);
+  }
+
+  // Extract discriminator bits based on bit offset and size
+  uint64_t bit_offset = variant_part.GetDiscriminator().bit_offset;
+  uint64_t bit_size = variant_part.GetDiscriminator().bit_size;
+  uint64_t discr_mask = (1ULL << bit_size) - 1;
+  uint64_t discr_value = (value >> bit_offset) & discr_mask;
+
+  return discr_value;
+}
+
+// Calculate minimum size needed to read all discriminators in a structure
+static uint64_t CalculateMinimumSizeForDiscriminators(OxCamlStructureType* struct_type) {
+  uint64_t max_discriminator_end = 0;
+
+  const auto& variant_parts = struct_type->GetVariantParts();
+  for (const auto& variant_part : variant_parts) {
+    const auto& discr = variant_part.GetDiscriminator();
+    uint64_t discr_end = discr.data_member_location + discr.enum_type->GetByteSize();
+    max_discriminator_end = std::max(max_discriminator_end, discr_end);
+  }
+
+  return max_discriminator_end;
+}
+
+// Helper to find all active variants in a structure based on discriminator values
+static std::vector<const OxCamlVariantPart::Variant*>
+FindActiveVariantsInStructure(OxCamlStructureType* struct_type, DataExtractor& data) {
+  std::vector<const OxCamlVariantPart::Variant*> active_variants;
+
+  const auto& variant_parts = struct_type->GetVariantParts();
+  for (const auto& variant_part : variant_parts) {
+    uint64_t discr_value = ReadDiscriminatorValue(variant_part, data);
+
+    // Find the active variant
+    auto active_variant = variant_part.GetActiveVariant(discr_value);
+    if (active_variant.has_value()) {
+      active_variants.push_back(*active_variant);
+    }
+  }
+
+  return active_variants;
+}
+
+// Estimate memory allocation size for heap blocks pointed to by OxCaml pointers
+//
+// NOTE: This function provides an estimate but not the precise allocation size.
+//
+// FUTURE: This function is a temporary workaround for DWARF information that
+// reports only the base structure size. We plan to enhance the OCaml compiler
+// to emit variant-specific sizes in DWARF, which will make this estimation
+// unnecessary.
+//
+// @param type The OxCaml type to analyze
+// @param data The data extractor containing the heap block data (required)
+// @return Estimated allocation size in bytes
+static uint64_t EstimatePointerAllocationSize(OxCamlType* type, DataExtractor& data) {
+  if (!type) {
+    // Error: This function requires a valid type
+    return 0;
+  }
+
+  // Follow typedefs to the actual structure
+  // CR sspies: This is being conservative and probably not necessary.
+  while (type->GetKind() == OxCamlType::Typedef) {
+    type = static_cast<OxCamlTypedefType*>(type)->GetUnderlyingType();
+  }
+
+  if (type->GetKind() != OxCamlType::Structure) {
+    return type->GetByteSize(); // Use the type's reported size
+  }
+
+  auto* struct_type = static_cast<OxCamlStructureType*>(type);
+  uint64_t max_end_offset = type->GetByteSize(); // Start with base type size
+
+  // Check all regular members
+  const auto& members = struct_type->GetMembers();
+  for (const auto& member : members) {
+    // CR sspies: If the size that is returned here is not exact (e.g., as in
+    // the case of structures, then our estimate here is off). That's why it is
+    // not exact.
+    uint64_t member_end = member.data_member_location + member.type->GetByteSize();
+    max_end_offset = std::max(max_end_offset, member_end);
+  }
+
+  // Calculate based on only active variants (requires data)
+  auto active_variants = FindActiveVariantsInStructure(struct_type, data);
+  for (const auto* variant : active_variants) {
+    for (const auto& member : variant->members) {
+      uint64_t member_end = member.data_member_location + member.type->GetByteSize();
+      max_end_offset = std::max(max_end_offset, member_end);
+    }
+  }
+
+  return max_end_offset;
+}
+
 // Format fallback - print raw bytes as hex
 static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp) {
   size_t byte_size = data.GetByteSize();
@@ -176,26 +291,69 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
   // Apply base offset from the pointed-to type
   int64_t base_offset = pointed_to->GetPointerAdjustmentOffset();
   uint64_t adjusted_address = ptr_value + base_offset;
-  
+
+  // Check if we need two-pass approach for structures with variant parts
+  uint64_t actual_size = size;
+
+  // Follow typedefs to check if this is a structure with variant parts
+  // CR sspies: This is being conservative. This is probably not necessary
+  // in the case of OxCaml. This can also probably be factored out into a nice
+  // recursive structure that avoids the while loop here.
+  OxCamlType* resolved_type = pointed_to;
+  while (resolved_type->GetKind() == OxCamlType::Typedef) {
+    resolved_type = static_cast<OxCamlTypedefType*>(resolved_type)->GetUnderlyingType();
+  }
+
+  if (resolved_type->GetKind() == OxCamlType::Structure) {
+    auto* struct_type = static_cast<OxCamlStructureType*>(resolved_type);
+    const auto& variant_parts = struct_type->GetVariantParts();
+
+    if (!variant_parts.empty()) {
+      // Two-pass approach for structures with variant parts:
+      // 1. Read enough data to analyze all discriminators
+      // 2. Calculate precise size based on active variants
+
+      // First pass: Calculate minimum size to read all discriminators
+      uint64_t min_discriminator_size = CalculateMinimumSizeForDiscriminators(struct_type);
+      uint64_t temp_read_size = std::max(min_discriminator_size, size);
+
+      Status error;
+      std::vector<uint8_t> temp_buffer(temp_read_size);
+      size_t bytes_read = process_sp->ReadMemory(adjusted_address, temp_buffer.data(), temp_buffer.size(), error);
+
+      if (bytes_read >= min_discriminator_size) {
+        // Create DataExtractor from the read data for variant analysis
+        DataExtractor heap_data(temp_buffer.data(), bytes_read, data.GetByteOrder(), data.GetAddressByteSize());
+
+        // Second pass: Calculate precise size based on active variants
+        uint64_t estimated_size = EstimatePointerAllocationSize(pointed_to, heap_data);
+        actual_size = estimated_size;
+      } else {
+        // Fallback to base structure size if we can't read enough for discriminators
+        actual_size = size;
+      }
+    }
+  }
+
   // Log when applying non-zero offset
   if (base_offset != 0) {
     Log *log = GetLog(OxCamlLog::Formatting);
-    LLDB_LOG(log, "FormatPointer: Applying base offset {0} to pointer 0x{1:x}, adjusted address: 0x{2:x}", 
-             base_offset, ptr_value, adjusted_address);
+    LLDB_LOG(log, "FormatPointer: Applying base offset {0} to pointer 0x{1:x}, adjusted address: 0x{2:x}, reading {3} bytes",
+             base_offset, ptr_value, adjusted_address, actual_size);
   }
 
   // Create buffer and read memory from adjusted address
-  std::vector<uint8_t> buffer(size);
+  std::vector<uint8_t> buffer(actual_size);
   Status error;
-  size_t bytes_read = process_sp->ReadMemory(adjusted_address, buffer.data(), size, error);
+  size_t bytes_read = process_sp->ReadMemory(adjusted_address, buffer.data(), actual_size, error);
 
-  if (bytes_read != size || !error.Success()) {
+  if (bytes_read != actual_size || !error.Success()) {
     stream.Printf("<0x%" PRIx64 ">", ptr_value);
     return true;
   }
 
   // Create DataExtractor with the dereferenced data
-  DataExtractor pointed_data(buffer.data(), size,
+  DataExtractor pointed_data(buffer.data(), actual_size,
                              data.GetByteOrder(),
                              data.GetAddressByteSize());
 
@@ -209,10 +367,74 @@ static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type,
   return FormatValue(stream, typedef_type->GetUnderlyingType(), data, process_sp);
 }
 
+// Format a single member (regular or bit field)
+static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtractor& data, lldb::ProcessSP process_sp) {
+  // Handle bit fields by extracting specific bits
+  if (member.IsBitField()) {
+    lldb::offset_t offset = member.data_member_location;
+    uint64_t full_value = data.GetU64(&offset);
+
+    if (full_value == UINT64_MAX) {
+      // Failed to read value
+      stream.Printf("<invalid>");
+      return false;
+    }
+
+    // Extract the specific bits
+    uint64_t bit_mask = (1ULL << member.bit_size.value()) - 1;
+    uint64_t extracted = (full_value >> member.bit_offset.value()) & bit_mask;
+
+    // Create DataExtractor with extracted value
+    DataExtractor bit_data(&extracted, sizeof(extracted),
+                           data.GetByteOrder(),
+                           data.GetAddressByteSize());
+
+    return FormatValue(stream, member.type, bit_data, process_sp);
+  }
+
+  // Regular member - read from data_member_location
+  DataExtractor member_data(data, member.data_member_location, member.type->GetByteSize());
+  return FormatValue(stream, member.type, member_data, process_sp);
+}
+
+// Format a variant part showing the active variant
+static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp) {
+  // Read discriminator value using helper function
+  uint64_t discr_value = ReadDiscriminatorValue(variant_part, data);
+
+  // Find the active variant
+  auto active_variant = variant_part.GetActiveVariant(discr_value);
+  if (!active_variant.has_value()) {
+    stream.Printf("UnknownVariant[]");
+    return false;
+  }
+
+  // Get discriminator name from enum
+  std::string discr_name = variant_part.GetDiscriminatorName(discr_value).value_or("Unknown");
+
+  // Format as DiscriminatorName[member1; member2; ...]
+  stream.Printf("%s[", discr_name.c_str());
+
+  const auto& members = (*active_variant)->members;
+  for (size_t i = 0; i < members.size(); ++i) {
+    if (i > 0) stream.Printf("; ");
+
+    if (members[i].name.has_value()) {
+      stream.Printf("%s = ", members[i].name.value().c_str());
+    }
+
+    FormatMember(stream, members[i], data, process_sp);
+  }
+
+  stream.Printf("]");
+  return true;
+}
+
 // Format structure values using DataExtractor for members
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
                            DataExtractor& data, lldb::ProcessSP process_sp) {
   const auto& members = struct_type->GetMembers();
+  const auto& variant_parts = struct_type->GetVariantParts();
 
   // Determine formatting based on type
   bool is_tuple = struct_type->IsTuple();
@@ -222,15 +444,26 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
 
   stream.Printf("%s", open_delim);
 
+  bool has_content = false;
+
+  // Format regular members first
   for (size_t i = 0; i < members.size(); ++i) {
-    if (i > 0) stream.Printf("%s", separator);
+    if (has_content) stream.Printf("%s", separator);
 
     if (members[i].name.has_value()) {
       stream.Printf("%s = ", members[i].name.value().c_str());
     }
 
-    DataExtractor member_data(data, members[i].offset, members[i].type->GetByteSize());
-    FormatValue(stream, members[i].type, member_data, process_sp);
+    FormatMember(stream, members[i], data, process_sp);
+    has_content = true;
+  }
+
+  // Format variant parts
+  for (size_t i = 0; i < variant_parts.size(); ++i) {
+    if (has_content) stream.Printf("%s", separator);
+
+    FormatVariantPart(stream, variant_parts[i], data, process_sp);
+    has_content = true;
   }
 
   stream.Printf("%s", close_delim);

@@ -139,12 +139,31 @@ When adding support for more OCaml types:
   - `DW_TAG_subprogram` - Functions with linkage names
   - `DW_TAG_typedef` - Type aliases (e.g., "int @ value")
   - `DW_TAG_formal_parameter` - Function parameters
+  - `DW_TAG_structure_type` - Records and complex structures
+  - `DW_TAG_variant_part` - Variant discriminated unions
+  - `DW_TAG_variant` - Individual variant cases
+  - `DW_TAG_enumeration_type` - OCaml enumerations
 - Type creation with proper `OxCamlType` representation
 - Functional type pointer management through TypeSystem
 - **Variable Display**: Variables show correct values for all immediate types (integers, bools, chars)
 - **Enum Support**: Full support for OCaml enumerations with proper value display
 - **Breakpoints**: Full support for OCaml module.function syntax
 - **Value Formatting**: Direct data extraction bypassing ValueObject API issues
+- **Simple Variants**: Complete support for variants like `A | B | C of int`
+  - Immediate variants: `{ Immediate[A] }`
+  - Pointer variants: `{ Pointer[{ C[42] }] }`
+- **Complex Variants**: Full support for variants with records and tuples
+  - Record variants: `{ Pointer[{ Record[x = 10; y = 0x47afc0] }] }`
+  - Tuple variants: `{ Pointer[{ Pair[42; 0x47afe8] }] }`
+  - Mixed record variants with unboxed fields
+- **Parametric Variants**: Option types, Either types, custom generic variants
+  - Option: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
+  - Either: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
+- **Records**: Display as `{field1 = value1; field2 = value2}`
+- **Tuples**: Display as `(value1, value2, value3)`
+- **Custom DWARF Attributes**: Support for `DW_AT_ocaml_offset_record_from_pointer` (0x3106)
+- **Advanced Memory Management**: Intelligent size estimation for variant structures
+- **Two-Level Discrimination**: Proper OCaml immediate/pointer + constructor handling
 - Critical TypeSystem methods properly configured:
   - `IsScalarType` returns true
   - `IsIntegerType` returns true with unsigned
@@ -152,8 +171,10 @@ When adding support for more OCaml types:
   - `GetTypeClass` returns `eTypeClassBuiltin`
 
 ### Known Limitations
-- No support for complex OCaml types (variants, records, lists, arrays)
 - Line-based breakpoints not yet supported (need more DWARF parsing)
+- Float dereferencing shows addresses instead of values
+- String dereferencing shows addresses instead of content
+- Unboxed float# fields show as raw integer bits
 - ValueObject's GetValueAsUnsigned() doesn't work (we use raw data instead)
 
 ## Formatter Architecture
@@ -294,6 +315,106 @@ Test the plugin efficiently using -o options:
 - Use function breakpoints (line breakpoints not yet supported)
 - Test with `frame variable` to see immediate feedback
 - No need for debug logging - formatters show values directly
+
+## Custom DWARF Attributes
+
+The OxCaml LLDB plugin supports custom DWARF attributes specific to OCaml's memory layout requirements.
+
+### DW_AT_ocaml_offset_record_from_pointer (0x3106)
+
+This is a custom OCaml DWARF extension that specifies pointer offset adjustments for heap-allocated structures.
+
+**Purpose**:
+- OCaml heap blocks have an 8-byte header before the actual data
+- When LLDB reads a pointer to an OCaml structure, it needs to adjust the address to account for this header
+- This attribute tells LLDB how many bytes to subtract from the pointer address
+
+**Usage**:
+```c
+// In DWARF DIE for structure types:
+DW_TAG_structure_type
+  DW_AT_ocaml_offset_record_from_pointer: -8  // Typical value
+  DW_AT_byte_size: 8  // Base structure size
+  // ... members at offsets 8, 16, 24, etc.
+```
+
+**Implementation Details**:
+- Attribute value: `0x3106` (custom extension)
+- Typical value: `-8` (8-byte header offset)
+- Applied in `FormatPointer` when dereferencing OCaml pointers to structures
+- Enables proper reading of variant constructors and record fields
+
+**Memory Layout Example**:
+```
+Heap Block:
+[Header: 8 bytes]  <-- LLDB needs to read from here to determine block tag (offset 0)
+[Data: Member 1]   <-- Pointer points here (offset +8)
+[Data: Member 2]   <-- Next member (offset +16)
+[Data: Member 3]   <-- Next member (offset +24)
+```
+
+**Note**: This is a temporary DWARF extension until the OCaml compiler provides better structure size information.
+
+## Variant Implementation Details
+
+The OxCaml plugin implements variant support using several helper functions:
+
+### Key Components
+
+1. **`ReadDiscriminatorValue`**: Reads discriminator values from memory with proper bit masking
+2. **`FindActiveVariantsInStructure`**: Identifies which variants are active for given data
+3. **`CalculateMinimumSizeForDiscriminators`**: Calculates minimum memory needed to read all discriminators
+4. **`EstimatePointerAllocationSize`**: Estimates actual allocation size based on active variants
+
+### Two-Pass Memory Reading
+
+For structures with variant parts, the plugin uses a two-pass approach:
+
+1. **First Pass**: Read minimum memory needed to analyze all discriminators
+2. **Second Pass**: Calculate precise size based on active variants and read actual data
+
+This approach optimizes memory usage while ensuring all variant data is accessible.
+
+### Discriminator Reading
+
+OCaml variants use sophisticated discrimination:
+- **1-bit LSB**: Immediate vs pointer discrimination
+- **Multi-byte tags**: Constructor identification within pointer variants
+- **Nested structures**: Heap blocks contain their own discriminators
+
+## OxCaml DWARF Emission Limitations
+
+### Structure Size Issue
+
+**Problem**: The OxCaml compiler emits incorrect `DW_AT_byte_size` values for variant structures.
+
+**Details**:
+- DWARF reports structure size as 8 bytes (header size only)
+- Actual structures contain members at offsets 8, 16, 24, etc., requiring 32+ bytes
+- This discrepancy causes memory reading issues in debuggers
+
+**Example**:
+```c
+// DWARF says:
+DW_TAG_structure_type
+  DW_AT_byte_size: 8  // Only header size
+
+// But members exist at:
+DW_TAG_member
+  DW_AT_data_member_location: 8   // Member 1
+DW_TAG_member
+  DW_AT_data_member_location: 16  // Member 2
+DW_TAG_member
+  DW_AT_data_member_location: 24  // Member 3
+```
+
+**Current Workaround**:
+- `EstimatePointerAllocationSize` function calculates actual size from member offsets
+- Two-pass reading approach ensures sufficient memory is read
+- Conservative estimation when variant analysis is not possible
+
+**Future Solution**:
+The OxCaml compiler should emit accurate structure sizes that account for all possible variant members, eliminating the need for size estimation workarounds.
 
 ## OCaml Value Representation
 
@@ -494,6 +615,139 @@ DW_TAG_subprogram
     DW_AT_name: x
     DW_AT_type: → int @ value
 ```
+
+## OCaml Variant DWARF Encoding
+
+Based on analysis of compiled OCaml binaries, variants are encoded using DWARF variant parts and discriminated unions.
+
+### Variant Structure Overview
+
+OCaml variants like:
+```ocaml
+type simple_variant = A | B | C of int | D of float
+```
+
+Are encoded as:
+```
+DW_TAG_typedef
+  DW_AT_name: "simple_variant @ value"
+  DW_AT_type: → structure type
+
+DW_TAG_structure_type (8 bytes)
+  DW_TAG_variant_part
+    DW_AT_discr: → discriminator member
+
+    DW_TAG_member (discriminator)
+      DW_AT_bit_size: 1
+      DW_AT_artificial: true
+      DW_AT_data_member_location: 0x00
+      DW_AT_type: → enumeration type
+      DW_AT_data_bit_offset: 0x00
+
+    DW_TAG_variant (discr_value: 0x01)  // Immediate variants
+      DW_TAG_member
+        DW_AT_bit_size: 63
+        DW_AT_data_member_location: 0x00
+        DW_AT_type: → enum { A, B }
+        DW_AT_data_bit_offset: 0x01
+
+    DW_TAG_variant (discr_value: 0x00)  // Pointer variants
+      DW_TAG_member
+        DW_AT_data_member_location: 0x00
+        DW_AT_type: → structure type for heap blocks
+```
+
+### Discriminator Types
+
+Two enumeration types control variant discrimination:
+
+1. **Boxed/Unboxed Discriminator** (1-bit):
+   ```
+   DW_TAG_enumeration_type
+     DW_TAG_enumerator
+       DW_AT_name: "Pointer"     // 0x00
+       DW_AT_const_value: 0x00
+     DW_TAG_enumerator
+       DW_AT_name: "Immediate"   // 0x01
+       DW_AT_const_value: 0x01
+   ```
+
+2. **Constructor Discriminator** (for each variant class):
+   ```
+   DW_TAG_enumeration_type
+     DW_TAG_enumerator
+       DW_AT_name: "A"
+       DW_AT_const_value: 0x00
+     DW_TAG_enumerator
+       DW_AT_name: "B"
+       DW_AT_const_value: 0x01
+   ```
+
+   ```
+   DW_TAG_enumeration_type (1 byte)
+     DW_TAG_enumerator
+       DW_AT_name: "C"
+       DW_AT_const_value: 0x00
+     DW_TAG_enumerator
+       DW_AT_name: "D"
+       DW_AT_const_value: 0x01
+   ```
+
+### Runtime Representation
+
+OCaml variants use a two-level discrimination scheme:
+
+1. **LSB (Least Significant Bit)**:
+   - `1` = Immediate value (constructors A, B stored directly)
+   - `0` = Pointer to heap block (constructors C, D)
+
+2. **Constructor Tag**:
+   - For immediate: stored in upper 63 bits
+   - For pointers: tag byte in heap block header
+
+### Memory Layout Examples
+
+**Immediate constructors (A, B)**:
+```
+Value layout: [63 bits: constructor tag][1 bit: 1]
+A: 0x0000000000000001 (tag=0, immediate=1)
+B: 0x0000000000000003 (tag=1, immediate=1)
+```
+
+**Pointer constructors (C of int, D of float)**:
+```
+Value layout: [63 bits: heap address][1 bit: 0]
+Points to heap block:
+  Header: [size][tag] where tag identifies C vs D
+  Data: constructor payload
+```
+
+### Heap Block Structure (for pointer variants)
+
+```
+DW_TAG_structure_type (for heap blocks)
+  DW_TAG_variant_part
+    DW_AT_discr: → tag discriminator
+
+    DW_TAG_variant (discr_value: 0x00)  // C of int
+      DW_TAG_member
+        DW_AT_byte_size: 8
+        DW_AT_data_member_location: 0x08  // After header
+        DW_AT_type: → ocaml_value (int)
+
+    DW_TAG_variant (discr_value: 0x01)  // D of float
+      DW_TAG_member
+        DW_AT_byte_size: 8
+        DW_AT_data_member_location: 0x08  // After header
+        DW_AT_type: → ocaml_value (float)
+```
+
+### Implementation Implications
+
+1. **Two-Phase Discrimination**: Check LSB first, then examine appropriate tag
+2. **Type Resolution**: Follow variant part discriminators to find active member
+3. **Value Extraction**: Different logic for immediate vs pointer variants
+4. **Constructor Naming**: Enum names map directly to OCaml constructors
 
 ## Safety Considerations
 

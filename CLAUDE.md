@@ -238,14 +238,40 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 - **Enumeration Types**: Full support for bool, char with value display
 - **Records**: Display as `{field1 = value1; field2 = value2}`
 - **Tuples**: Display as `(value1, value2, value3)`
+- **Simple Variants**: Complete support with proper discrimination
+  - Immediate: `{ Immediate[A] }`, `{ Immediate[B] }`
+  - Pointer: `{ Pointer[{ C[42] }] }`, `{ Pointer[{ D[0x47b018] }] }`
+- **Complex Variants**: Full support for variants with nested structures
+  - Record variants: `{ Pointer[{ Record[x = 10; y = 0x47afc0] }] }`
+  - Tuple variants: `{ Pointer[{ Pair[42; 0x47afe8] }] }`
+  - Mixed variants: `{ Pointer[{ Mixed[a = 100; c = true; b = 2307126535107494543] }] }`
+- **Parametric Types**: Generic variants work correctly
+  - Option: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
+  - Either: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
+- **DWARF Support**: Complete parsing of variant parts and discriminated unions
+- **Custom Attributes**: Support for `DW_AT_ocaml_offset_record_from_pointer` (0x3106)
+- **Memory Management**: Intelligent size estimation for variant structures
 
 ### In Progress
-- Complex type support (variants, lists, arrays)
 - Line-based breakpoints
 - Expression evaluation
-- String dereferencing (currently show as hex addresses)
+
+### Known Limitations
+- Float dereferencing shows addresses instead of values (e.g., `0x47afc0`)
+- String dereferencing shows addresses instead of content (e.g., `0x47ae90`) 
+- Unboxed float# fields show as raw integer bits instead of float values
+- Some pointer fields show addresses instead of dereferenced values
 
 ## DWARF Type Encoding
+
+### Custom DWARF Attributes
+
+**DW_AT_ocaml_offset_record_from_pointer (0x3106)**:
+- Custom OCaml DWARF extension for pointer offset adjustment
+- Specifies how many bytes to adjust when dereferencing pointers to structures  
+- Typical value: `-8` (to account for OCaml heap block headers)
+- Applied automatically in `FormatPointer` when reading variant and record data
+- Enables proper reading of heap-allocated OCaml structures
 
 ### Records and Tuples
 OxCaml uses: `DW_TAG_typedef → DW_TAG_reference_type → DW_TAG_structure_type`
@@ -255,11 +281,25 @@ OxCaml uses: `DW_TAG_typedef → DW_TAG_reference_type → DW_TAG_structure_type
 - **Tuples**: Structure members have no names
 - **Layout**: 8-byte members, 8-byte aligned offsets
 
+### Variants
+OxCaml uses complex DWARF variant part structures:
+
+- **Two-level discrimination**: LSB bit + constructor tags
+- **Immediate variants**: Stored directly in the value (odd numbers)
+- **Pointer variants**: Point to heap blocks with discriminator tags
+- **DWARF encoding**: Uses `DW_TAG_variant_part` with nested `DW_TAG_variant` structures
+- **Size limitation**: DWARF reports base size (8 bytes) but actual data requires more memory
+
 ### Current Display
-- Records: `{x = 1; y = 2}`
-- Tuples: `(42, <0x4c59c0>)`
-- Immediate values: Show as integers
-- Pointers: Show as hex addresses
+- **Records**: `{x = 1; y = 2}`, `{a = 42; c = true; d = 0x47af08; b = 2307126535107494543}`
+- **Tuples**: `(42, 1.5)`, `(value1, value2, value3)`
+- **Simple Variants**: `{ Immediate[A] }`, `{ Pointer[{ C[42] }] }`
+- **Complex Variants**: `{ Pointer[{ Record[x = 10; y = 0x47afc0] }] }`
+- **Option Types**: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
+- **Either Types**: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
+- **Immediate values**: Show as integers with correct OCaml tagging
+- **Boxed floats**: Show as hex addresses (dereferencing limitation)
+- **Unboxed floats**: Show as raw integer bits (interpretation limitation)
 
 ### Testing Quick Start
 ```bash

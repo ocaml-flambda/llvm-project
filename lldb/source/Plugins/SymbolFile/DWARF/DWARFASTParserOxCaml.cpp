@@ -453,54 +453,189 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const Symbo
     LLDB_LOG(log, "ParseStructureType: Found DW_AT_ocaml_offset_record_from_pointer: {0}", base_offset);
   }
   
-  // Parse member DIEs
-  std::vector<OxCamlStructureType::Member> members;
+  // Parse child DIEs - separate members and variant parts
+  std::vector<OxCamlMember> members;
+  std::vector<OxCamlVariantPart> variant_parts;
+  
   DWARFDIE child_die = die.GetFirstChild();
   while (child_die.IsValid()) {
     if (child_die.Tag() == llvm::dwarf::DW_TAG_member) {
-      // Get member name (optional for tuples)
-      std::optional<std::string> member_name = ExtractTypeName(child_die);
-      
-      // Get member type
-      DWARFDIE member_type_die = child_die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_type);
-      if (!member_type_die.IsValid()) {
-        LLDB_LOG(log, "ParseStructureType: Member has no valid type, skipping");
-        child_die = child_die.GetSibling();
-        continue;
+      // Parse regular member
+      auto member = ParseMember(sc, child_die);
+      if (member.has_value()) {
+        members.push_back(std::move(*member));
+        LLDB_LOG(log, "ParseStructureType: Added member {0} at offset {1}, type {2}",
+                 member->name.value_or("<unnamed>"), member->data_member_location, member->type->GetDisplayName());
+      } else {
+        LLDB_LOG(log, "ParseStructureType: Failed to parse member, skipping");
       }
-      
-      // Parse member type
-      bool type_is_new = false;
-      TypeSP member_type_sp = ParseTypeFromDWARF(sc, member_type_die, &type_is_new);
-      if (!member_type_sp) {
-        LLDB_LOG(log, "ParseStructureType: Failed to parse member type, skipping");
-        child_die = child_die.GetSibling();
-        continue;
+    } else if (child_die.Tag() == llvm::dwarf::DW_TAG_variant_part) {
+      // Parse variant part
+      auto variant_part = ParseVariantPart(sc, child_die);
+      if (variant_part.has_value()) {
+        variant_parts.push_back(std::move(*variant_part));
+        LLDB_LOG(log, "ParseStructureType: Added variant part with {0} variants", 
+                 variant_part->GetVariants().size());
+      } else {
+        LLDB_LOG(log, "ParseStructureType: Failed to parse variant part, skipping");
       }
-      
-      // Get OxCamlType from member TypeSP
-      CompilerType member_compiler_type = member_type_sp->GetForwardCompilerType();
-      auto* member_oxcaml_type = static_cast<OxCamlType*>(member_compiler_type.GetOpaqueQualType());
-      if (!member_oxcaml_type) {
-        LLDB_LOG(log, "ParseStructureType: Failed to get OxCamlType from member type, skipping");
-        child_die = child_die.GetSibling();
-        continue;
-      }
-      
-      // Get member offset
-      uint64_t member_offset = child_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_member_location, 0);
-      
-      // Add member to vector
-      members.push_back({member_name, member_oxcaml_type, member_offset});
-      
-      LLDB_LOG(log, "ParseStructureType: Added member {0} at offset {1}, type {2}",
-               member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName());
     }
     child_die = child_die.GetSibling();
   }
   
-  LLDB_LOG(log, "ParseStructureType: Creating OxCamlStructureType with {0} members, size {1}",
-           members.size(), byte_size);
+  LLDB_LOG(log, "ParseStructureType: Creating OxCamlStructureType with {0} members, {1} variant parts, size {2}",
+           members.size(), variant_parts.size(), byte_size);
   
-  return std::make_unique<OxCamlStructureType>(die_id, std::move(name), byte_size, std::move(members), base_offset);
+  return std::make_unique<OxCamlStructureType>(die_id, std::move(name), byte_size, std::move(members), std::move(variant_parts), base_offset);
+}
+
+std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContext &sc, const DWARFDIE &member_die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  
+  LLDB_LOG(log, "ParseMember: DIE 0x{0:x16}", member_die.GetID());
+  
+  // Get member name (optional for tuples)
+  std::optional<std::string> member_name = ExtractTypeName(member_die);
+  
+  // Get member type
+  DWARFDIE member_type_die = member_die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_type);
+  if (!member_type_die.IsValid()) {
+    LLDB_LOG(log, "ParseMember: Member has no valid type");
+    return std::nullopt;
+  }
+  
+  // Parse member type
+  bool type_is_new = false;
+  TypeSP member_type_sp = ParseTypeFromDWARF(sc, member_type_die, &type_is_new);
+  if (!member_type_sp) {
+    LLDB_LOG(log, "ParseMember: Failed to parse member type");
+    return std::nullopt;
+  }
+  
+  // Get OxCamlType from member TypeSP
+  CompilerType member_compiler_type = member_type_sp->GetForwardCompilerType();
+  auto* member_oxcaml_type = static_cast<OxCamlType*>(member_compiler_type.GetOpaqueQualType());
+  if (!member_oxcaml_type) {
+    LLDB_LOG(log, "ParseMember: Failed to get OxCamlType from member type");
+    return std::nullopt;
+  }
+  
+  // Get member offset
+  uint64_t member_offset = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_member_location, 0);
+  
+  // Get bit field attributes (if present)
+  std::optional<uint64_t> bit_offset;
+  std::optional<uint64_t> bit_size;
+  
+  if (member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_bit_offset, UINT64_MAX) != UINT64_MAX) {
+    bit_offset = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_bit_offset, 0);
+  }
+  
+  if (member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, UINT64_MAX) != UINT64_MAX) {
+    bit_size = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, 0);
+  }
+  
+  LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}", 
+           member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName());
+           
+  if (bit_offset.has_value() || bit_size.has_value()) {
+    LLDB_LOG(log, "ParseMember: Bit field detected - offset: {0}, size: {1}", 
+             bit_offset.value_or(0), bit_size.value_or(0));
+  }
+  
+  return OxCamlMember{
+    std::move(member_name),
+    member_oxcaml_type,
+    member_offset,
+    bit_offset,
+    bit_size
+  };
+}
+
+std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const SymbolContext &sc, const DWARFDIE &variant_part_die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  user_id_t die_id = variant_part_die.GetID();
+  
+  LLDB_LOG(log, "ParseVariantPart: DIE 0x{0:x16}", die_id);
+  
+  // Get discriminator reference from DW_AT_discr
+  DWARFDIE discriminator_die = variant_part_die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_discr);
+  if (!discriminator_die.IsValid()) {
+    LLDB_LOG(log, "ParseVariantPart: No valid discriminator reference");
+    return std::nullopt;
+  }
+  
+  LLDB_LOG(log, "ParseVariantPart: Found discriminator DIE 0x{0:x16}", discriminator_die.GetID());
+  
+  // Parse discriminator member
+  auto discriminator_member = ParseMember(sc, discriminator_die);
+  if (!discriminator_member.has_value()) {
+    LLDB_LOG(log, "ParseVariantPart: Failed to parse discriminator member");
+    return std::nullopt;
+  }
+  
+  // Discriminator type must be an enum
+  auto* discriminator_enum = dynamic_cast<OxCamlEnumType*>(discriminator_member->type);
+  if (!discriminator_enum) {
+    LLDB_LOG(log, "ParseVariantPart: Discriminator type is not an enum (got {0})", 
+             discriminator_member->type->GetDisplayName());
+    return std::nullopt;
+  }
+  
+  // Create discriminator info
+  OxCamlVariantPart::Discriminator discriminator{
+    discriminator_member->data_member_location,
+    discriminator_member->bit_offset.value_or(0),
+    discriminator_member->bit_size.value_or(discriminator_enum->GetByteSize() * 8), // Use enum size in bits
+    discriminator_enum
+  };
+  
+  LLDB_LOG(log, "ParseVariantPart: Discriminator bit offset: {0}, size: {1}", 
+           discriminator.bit_offset, discriminator.bit_size);
+  
+  // Parse variant DIE children
+  std::vector<OxCamlVariantPart::Variant> variants;
+  DWARFDIE child_die = variant_part_die.GetFirstChild();
+  
+  while (child_die.IsValid()) {
+    if (child_die.Tag() == llvm::dwarf::DW_TAG_variant) {
+      LLDB_LOG(log, "ParseVariantPart: Parsing variant DIE 0x{0:x16}", child_die.GetID());
+      
+      // Get discriminator value from DW_AT_discr_value
+      uint64_t discr_value = child_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_discr_value, UINT64_MAX);
+      if (discr_value == UINT64_MAX) {
+        LLDB_LOG(log, "ParseVariantPart: Variant has no discriminator value, skipping");
+        child_die = child_die.GetSibling();
+        continue;
+      }
+      
+      LLDB_LOG(log, "ParseVariantPart: Variant discriminator value: {0}", discr_value);
+      
+      // Parse variant members
+      std::vector<OxCamlMember> variant_members;
+      DWARFDIE variant_child_die = child_die.GetFirstChild();
+      
+      while (variant_child_die.IsValid()) {
+        if (variant_child_die.Tag() == llvm::dwarf::DW_TAG_member) {
+          auto member = ParseMember(sc, variant_child_die);
+          if (member.has_value()) {
+            variant_members.push_back(std::move(*member));
+            LLDB_LOG(log, "ParseVariantPart: Added variant member {0}", 
+                     member->name.value_or("<unnamed>"));
+          }
+        }
+        variant_child_die = variant_child_die.GetSibling();
+      }
+      
+      // Add variant to list
+      variants.push_back({discr_value, std::move(variant_members)});
+      LLDB_LOG(log, "ParseVariantPart: Added variant with discriminator {0}, {1} members", 
+               discr_value, variants.back().members.size());
+    }
+    child_die = child_die.GetSibling();
+  }
+  
+  LLDB_LOG(log, "ParseVariantPart: Created variant part with {0} variants", variants.size());
+  
+  return OxCamlVariantPart{std::move(discriminator), std::move(variants)};
 }
