@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Related Documentation
 
-- **OxCaml Plugin Details**: See `lldb/source/Plugins/Language/OxCaml/CLAUDE.md` for in-depth plugin architecture, implementation details, and DWARF structure documentation.
-- **TypeSystem Implementation**: See `lldb/source/Plugins/TypeSystem/OxCaml/CLAUDE.md` for TypeSystem-specific guidance and implementation notes.
+- **OxCaml Plugin Details**: See @lldb/source/Plugins/Language/OxCaml/CLAUDE.md for in-depth plugin architecture, implementation details, and DWARF structure documentation.
+- **TypeSystem Implementation**: See @lldb/source/Plugins/TypeSystem/OxCaml/CLAUDE.md for TypeSystem-specific guidance and implementation notes.
 
 ## Project Overview
 
@@ -258,7 +258,7 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 
 ### Known Limitations
 - Float dereferencing shows addresses instead of values (e.g., `0x47afc0`)
-- String dereferencing shows addresses instead of content (e.g., `0x47ae90`) 
+- String dereferencing shows addresses instead of content (e.g., `0x47ae90`)
 - Unboxed float# fields show as raw integer bits instead of float values
 - Some pointer fields show addresses instead of dereferenced values
 
@@ -268,7 +268,7 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 
 **DW_AT_ocaml_offset_record_from_pointer (0x3106)**:
 - Custom OCaml DWARF extension for pointer offset adjustment
-- Specifies how many bytes to adjust when dereferencing pointers to structures  
+- Specifies how many bytes to adjust when dereferencing pointers to structures
 - Typical value: `-8` (to account for OCaml heap block headers)
 - Applied automatically in `FormatPointer` when reading variant and record data
 - Enables proper reading of heap-allocated OCaml structures
@@ -277,7 +277,7 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 OxCaml uses: `DW_TAG_typedef → DW_TAG_reference_type → DW_TAG_structure_type`
 
 - **Type names**: End with `@ value` (e.g., `point @ value`, `int * string @ value`)
-- **Records**: Structure members have `DW_AT_name` attributes  
+- **Records**: Structure members have `DW_AT_name` attributes
 - **Tuples**: Structure members have no names
 - **Layout**: 8-byte members, 8-byte aligned offsets
 
@@ -307,11 +307,7 @@ OxCaml uses complex DWARF variant part structures:
 ninja -C build lldb
 
 # Test with OCaml binary using -o options (recommended)
-./build/bin/lldb your_ocaml_program \
-  -o "break Module.function" \
-  -o "run" \
-  -o "frame variable" \
-  -o "quit"
+./build/bin/lldb your_ocaml_program -o "break Module.function" -o "run" -o "frame variable" -o "quit"
 
 # Note: Don't break on 'main' - OCaml's main is typically just initialization
 # Break on your actual functions instead

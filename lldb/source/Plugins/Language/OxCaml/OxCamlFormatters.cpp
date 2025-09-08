@@ -400,6 +400,12 @@ static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtract
 }
 
 // Format a variant part showing the active variant
+//
+// Special handling for artificial discriminators:
+// - Artificial discriminators (e.g., Pointer/Immediate) with exactly one member
+//   in the active variant are displayed transparently (member content only)
+// - All other cases (non-artificial, or artificial with != 1 members) use
+//   regular variant formatting with discriminator name and brackets
 static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp) {
   // Read discriminator value using helper function
   uint64_t discr_value = ReadDiscriminatorValue(variant_part, data);
@@ -411,6 +417,16 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
     return false;
   }
 
+  const auto& members = (*active_variant)->members;
+
+  // Special case: artificial discriminator with exactly one member
+  // Display the member content directly without discriminator name/brackets
+  if (variant_part.HasArtificialDiscriminator() && members.size() == 1) {
+    FormatMember(stream, members[0], data, process_sp);
+    return true;
+  }
+
+  // Regular case: non-artificial discriminator or artificial with != 1 members
   // Try to get discriminator name if it's an enum
   std::string discr_name = "Unknown";
   const auto& discriminator = variant_part.GetDiscriminator();
@@ -424,7 +440,6 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
   // Format as DiscriminatorName[member1; member2; ...]
   stream.Printf("%s[", discr_name.c_str());
 
-  const auto& members = (*active_variant)->members;
   for (size_t i = 0; i < members.size(); ++i) {
     if (i > 0) stream.Printf("; ");
 

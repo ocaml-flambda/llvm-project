@@ -158,6 +158,9 @@ struct OxCamlMember {
   std::optional<uint64_t> bit_offset;  // DW_AT_data_bit_offset
   std::optional<uint64_t> bit_size;    // DW_AT_bit_size
 
+  // DWARF artificial attribute
+  bool is_artificial = false;          // DW_AT_artificial
+
   bool IsBitField() const { return bit_offset.has_value() && bit_size.has_value(); }
 };
 
@@ -179,6 +182,11 @@ public:
 
   const OxCamlMember& GetDiscriminator() const { return m_discriminator; }
   const std::vector<Variant>& GetVariants() const { return m_variants; }
+
+  // Check if discriminator is artificial (compiler-generated)
+  // Note: Only artificial discriminators with exactly one member in the active variant
+  // should be handled transparently. All other cases use regular variant formatting.
+  bool HasArtificialDiscriminator() const { return m_discriminator.is_artificial; }
 
   // Find active variant by discriminator value
   std::optional<const Variant*> GetActiveVariant(uint64_t discr_value) const {

@@ -534,9 +534,13 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
   if (member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, UINT64_MAX) != UINT64_MAX) {
     bit_size = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, 0);
   }
+
+  // Get artificial attribute
+  bool is_artificial = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_artificial, 0) != 0;
   
-  LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}", 
-           member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName());
+  LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}{3}", 
+           member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName(),
+           is_artificial ? " (artificial)" : "");
            
   if (bit_offset.has_value() || bit_size.has_value()) {
     LLDB_LOG(log, "ParseMember: Bit field detected - offset: {0}, size: {1}", 
@@ -548,7 +552,8 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
     member_oxcaml_type,
     member_offset,
     bit_offset,
-    bit_size
+    bit_size,
+    is_artificial
   };
 }
 
