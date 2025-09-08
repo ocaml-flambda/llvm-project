@@ -574,24 +574,9 @@ std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const Sy
     return std::nullopt;
   }
   
-  // Discriminator type must be an enum
-  auto* discriminator_enum = dynamic_cast<OxCamlEnumType*>(discriminator_member->type);
-  if (!discriminator_enum) {
-    LLDB_LOG(log, "ParseVariantPart: Discriminator type is not an enum (got {0})", 
-             discriminator_member->type->GetDisplayName());
-    return std::nullopt;
-  }
-  
-  // Create discriminator info
-  OxCamlVariantPart::Discriminator discriminator{
-    discriminator_member->data_member_location,
-    discriminator_member->bit_offset.value_or(0),
-    discriminator_member->bit_size.value_or(discriminator_enum->GetByteSize() * 8), // Use enum size in bits
-    discriminator_enum
-  };
-  
-  LLDB_LOG(log, "ParseVariantPart: Discriminator bit offset: {0}, size: {1}", 
-           discriminator.bit_offset, discriminator.bit_size);
+  LLDB_LOG(log, "ParseVariantPart: Discriminator at offset {0}, type: {1}", 
+           discriminator_member->data_member_location, 
+           discriminator_member->type->GetDisplayName());
   
   // Parse variant DIE children
   std::vector<OxCamlVariantPart::Variant> variants;
@@ -637,5 +622,5 @@ std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const Sy
   
   LLDB_LOG(log, "ParseVariantPart: Created variant part with {0} variants", variants.size());
   
-  return OxCamlVariantPart{std::move(discriminator), std::move(variants)};
+  return OxCamlVariantPart{std::move(*discriminator_member), std::move(variants)};
 }

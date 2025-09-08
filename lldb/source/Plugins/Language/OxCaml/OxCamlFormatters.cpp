@@ -97,11 +97,11 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, Da
 
 // Helper to read discriminator value from data
 static uint64_t ReadDiscriminatorValue(const OxCamlVariantPart& variant_part, DataExtractor& data) {
-  // Read discriminator from its specified location
-  lldb::offset_t discr_offset = variant_part.GetDiscriminator().data_member_location;
+  const auto& discriminator = variant_part.GetDiscriminator();
+  lldb::offset_t discr_offset = discriminator.data_member_location;
 
-  // Read discriminator value based on enum type byte size
-  uint64_t discriminator_byte_size = variant_part.GetDiscriminator().enum_type->GetByteSize();
+  // Get byte size from the discriminator's type
+  uint64_t discriminator_byte_size = discriminator.type->GetByteSize();
   uint64_t value;
 
   if (discriminator_byte_size == 1) {
@@ -110,13 +110,15 @@ static uint64_t ReadDiscriminatorValue(const OxCamlVariantPart& variant_part, Da
     value = data.GetU64(&discr_offset);
   }
 
-  // Extract discriminator bits based on bit offset and size
-  uint64_t bit_offset = variant_part.GetDiscriminator().bit_offset;
-  uint64_t bit_size = variant_part.GetDiscriminator().bit_size;
-  uint64_t discr_mask = (1ULL << bit_size) - 1;
-  uint64_t discr_value = (value >> bit_offset) & discr_mask;
+  // Handle bit fields if present
+  if (discriminator.IsBitField()) {
+    uint64_t bit_offset = discriminator.bit_offset.value();
+    uint64_t bit_size = discriminator.bit_size.value();
+    uint64_t discr_mask = (1ULL << bit_size) - 1;
+    value = (value >> bit_offset) & discr_mask;
+  }
 
-  return discr_value;
+  return value;
 }
 
 // Calculate minimum size needed to read all discriminators in a structure
@@ -126,7 +128,7 @@ static uint64_t CalculateMinimumSizeForDiscriminators(OxCamlStructureType* struc
   const auto& variant_parts = struct_type->GetVariantParts();
   for (const auto& variant_part : variant_parts) {
     const auto& discr = variant_part.GetDiscriminator();
-    uint64_t discr_end = discr.data_member_location + discr.enum_type->GetByteSize();
+    uint64_t discr_end = discr.data_member_location + discr.type->GetByteSize();
     max_discriminator_end = std::max(max_discriminator_end, discr_end);
   }
 
@@ -409,8 +411,15 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
     return false;
   }
 
-  // Get discriminator name from enum
-  std::string discr_name = variant_part.GetDiscriminatorName(discr_value).value_or("Unknown");
+  // Try to get discriminator name if it's an enum
+  std::string discr_name = "Unknown";
+  const auto& discriminator = variant_part.GetDiscriminator();
+  if (auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type)) {
+    auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
+    if (name_opt.has_value()) {
+      discr_name = name_opt.value();
+    }
+  }
 
   // Format as DiscriminatorName[member1; member2; ...]
   stream.Printf("%s[", discr_name.c_str());

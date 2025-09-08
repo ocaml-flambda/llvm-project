@@ -153,41 +153,33 @@ struct OxCamlMember {
   std::optional<std::string> name;     // DW_AT_name (if present)
   OxCamlType* type;                    // Non-owning pointer to member type
   uint64_t data_member_location;       // DW_AT_data_member_location
-  
+
   // For bit fields
   std::optional<uint64_t> bit_offset;  // DW_AT_data_bit_offset
   std::optional<uint64_t> bit_size;    // DW_AT_bit_size
-  
+
   bool IsBitField() const { return bit_offset.has_value() && bit_size.has_value(); }
 };
 
 // Represents DW_TAG_variant_part with discriminator and variant cases
 class OxCamlVariantPart {
 public:
-  // ASSUMPTION: Discriminator type is always an enumeration defining valid constructor values
-  struct Discriminator {
-    uint64_t data_member_location; // DW_AT_data_member_location
-    uint64_t bit_offset;           // DW_AT_data_bit_offset
-    uint64_t bit_size;             // DW_AT_bit_size
-    OxCamlEnumType* enum_type;     // DW_AT_type (always enum for discriminator)
-  };
-  
   struct Variant {
     uint64_t discriminator_value;         // DW_AT_discr_value
     std::vector<OxCamlMember> members;    // DW_TAG_member children
   };
-  
+
 private:
-  Discriminator m_discriminator;
+  OxCamlMember m_discriminator;
   std::vector<Variant> m_variants;
-  
+
 public:
-  OxCamlVariantPart(Discriminator discriminator, std::vector<Variant> variants)
+  OxCamlVariantPart(OxCamlMember discriminator, std::vector<Variant> variants)
     : m_discriminator(std::move(discriminator)), m_variants(std::move(variants)) {}
-  
-  const Discriminator& GetDiscriminator() const { return m_discriminator; }
+
+  const OxCamlMember& GetDiscriminator() const { return m_discriminator; }
   const std::vector<Variant>& GetVariants() const { return m_variants; }
-  
+
   // Find active variant by discriminator value
   std::optional<const Variant*> GetActiveVariant(uint64_t discr_value) const {
     for (const auto& variant : m_variants) {
@@ -195,11 +187,6 @@ public:
         return &variant;
     }
     return std::nullopt;
-  }
-  
-  // Get discriminator name from enum type (for display purposes)
-  std::optional<std::string> GetDiscriminatorName(uint64_t value) const {
-    return m_discriminator.enum_type->GetEnumeratorName(static_cast<int64_t>(value));
   }
 };
 
@@ -213,8 +200,8 @@ private:
   // specific to the DWARF encoding used by the OxCaml compiler. It supports an
   // ad-hoc attribute (see DW_AT_ocaml_offset_record_from_pointer in
   // DWARFASTParserOxCaml.cpp) that specifies a byte offset to apply when
-  // dealing with a pointer to a structure. This allows one to factor in the 
-  // header field of a block when the actual pointer points to the first entry 
+  // dealing with a pointer to a structure. This allows one to factor in the
+  // header field of a block when the actual pointer points to the first entry
   // in the block.
   int64_t m_base_offset;
 
@@ -225,7 +212,7 @@ public:
                       std::vector<OxCamlVariantPart> variant_parts = {},
                       int64_t base_offset = 0)
     : OxCamlType(Structure, die_id, std::move(name)),
-      m_byte_size(byte_size), m_members(std::move(members)), 
+      m_byte_size(byte_size), m_members(std::move(members)),
       m_variant_parts(std::move(variant_parts)), m_base_offset(base_offset) {}
 
   uint64_t GetByteSize() const override { return m_byte_size; }
