@@ -399,14 +399,146 @@ static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtract
   return FormatValue(stream, member.type, member_data, process_sp);
 }
 
-// Format a variant part showing the active variant
+// Enum to classify variant argument types for OCaml formatting
+enum VariantKind {
+  SingleEntryVariant,  // 1 member, no name
+  TupleVariant,        // >1 members, no names
+  RecordVariant        // at least 1 named member
+};
+
+// Format variant part with generic square bracket format: Name[mem1 = val1; mem2 = val2]
+static bool FormatVariantPartGeneric(Stream &stream, const OxCamlVariantPart& variant_part,
+                                     DataExtractor& data, lldb::ProcessSP process_sp,
+                                     uint64_t discr_value, const std::vector<OxCamlMember>& members) {
+  // Try to get discriminator name if it's an enum
+  std::string discr_name = "Unknown";
+  const auto& discriminator = variant_part.GetDiscriminator();
+  if (auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type)) {
+    auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
+    if (name_opt.has_value()) {
+      discr_name = name_opt.value();
+    }
+  }
+
+  // Format as DiscriminatorName[member1; member2; ...]
+  stream.Printf("%s", discr_name.c_str());
+
+  if (!members.empty()) {
+    stream.Printf("[");
+    for (size_t i = 0; i < members.size(); ++i) {
+      if (i > 0) stream.Printf("; ");
+      if (members[i].name.has_value()) {
+        stream.Printf("%s = ", members[i].name.value().c_str());
+      }
+      FormatMember(stream, members[i], data, process_sp);
+    }
+    stream.Printf("]");
+  }
+
+  return true;
+}
+
+// Format variant part with OCaml-style formatting
+static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& variant_part,
+                                    DataExtractor& data, lldb::ProcessSP process_sp,
+                                    uint64_t discr_value, const std::vector<OxCamlMember>& members) {
+  // Step 1: Get constructor name from enum
+  const auto& discriminator = variant_part.GetDiscriminator();
+  auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type);
+  if (!enum_type) {
+    stream.Printf("<Invalid Variant>");
+    return false;
+  }
+
+  auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
+  if (!name_opt.has_value()) {
+    stream.Printf("<Invalid Variant>");
+    return false;
+  }
+
+  // Print constructor name
+  stream.Printf("%s", name_opt.value().c_str());
+
+  // Step 2: Early return if no members
+  if (members.empty()) {
+    return true;
+  }
+
+  // Step 3: Add space before arguments
+  stream.Printf(" ");
+
+  // Step 4: Determine variant kind
+  // Check if all members are unnamed
+  bool all_unnamed = true;
+  for (const auto& member : members) {
+    if (member.name.has_value()) {
+      all_unnamed = false;
+      break;
+    }
+  }
+
+  VariantKind kind;
+  if (members.size() == 1 && all_unnamed) {
+    kind = SingleEntryVariant;
+  } else if (members.size() > 1 && all_unnamed) {
+    kind = TupleVariant;
+  } else {
+    kind = RecordVariant;  // at least one member has a name
+  }
+
+  // Step 5: Set delimiters based on kind
+  const char* open_delim = "";
+  const char* close_delim = "";
+  const char* separator = "";
+
+  switch (kind) {
+    case SingleEntryVariant:
+      // No delimiters
+      break;
+    case TupleVariant:
+      open_delim = "(";
+      close_delim = ")";
+      separator = ", ";
+      break;
+    case RecordVariant:
+      open_delim = "{ ";
+      close_delim = " }";
+      separator = "; ";
+      break;
+  }
+
+  // Print opening delimiter
+  stream.Printf("%s", open_delim);
+
+  // Step 6: Single loop to format all members
+  for (size_t i = 0; i < members.size(); ++i) {
+    if (i > 0) stream.Printf("%s", separator);
+
+    // For record variants, print field name or <unavailable>
+    if (kind == RecordVariant) {
+      if (members[i].name.has_value()) {
+        stream.Printf("%s = ", members[i].name.value().c_str());
+      } else {
+        stream.Printf("<unavailable> = ");
+      }
+    }
+
+    FormatMember(stream, members[i], data, process_sp);
+  }
+
+  // Print closing delimiter
+  stream.Printf("%s", close_delim);
+
+  return true;
+}
+
+// Main variant formatting dispatcher
 //
 // Special handling for artificial discriminators:
 // - Artificial discriminators (e.g., Pointer/Immediate) with exactly one member
 //   in the active variant are displayed transparently (member content only)
-// - All other cases (non-artificial, or artificial with != 1 members) use
-//   regular variant formatting with discriminator name and brackets
-static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp) {
+// - All other cases dispatch to either OCaml or generic formatting
+static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp, bool is_ocaml_variant = false) {
   // Read discriminator value using helper function
   uint64_t discr_value = ReadDiscriminatorValue(variant_part, data);
 
@@ -426,40 +558,32 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
     return true;
   }
 
-  // Regular case: non-artificial discriminator or artificial with != 1 members
-  // Try to get discriminator name if it's an enum
-  std::string discr_name = "Unknown";
-  const auto& discriminator = variant_part.GetDiscriminator();
-  if (auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type)) {
-    auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
-    if (name_opt.has_value()) {
-      discr_name = name_opt.value();
-    }
+  // Dispatch to appropriate formatter
+  if (is_ocaml_variant) {
+    return FormatVariantPartOxCaml(stream, variant_part, data, process_sp, discr_value, members);
+  } else {
+    return FormatVariantPartGeneric(stream, variant_part, data, process_sp, discr_value, members);
   }
-
-  // Format as DiscriminatorName[member1; member2; ...]
-  stream.Printf("%s[", discr_name.c_str());
-
-  for (size_t i = 0; i < members.size(); ++i) {
-    if (i > 0) stream.Printf("; ");
-
-    if (members[i].name.has_value()) {
-      stream.Printf("%s = ", members[i].name.value().c_str());
-    }
-
-    FormatMember(stream, members[i], data, process_sp);
-  }
-
-  stream.Printf("]");
-  return true;
 }
 
 // Format structure values using DataExtractor for members
+//
+// Special case for OCaml variants:
+// - Structures with no direct members and exactly one variant part
+//   are formatted without braces (just the variant content directly)
+// - This represents the typical OCaml variant structure encoding
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
                            DataExtractor& data, lldb::ProcessSP process_sp) {
   const auto& members = struct_type->GetMembers();
   const auto& variant_parts = struct_type->GetVariantParts();
 
+  // Special case: OCaml variant (no direct members, exactly one variant part)
+  // Format the variant content directly without structure braces using OCaml formatting
+  if (members.empty() && variant_parts.size() == 1) {
+    return FormatVariantPart(stream, variant_parts[0], data, process_sp, true);
+  }
+
+  // Regular case: structure with members and/or multiple variant parts
   // Determine formatting based on type
   bool is_tuple = struct_type->IsTuple();
   const char* open_delim = is_tuple ? "(" : "{ ";
@@ -486,7 +610,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
   for (size_t i = 0; i < variant_parts.size(); ++i) {
     if (has_content) stream.Printf("%s", separator);
 
-    FormatVariantPart(stream, variant_parts[i], data, process_sp);
+    FormatVariantPart(stream, variant_parts[i], data, process_sp, false);
     has_content = true;
   }
 
