@@ -1182,6 +1182,9 @@ def CSR_64 : CalleeSavedRegs<(add RBX, R12, R13, R14, R15, RBP)>;
 // R14 and R15 are used as return registers, so they aren't callee saved.
 def CSR_64_OCaml_C_Call : CalleeSavedRegs<(sub CSR_64, R14, R15)>;
 
+// Enable frametables?
+def CSR_64_OCaml : CalleeSavedRegs<(add RBP)>;
+
 def CSR_64_SwiftError : CalleeSavedRegs<(sub CSR_64, R12)>;
 def CSR_64_SwiftTail : CalleeSavedRegs<(sub CSR_64, R13, R14)>;
 

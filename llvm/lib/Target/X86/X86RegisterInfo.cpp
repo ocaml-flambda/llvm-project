@@ -300,8 +300,9 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   switch (CC) {
   case CallingConv::GHC:
   case CallingConv::HiPE:
-  case CallingConv::OCaml:
     return CSR_NoRegs_SaveList;
+  case CallingConv::OCaml:
+    return CSR_64_OCaml_SaveList;
   case CallingConv::OCaml_C_Call:
     return CSR_64_OCaml_C_Call_SaveList;
   case CallingConv::AnyReg:
@@ -426,8 +427,9 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   switch (CC) {
   case CallingConv::GHC:
   case CallingConv::HiPE:
-  case CallingConv::OCaml:
     return CSR_NoRegs_RegMask;
+  case CallingConv::OCaml:
+    return CSR_64_OCaml_RegMask;
   case CallingConv::OCaml_C_Call:
     return CSR_64_OCaml_C_Call_RegMask;
   case CallingConv::AnyReg:
