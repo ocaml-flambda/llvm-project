@@ -66,7 +66,7 @@ CompilerType TypeSystemOxCaml::GetTypeFromMangledTypename(ConstString mangled_ty
 
 
 ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, bool BaseOnly) {
-  if (static_cast<OxCamlType*>(type)) {
+  if (static_cast<Reference<OxCamlType>*>(type)) {
     return ConstString("ocaml_value");  // Universal format specifier for all OCaml types
   }
   return ConstString();
@@ -74,9 +74,8 @@ ConstString TypeSystemOxCaml::GetTypeName(lldb::opaque_compiler_type_t type, boo
 
 ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t type) {
   Log *log = GetLog(OxCamlLog::Formatting);
-  // Return the actual DWARF type name for display purposes
-  // (while GetTypeName returns "ocaml_value" for formatter matching)
-  if (auto* ocaml_type = static_cast<OxCamlType*>(type)) {
+  if (auto* ref = static_cast<Reference<OxCamlType>*>(type)) {
+    auto* ocaml_type = ref->get();
     std::string display_name = ocaml_type->GetDisplayName();
     LLDB_LOGV(log, "GetDisplayTypeName: Returning display name '{0}' for type kind {1}",
               display_name, static_cast<int>(ocaml_type->GetKind()));
@@ -87,8 +86,10 @@ ConstString TypeSystemOxCaml::GetDisplayTypeName(lldb::opaque_compiler_type_t ty
 }
 
 llvm::Expected<uint64_t> TypeSystemOxCaml::GetBitSize(lldb::opaque_compiler_type_t type, ExecutionContextScope *exe_scope) {
-  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+  if (auto* ref = static_cast<Reference<OxCamlType>*>(type)) {
+    auto* ocaml_type = ref->get();
     return ocaml_type->GetByteSize() * 8;  // Convert bytes to bits
+  }
   return llvm::createStringError(llvm::inconvertibleErrorCode(), "Invalid OxCaml type");
 }
 
@@ -110,36 +111,41 @@ CompilerType TypeSystemOxCaml::GetTypeForFormatters(void *type) {
 }
 
 // Type registry methods
-std::optional<OxCamlType*> TypeSystemOxCaml::GetType(lldb::user_id_t die_id) {
+Reference<OxCamlType>* TypeSystemOxCaml::RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> initial_type) {
   Log *log = GetLog(OxCamlLog::TypeRegistry);
+  LLDB_LOG(log, "RegisterType: Creating reference with provided type for DIE 0x{0:x16}: {1}",
+           die_id, initial_type->GetDisplayName());
+
+  // Create reference directly with initial type - Reference now requires initial value
+  auto ref = std::make_unique<Reference<OxCamlType>>(std::move(initial_type));
+  Reference<OxCamlType>* ref_ptr = ref.get();
+  m_type_registry[die_id] = std::move(ref);
+
+  return ref_ptr; // Weak pointer - ownership is moved to registry
+}
+
+std::optional<Reference<OxCamlType>*> TypeSystemOxCaml::GetType(lldb::user_id_t die_id) const {
   auto it = m_type_registry.find(die_id);
   if (it != m_type_registry.end()) {
-    LLDB_LOGV(log, "GetType: DIE 0x{0:x16} -> cache hit: {1}",
-              die_id, it->second->GetDisplayName());
     return it->second.get();
   }
-  LLDB_LOG(log, "GetType: DIE 0x{0:x16} -> cache miss", die_id);
   return std::nullopt;
 }
 
-void TypeSystemOxCaml::RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> type) {
-  Log *log = GetLog(OxCamlLog::TypeRegistry);
-  LLDB_LOG(log, "RegisterType: DIE 0x{0:x16} -> {1} (kind: {2})",
-           die_id, type->GetDisplayName(), static_cast<int>(type->GetKind()));
-  m_type_registry[die_id] = std::move(type);
-}
-
 bool TypeSystemOxCaml::IsTypedefType(lldb::opaque_compiler_type_t type) {
-  if (auto* ocaml_type = static_cast<OxCamlType*>(type))
+  if (auto* ref = static_cast<Reference<OxCamlType>*>(type)) {
+    auto* ocaml_type = ref->get();
     return ocaml_type->GetKind() == OxCamlType::Typedef;
+  }
   return false;
 }
 
 CompilerType TypeSystemOxCaml::GetTypedefedType(lldb::opaque_compiler_type_t type) {
-  if (auto* ocaml_type = static_cast<OxCamlType*>(type)) {
+  if (auto* ref = static_cast<Reference<OxCamlType>*>(type)) {
+    auto* ocaml_type = ref->get();
     if (ocaml_type->GetKind() == OxCamlType::Typedef) {
       auto* typedef_type = static_cast<OxCamlTypedefType*>(ocaml_type);
-      return CompilerType(weak_from_this(), typedef_type->GetUnderlyingType());
+      return CompilerType(weak_from_this(), typedef_type->GetUnderlyingReference());
     }
   }
   return CompilerType();
@@ -244,8 +250,10 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
     return;
   }
 
-  for (const auto& [die_id, type] : m_type_registry) {
-    std::string type_name = type->GetDisplayName();
+  for (const auto& [die_id, type_ref_ptr] : m_type_registry) {
+    Reference<OxCamlType>* type_ref = type_ref_ptr.get();
+    OxCamlType* actual_type = type_ref->get();
+    std::string type_name = actual_type->GetDisplayName();
 
     // Apply filter if provided
     if (!filter.empty() && type_name.find(filter.str()) == std::string::npos)
@@ -255,32 +263,41 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
            << ": " << type_name;
 
     // Show additional info based on type kind
-    switch (type->GetKind()) {
+    switch (actual_type->GetKind()) {
       case OxCamlType::Base:
-        output << " (base type, " << type->GetByteSize() << " bytes)";
+        output << " (base type, " << actual_type->GetByteSize() << " bytes)";
         break;
       case OxCamlType::Typedef:
         {
-          auto* td = static_cast<OxCamlTypedefType*>(type.get());
+          auto* td = static_cast<OxCamlTypedefType*>(actual_type);
           output << " (typedef -> " << td->GetUnderlyingType()->GetDisplayName() << ")";
         }
         break;
       case OxCamlType::Enum:
         {
-          auto* et = static_cast<OxCamlEnumType*>(type.get());
-          output << " (enum type, " << et->GetEnumerators().size() << " enumerators, " << type->GetByteSize() << " bytes)";
+          auto* et = static_cast<OxCamlEnumType*>(actual_type);
+          output << " (enum type, " << et->GetEnumerators().size() << " enumerators, " << actual_type->GetByteSize() << " bytes)";
         }
         break;
       case OxCamlType::Pointer:
         {
-          auto* pt = static_cast<OxCamlPointerType*>(type.get());
-          output << " (pointer -> " << pt->GetPointedToType()->GetDisplayName() << ", " << type->GetByteSize() << " bytes)";
+          auto* pt = static_cast<OxCamlPointerType*>(actual_type);
+          output << " (pointer -> " << pt->GetPointedToType()->GetDisplayName() << ", " << actual_type->GetByteSize() << " bytes)";
         }
         break;
       case OxCamlType::Structure:
         {
-          auto* st = static_cast<OxCamlStructureType*>(type.get());
-          output << " (structure, " << st->GetMembers().size() << " members, " << type->GetByteSize() << " bytes)";
+          auto* st = static_cast<OxCamlStructureType*>(actual_type);
+          output << " (structure, " << st->GetMembers().size() << " members, " << actual_type->GetByteSize() << " bytes)";
+        }
+        break;
+      case OxCamlType::Placeholder:
+        output << " (placeholder - parsing in progress)";
+        break;
+      case OxCamlType::Unknown:
+        {
+          auto* ut = static_cast<OxCamlUnknownType*>(actual_type);
+          output << " (unknown DWARF tag 0x" << llvm::format_hex(ut->GetDwarfTag(), 0) << ", " << actual_type->GetByteSize() << " bytes)";
         }
         break;
     }

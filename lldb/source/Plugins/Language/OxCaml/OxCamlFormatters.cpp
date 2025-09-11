@@ -70,6 +70,7 @@
 #include "lldb/Utility/Status.h"
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Utility/Reference.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
 #include <cassert>
 #include <cinttypes>
@@ -89,7 +90,22 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor&
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatPlaceholder(Stream &stream, OxCamlPlaceholderType* placeholder_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataExtractor& data, lldb::ProcessSP process_sp);
 
+// Helper function to safely extract OxCamlType from CompilerType
+static OxCamlType* ExtractOxCamlType(const CompilerType& compiler_type) {
+  if (!compiler_type.IsValid()) {
+    llvm::report_fatal_error("Invalid CompilerType in ExtractOxCamlType");
+  }
+
+  auto* type_ref = static_cast<Reference<OxCamlType>*>(compiler_type.GetOpaqueQualType());
+  if (!type_ref) {
+    llvm::report_fatal_error("Invalid type reference in ExtractOxCamlType");
+  }
+
+  return type_ref->get();
+}
 
 // CR sspies: There are a lot of helper functions in this file that should be factored out.
 // They have to do with the formatting of variants, which can be a bit subtle.
@@ -101,7 +117,7 @@ static uint64_t ReadDiscriminatorValue(const OxCamlVariantPart& variant_part, Da
   lldb::offset_t discr_offset = discriminator.data_member_location;
 
   // Get byte size from the discriminator's type
-  uint64_t discriminator_byte_size = discriminator.type->GetByteSize();
+  uint64_t discriminator_byte_size = discriminator.GetType()->GetByteSize();
   uint64_t value;
 
   if (discriminator_byte_size == 1) {
@@ -128,7 +144,7 @@ static uint64_t CalculateMinimumSizeForDiscriminators(OxCamlStructureType* struc
   const auto& variant_parts = struct_type->GetVariantParts();
   for (const auto& variant_part : variant_parts) {
     const auto& discr = variant_part.GetDiscriminator();
-    uint64_t discr_end = discr.data_member_location + discr.type->GetByteSize();
+    uint64_t discr_end = discr.data_member_location + discr.GetType()->GetByteSize();
     max_discriminator_end = std::max(max_discriminator_end, discr_end);
   }
 
@@ -191,7 +207,7 @@ static uint64_t EstimatePointerAllocationSize(OxCamlType* type, DataExtractor& d
     // CR sspies: If the size that is returned here is not exact (e.g., as in
     // the case of structures, then our estimate here is off). That's why it is
     // not exact.
-    uint64_t member_end = member.data_member_location + member.type->GetByteSize();
+    uint64_t member_end = member.data_member_location + member.GetType()->GetByteSize();
     max_end_offset = std::max(max_end_offset, member_end);
   }
 
@@ -199,7 +215,7 @@ static uint64_t EstimatePointerAllocationSize(OxCamlType* type, DataExtractor& d
   auto active_variants = FindActiveVariantsInStructure(struct_type, data);
   for (const auto* variant : active_variants) {
     for (const auto& member : variant->members) {
-      uint64_t member_end = member.data_member_location + member.type->GetByteSize();
+      uint64_t member_end = member.data_member_location + member.GetType()->GetByteSize();
       max_end_offset = std::max(max_end_offset, member_end);
     }
   }
@@ -224,6 +240,28 @@ static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data
     stream.Printf("%02x", byte);
   }
   stream.Printf(">");
+  return true;
+}
+
+// Format placeholder types during recursive parsing
+static bool FormatPlaceholder(Stream &stream, OxCamlPlaceholderType* placeholder_type, DataExtractor& data, lldb::ProcessSP process_sp) {
+  Log *log = GetLog(OxCamlLog::Formatting);
+  LLDB_LOG(log, "WARNING: FormatPlaceholder called for DIE 0x{0:x16} - placeholder not resolved during parsing!",
+           placeholder_type->GetDieId());
+
+  // Display a clear indication that this type is still being parsed
+  stream.Printf("<resolving>");
+  return true;
+}
+
+// Format unknown DWARF types
+static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataExtractor& data, lldb::ProcessSP process_sp) {
+  Log *log = GetLog(OxCamlLog::Formatting);
+  LLDB_LOG(log, "FormatUnknown called for DIE 0x{0:x16}, DWARF tag 0x{1:x}",
+           unknown_type->GetDieId(), unknown_type->GetDwarfTag());
+
+  // Display the DWARF tag information to help with debugging
+  stream.Printf("<unknown DWARF tag 0x%x>", unknown_type->GetDwarfTag());
   return true;
 }
 
@@ -391,12 +429,12 @@ static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtract
                            data.GetByteOrder(),
                            data.GetAddressByteSize());
 
-    return FormatValue(stream, member.type, bit_data, process_sp);
+    return FormatValue(stream, member.GetType(), bit_data, process_sp);
   }
 
   // Regular member - read from data_member_location
-  DataExtractor member_data(data, member.data_member_location, member.type->GetByteSize());
-  return FormatValue(stream, member.type, member_data, process_sp);
+  DataExtractor member_data(data, member.data_member_location, member.GetType()->GetByteSize());
+  return FormatValue(stream, member.GetType(), member_data, process_sp);
 }
 
 // Enum to classify variant argument types for OCaml formatting
@@ -413,7 +451,7 @@ static bool FormatVariantPartGeneric(Stream &stream, const OxCamlVariantPart& va
   // Try to get discriminator name if it's an enum
   std::string discr_name = "Unknown";
   const auto& discriminator = variant_part.GetDiscriminator();
-  if (auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type)) {
+  if (auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.GetType())) {
     auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
     if (name_opt.has_value()) {
       discr_name = name_opt.value();
@@ -444,7 +482,7 @@ static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& var
                                     uint64_t discr_value, const std::vector<OxCamlMember>& members) {
   // Step 1: Get constructor name from enum
   const auto& discriminator = variant_part.GetDiscriminator();
-  auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.type);
+  auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.GetType());
   if (!enum_type) {
     stream.Printf("<Invalid Variant>");
     return false;
@@ -638,7 +676,12 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
       return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), data, process_sp);
     case OxCamlType::Structure:
       return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), data, process_sp);
+    case OxCamlType::Placeholder:
+      return FormatPlaceholder(stream, static_cast<OxCamlPlaceholderType*>(type), data, process_sp);
+    case OxCamlType::Unknown:
+      return FormatUnknown(stream, static_cast<OxCamlUnknownType*>(type), data, process_sp);
   }
+  return false;  // Add default return for completeness
 }
 
 bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
@@ -655,10 +698,7 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
 
   // Get type and format using DataExtractor directly
   CompilerType compiler_type = valobj.GetCompilerType();
-  OxCamlType* type = nullptr;
-  if (compiler_type.IsValid()) {
-    type = static_cast<OxCamlType*>(compiler_type.GetOpaqueQualType());
-  }
+  OxCamlType* type = ExtractOxCamlType(compiler_type);
 
   lldb::ProcessSP process_sp = valobj.GetProcessSP();
   return FormatValue(stream, type, data, process_sp);

@@ -13,6 +13,7 @@
 #include "lldb/Core/PluginInterface.h"
 #include "lldb/lldb-private.h"
 #include "lldb/Core/PluginManager.h"
+#include "lldb/Utility/Reference.h"
 #include "../../SymbolFile/DWARF/DWARFDIE.h"
 #include "OxCamlTypes.h"
 
@@ -200,14 +201,26 @@ public:
   CompilerType GetTypeForFormatters(void *type) override;
 
   // Type registry methods
-  std::optional<OxCamlType*> GetType(lldb::user_id_t die_id);
-  void RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> type);
+  Reference<OxCamlType>* RegisterType(lldb::user_id_t die_id, std::unique_ptr<OxCamlType> initial_type);
+  std::optional<Reference<OxCamlType>*> GetType(lldb::user_id_t die_id) const;
 
 private:
   std::unique_ptr<plugin::dwarf::DWARFASTParser> m_dwarf_parser;
 
-  // Type registry: maps DIE ID to created OxCamlType
-  std::unordered_map<lldb::user_id_t, std::unique_ptr<OxCamlType>> m_type_registry;
+  // Type registry with recursive type support: maps DIE ID to Reference<OxCamlType>
+  //
+  // This registry enables handling of recursive types in DWARF parsing by providing
+  // stable references that can be updated atomically. When parsing recursive
+  // types like "type t = A | B of t", a placeholder is first created and all
+  // references point to it, then the placeholder is replaced with the actual
+  // type once parsing completes.
+  //
+  // OxCaml-specific invariants:
+  // - References are never replaced more than once
+  // - After parsing completes, no placeholders should remain
+  // - All type members (OxCamlTypedefType, OxCamlMember, etc.) store References
+  //   to ensure they automatically see updates when placeholders are replaced
+  std::unordered_map<lldb::user_id_t, std::unique_ptr<Reference<OxCamlType>>> m_type_registry;
 };
 
 } // namespace lldb_private

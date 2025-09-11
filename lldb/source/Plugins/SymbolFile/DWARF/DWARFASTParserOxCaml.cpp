@@ -58,70 +58,85 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
   LLDB_LOG(log, "ParseTypeFromDWARF: DIE 0x{0:x16} tag={1} name=\"{2}\"",
            die_id, die.Tag(), die_name ? die_name : "<anonymous>");
 
-  // Check if type already exists in registry
-  std::optional<OxCamlType*> existing_type = m_oxcaml_typesystem.GetType(die_id);
+  // Recursive Type Handling Strategy:
+  // 1. Check if we already have a Reference for this DIE
+  // 2. If not, create a placeholder and register it immediately
+  // 3. Parse the type (recursive calls will find the placeholder)
+  // 4. Replace the placeholder with the actual type atomically
+  // This ensures all References point to the same object and see updates
 
-  OxCamlType* oxcaml_type;
-  if (existing_type.has_value()) {
-    // Type already in registry
-    oxcaml_type = existing_type.value();
-    LLDB_LOG(log, "ParseTypeFromDWARF: Found existing type in registry: {0}",
-             oxcaml_type->GetDisplayName());
-  } else {
-    // Type not in registry, create it based on DWARF tag
-    std::unique_ptr<OxCamlType> new_type;
+  // Check if Reference already exists
+  auto existing_opt = m_oxcaml_typesystem.GetType(die_id);
+  if (existing_opt.has_value()) {
+    Reference<OxCamlType>* existing_ref = existing_opt.value();
 
-    switch (die.Tag()) {
-      case llvm::dwarf::DW_TAG_base_type:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing base type");
-        new_type = ParseBaseType(die);
-        break;
-      case llvm::dwarf::DW_TAG_typedef:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing typedef type");
-        new_type = ParseTypedefType(sc, die);
-        break;
-      case llvm::dwarf::DW_TAG_enumeration_type:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing enum type");
-        new_type = ParseEnumType(die);
-        break;
-      case llvm::dwarf::DW_TAG_pointer_type:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing pointer type");
-        new_type = ParsePointerType(sc, die);
-        break;
-      case llvm::dwarf::DW_TAG_reference_type:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing reference type");
-        new_type = ParseReferenceType(sc, die);
-        break;
-      case llvm::dwarf::DW_TAG_structure_type:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Parsing structure type");
-        new_type = ParseStructureType(sc, die);
-        break;
-      default:
-        LLDB_LOG(log, "ParseTypeFromDWARF: Unsupported DWARF tag: {0}", die.Tag());
-        return TypeSP();
-    }
-
-    if (!new_type) {
-      LLDB_LOG(log, "ParseTypeFromDWARF: Failed to create type");
-      return TypeSP();
-    }
-
-    // Add to registry and keep raw pointer
-    oxcaml_type = new_type.get();
-    LLDB_LOG(log, "ParseTypeFromDWARF: Created new type: {0}, registering in type system",
-             oxcaml_type->GetDisplayName());
-    m_oxcaml_typesystem.RegisterType(die_id, std::move(new_type));
+    // Return existing type (whether placeholder or actual)
+    LLDB_LOG(log, "ParseTypeFromDWARF: Found existing reference for DIE 0x{0:x16}", die_id);
+    return CreateLLDBType(die, existing_ref);
   }
 
-  // Create LLDB Type object using helper method
-  LLDB_LOG(log, "ParseTypeFromDWARF: Creating LLDB Type object for {0}",
-           oxcaml_type->GetDisplayName());
-  TypeSP type_sp = CreateLLDBType(die, oxcaml_type);
+  // First time seeing this type - create placeholder with DWARF info
+  LLDB_LOG(log, "ParseTypeFromDWARF: Registering new type for DIE 0x{0:x16}", die_id);
+
+  // Extract DWARF information for placeholder
+  std::optional<std::string> dwarf_name = ExtractTypeName(die);
+  uint64_t dwarf_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);
+
+  // Create placeholder with actual DWARF info
+  auto placeholder = std::make_unique<OxCamlPlaceholderType>(die_id, dwarf_name, dwarf_size);
+
+  // Register with the placeholder
+  Reference<OxCamlType>* type_ref = m_oxcaml_typesystem.RegisterType(die_id, std::move(placeholder));
+
+  // Parse the type (recursive calls will get same empty reference)
+  std::unique_ptr<OxCamlType> new_type;
+
+  switch (die.Tag()) {
+    case llvm::dwarf::DW_TAG_base_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing base type");
+      new_type = ParseBaseType(die);
+      break;
+    case llvm::dwarf::DW_TAG_typedef:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing typedef type");
+      new_type = ParseTypedefType(sc, die);
+      break;
+    case llvm::dwarf::DW_TAG_enumeration_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing enum type");
+      new_type = ParseEnumType(die);
+      break;
+    case llvm::dwarf::DW_TAG_pointer_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing pointer type");
+      new_type = ParsePointerType(sc, die);
+      break;
+    case llvm::dwarf::DW_TAG_reference_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing reference type");
+      new_type = ParseReferenceType(sc, die);
+      break;
+    case llvm::dwarf::DW_TAG_structure_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing structure type");
+      new_type = ParseStructureType(sc, die);
+      break;
+    default:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Unsupported DWARF tag: 0x{0:x} - creating unknown type", die.Tag());
+      new_type = ParseUnknownType(die);
+      break;
+  }
+
+  if (!new_type) {
+    LLDB_LOG(log, "ParseTypeFromDWARF: Failed to create type for DIE 0x{0:x16} - creating unknown type as fallback", die_id);
+    // Create unknown type as fallback for failed parsing
+    new_type = ParseUnknownType(die);
+  }
+
+  // Replace placeholder with actual type - this updates ALL CompilerTypes that point to it!
+  LLDB_LOG(log, "ParseTypeFromDWARF: Replacing placeholder with actual type for DIE 0x{0:x16}: {1}",
+           die_id, new_type->GetDisplayName());
+  type_ref->set(std::move(new_type));
 
   if (type_is_new_ptr)
     *type_is_new_ptr = true;
 
-  return type_sp;
+  return CreateLLDBType(die, type_ref);
 }
 
 // Helper methods for parsing different DWARF DIE types
@@ -143,17 +158,17 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType
   if (!underlying_die)
     return nullptr;
 
-  // Recursively parse underlying type (ensures it's in registry)
-  TypeSP underlying_type_sp = ParseTypeFromDWARF(sc, underlying_die, nullptr);
-  if (!underlying_type_sp)
-    return nullptr;
+  // Ensure the underlying type has a Reference
+  ParseTypeFromDWARF(sc, underlying_die, nullptr);
 
-  // Get the underlying OxCamlType from registry (should exist now)
+  // Get the Reference
   auto underlying_opt = m_oxcaml_typesystem.GetType(underlying_die.GetID());
-  if (!underlying_opt.has_value())
-    return nullptr;
+  if (!underlying_opt.has_value()) {
+    llvm::report_fatal_error("ParseTypedefType: Failed to get reference for underlying type");
+  }
+  Reference<OxCamlType>* underlying_ref = underlying_opt.value();
 
-  return std::make_unique<OxCamlTypedefType>(die.GetID(), ExtractTypeName(die), underlying_opt.value());
+  return std::make_unique<OxCamlTypedefType>(die.GetID(), ExtractTypeName(die), underlying_ref);
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(const DWARFDIE &die) {
@@ -178,20 +193,21 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(co
   return std::make_unique<OxCamlEnumType>(die.GetID(), ExtractTypeName(die), byte_size, std::move(enumerators));
 }
 
-lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type) {
-  // Create CompilerType wrapping the registry-owned OxCamlType
-  CompilerType compiler_type(m_oxcaml_typesystem.weak_from_this(), oxcaml_type);
+lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, Reference<OxCamlType>* type_ref) {
+  // Create CompilerType wrapping the Reference pointer
+  CompilerType compiler_type(m_oxcaml_typesystem.weak_from_this(), type_ref);
+  auto* oxcaml_type = type_ref->get();
 
-  // Determine encoding type based on kind
-  Type::EncodingDataType encoding_type;
+  // Determine encoding type and other properties
+  Type::EncodingDataType encoding_type = Type::eEncodingIsUID;
   user_id_t encoding_uid = LLDB_INVALID_UID;
 
   if (oxcaml_type->GetKind() == OxCamlType::Typedef) {
     encoding_type = Type::eEncodingIsTypedefUID;
     auto* typedef_type = static_cast<OxCamlTypedefType*>(oxcaml_type);
-    encoding_uid = typedef_type->GetUnderlyingType()->GetDieId();
-  } else {
-    encoding_type = Type::eEncodingIsUID;
+    if (typedef_type->GetUnderlyingType()) {
+      encoding_uid = typedef_type->GetUnderlyingType()->GetDieId();
+    }
   }
 
   // Create LLDB Type object
@@ -199,16 +215,25 @@ lldb::TypeSP DWARFASTParserOxCaml::CreateLLDBType(const DWARFDIE &die, lldb_priv
   if (!dwarf)
     return TypeSP();
 
+  // CR sspies: In the future, we need to update the naming scheme for types so that:
+  // 1. Type names passed to LLDB are unique (e.g., include DIE ID or module info)
+  // 2. The debugger uses display names when showing information to users
+  // 3. This separation allows proper type identity while maintaining readable output
+
+  std::string display_name = oxcaml_type->GetDisplayName();
+  uint64_t byte_size = oxcaml_type->GetByteSize();
+  Type::ResolveState resolve_state = Type::ResolveState::Full;
+
   TypeSP type_sp = dwarf->MakeType(
     die.GetID(),
-    ConstString(oxcaml_type->GetDisplayName()),
-    oxcaml_type->GetByteSize(),
+    ConstString(display_name),
+    byte_size,
     nullptr,  // context
     encoding_uid,
     encoding_type,
     nullptr,  // declaration
     compiler_type,
-    Type::ResolveState::Full
+    resolve_state
   );
 
   return type_sp;
@@ -393,29 +418,42 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParsePointerType(const SymbolC
     return nullptr;
   }
 
-  // Parse the pointed-to type (recursively)
-  bool type_is_new = false;
-  TypeSP pointed_to_type_sp = ParseTypeFromDWARF(sc, pointed_to_die, &type_is_new);
-  if (!pointed_to_type_sp) {
-    LLDB_LOG(log, "ParsePointerType: Failed to parse pointed-to type");
-    return nullptr;
-  }
-
-  // Get the OxCamlType from the pointed-to TypeSP
-  CompilerType pointed_to_compiler_type = pointed_to_type_sp->GetForwardCompilerType();
-  auto* pointed_to_oxcaml_type = static_cast<OxCamlType*>(pointed_to_compiler_type.GetOpaqueQualType());
-  if (!pointed_to_oxcaml_type) {
-    LLDB_LOG(log, "ParsePointerType: Failed to get OxCamlType from pointed-to type");
-    return nullptr;
-  }
-
   // Extract optional name
   std::optional<std::string> name = ExtractTypeName(die);
 
-  LLDB_LOG(log, "ParsePointerType: Creating OxCamlPointerType pointing to {0}",
-           pointed_to_oxcaml_type->GetDisplayName());
+  // Parse the pointed-to type (recursively)
+  ParseTypeFromDWARF(sc, pointed_to_die, nullptr);
 
-  return std::make_unique<OxCamlPointerType>(die_id, std::move(name), pointed_to_oxcaml_type);
+  // Get the Reference
+  auto pointed_to_opt = m_oxcaml_typesystem.GetType(pointed_to_die.GetID());
+  if (!pointed_to_opt.has_value()) {
+    llvm::report_fatal_error("ParsePointerType: Failed to get reference for pointed-to type");
+  }
+  Reference<OxCamlType>* pointed_to_ref = pointed_to_opt.value();
+
+  // CR sspies: Instead of going through the type system, consider using the
+  // type returned from ParseTypeFromDWARF above. Old version:
+  //
+  // bool type_is_new = false;
+  // TypeSP pointed_to_type_sp = ParseTypeFromDWARF(sc, pointed_to_die, &type_is_new);
+  // if (!pointed_to_type_sp) {
+  //   LLDB_LOG(log, "ParsePointerType: Failed to parse pointed-to type");
+  //   return nullptr;
+  // }
+  //
+  // // Get the OxCamlType from the pointed-to TypeSP
+  // CompilerType pointed_to_compiler_type = pointed_to_type_sp->GetForwardCompilerType();
+  // auto* pointed_to_oxcaml_type = static_cast<OxCamlType*>(pointed_to_compiler_type.GetOpaqueQualType());
+  // if (!pointed_to_oxcaml_type) {
+  //   LLDB_LOG(log, "ParsePointerType: Failed to get OxCamlType from pointed-to type");
+  //   return nullptr;
+  // }
+  //
+
+  LLDB_LOG(log, "ParsePointerType: Creating OxCamlPointerType pointing to {0}",
+           pointed_to_ref->get()->GetDisplayName());
+
+  return std::make_unique<OxCamlPointerType>(die_id, std::move(name), pointed_to_ref);
 }
 
 std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseReferenceType(const SymbolContext &sc, const DWARFDIE &die) {
@@ -465,7 +503,7 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const Symbo
       if (member.has_value()) {
         members.push_back(std::move(*member));
         LLDB_LOG(log, "ParseStructureType: Added member {0} at offset {1}, type {2}",
-                 member->name.value_or("<unnamed>"), member->data_member_location, member->type->GetDisplayName());
+                 member->name.value_or("<unnamed>"), member->data_member_location, member->GetType()->GetDisplayName());
       } else {
         LLDB_LOG(log, "ParseStructureType: Failed to parse member, skipping");
       }
@@ -512,13 +550,12 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
     return std::nullopt;
   }
 
-  // Get OxCamlType from member TypeSP
-  CompilerType member_compiler_type = member_type_sp->GetForwardCompilerType();
-  auto* member_oxcaml_type = static_cast<OxCamlType*>(member_compiler_type.GetOpaqueQualType());
-  if (!member_oxcaml_type) {
-    LLDB_LOG(log, "ParseMember: Failed to get OxCamlType from member type");
-    return std::nullopt;
+  // Get the Reference
+  auto member_type_opt = m_oxcaml_typesystem.GetType(member_type_die.GetID());
+  if (!member_type_opt.has_value()) {
+    llvm::report_fatal_error("ParseMember: Failed to get reference for member type");
   }
+  Reference<OxCamlType>* member_type_ref = member_type_opt.value();
 
   // Get member offset
   uint64_t member_offset = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_member_location, 0);
@@ -539,7 +576,7 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
   bool is_artificial = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_artificial, 0) != 0;
 
   LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}{3}",
-           member_name.value_or("<unnamed>"), member_offset, member_oxcaml_type->GetDisplayName(),
+           member_name.value_or("<unnamed>"), member_offset, member_type_ref->get()->GetDisplayName(),
            is_artificial ? " (artificial)" : "");
 
   if (bit_offset.has_value() || bit_size.has_value()) {
@@ -549,7 +586,7 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
 
   return OxCamlMember{
     std::move(member_name),
-    member_oxcaml_type,
+    member_type_ref,
     member_offset,
     bit_offset,
     bit_size,
@@ -581,7 +618,7 @@ std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const Sy
 
   LLDB_LOG(log, "ParseVariantPart: Discriminator at offset {0}, type: {1}",
            discriminator_member->data_member_location,
-           discriminator_member->type->GetDisplayName());
+           discriminator_member->GetType()->GetDisplayName());
 
   // Parse variant DIE children
   std::vector<OxCamlVariantPart::Variant> variants;
@@ -628,4 +665,23 @@ std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const Sy
   LLDB_LOG(log, "ParseVariantPart: Created variant part with {0} variants", variants.size());
 
   return OxCamlVariantPart{std::move(*discriminator_member), std::move(variants)};
+}
+
+// Parse unknown/unsupported DWARF types
+std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseUnknownType(const DWARFDIE &die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  lldb::user_id_t die_id = die.GetID();
+  uint32_t dwarf_tag = die.Tag();
+
+  LLDB_LOG(log, "ParseUnknownType: Creating unknown type for DIE 0x{0:x16}, DWARF tag 0x{1:x}",
+           die_id, dwarf_tag);
+
+  // Extract basic information if available
+  std::optional<std::string> name = ExtractTypeName(die);
+  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 bytes
+
+  LLDB_LOG(log, "ParseUnknownType: name=\"{0}\", byte_size={1}",
+           name ? *name : "<anonymous>", byte_size);
+
+  return std::make_unique<OxCamlUnknownType>(die_id, std::move(name), byte_size, dwarf_tag);
 }

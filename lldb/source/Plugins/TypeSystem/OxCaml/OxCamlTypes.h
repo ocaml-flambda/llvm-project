@@ -10,6 +10,10 @@
 #define LLDB_SOURCE_PLUGINS_TYPESYSTEM_OXCAML_OXCAMLTYPES_H
 
 #include "lldb/lldb-private.h"
+#include "lldb/Utility/Reference.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FormatVariadic.h"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,7 +28,7 @@ class OxCamlEnumType;
 // OxCamlType class hierarchy
 class OxCamlType {
 public:
-  enum Kind { Base, Typedef, Enum, Pointer, Structure };
+  enum Kind { Base, Typedef, Enum, Pointer, Structure, Placeholder, Unknown };
 
   OxCamlType(Kind k, lldb::user_id_t die_id, std::optional<std::string> name)
     : m_kind(k), m_die_id(die_id), m_name(std::move(name)) {}
@@ -67,22 +71,55 @@ protected:
   }
 };
 
+class OxCamlPlaceholderType : public OxCamlType {
+  uint64_t m_byte_size;
+
+public:
+  OxCamlPlaceholderType(lldb::user_id_t die_id,
+                        std::optional<std::string> name,
+                        uint64_t byte_size)
+    : OxCamlType(Placeholder, die_id, std::move(name)),
+      m_byte_size(byte_size) {}
+
+  uint64_t GetByteSize() const override;
+
+protected:
+  std::string GetDefaultDisplayName() const override;
+};
+
+class OxCamlUnknownType : public OxCamlType {
+  uint64_t m_byte_size;
+  uint32_t m_dwarf_tag;  // Store the DWARF tag that wasn't recognized
+
+public:
+  OxCamlUnknownType(lldb::user_id_t die_id,
+                    std::optional<std::string> name,
+                    uint64_t byte_size,
+                    uint32_t dwarf_tag);
+
+  uint64_t GetByteSize() const override;
+  uint32_t GetDwarfTag() const;
+
+protected:
+  std::string GetDefaultDisplayName() const override;
+};
+
 class OxCamlTypedefType : public OxCamlType {
-  OxCamlType* m_underlying;  // Non-owning pointer to registry-owned type
+  Reference<OxCamlType>* m_underlying_ref;  // Weak pointer to registry-owned Reference
 
 public:
   OxCamlTypedefType(lldb::user_id_t die_id, std::optional<std::string> name,
-                    OxCamlType* underlying)
+                    Reference<OxCamlType>* underlying_ref)
     : OxCamlType(Typedef, die_id, std::move(name)),
-      m_underlying(underlying) {}
+      m_underlying_ref(underlying_ref) {}
 
-  OxCamlType* GetUnderlyingType() const { return m_underlying; }
-  uint64_t GetByteSize() const override { return m_underlying->GetByteSize(); }
+  OxCamlType* GetUnderlyingType() const { return m_underlying_ref->get(); }
+  Reference<OxCamlType>* GetUnderlyingReference() const { return m_underlying_ref; }
+  uint64_t GetByteSize() const override { return GetUnderlyingType()->GetByteSize(); }
 
 protected:
   std::string GetDefaultDisplayName() const override {
-    // Anonymous typedef uses underlying type's name
-    return m_underlying->GetDisplayName();
+    return GetUnderlyingType()->GetDisplayName();
   }
 };
 
@@ -131,27 +168,27 @@ protected:
 };
 
 class OxCamlPointerType : public OxCamlType {
-  OxCamlType* m_pointed_to;  // Non-owning pointer to registry-owned type
+  Reference<OxCamlType>* m_pointed_to_ref;  // Weak pointer to registry-owned Reference
 
 public:
   OxCamlPointerType(lldb::user_id_t die_id, std::optional<std::string> name,
-                    OxCamlType* pointed_to)
+                    Reference<OxCamlType>* pointed_to_ref)
     : OxCamlType(Pointer, die_id, std::move(name)),
-      m_pointed_to(pointed_to) {}
+      m_pointed_to_ref(pointed_to_ref) {}
 
-  OxCamlType* GetPointedToType() const { return m_pointed_to; }
-  uint64_t GetByteSize() const override { return 8; }  // Pointer size is always 8 bytes
+  OxCamlType* GetPointedToType() const { return m_pointed_to_ref->get(); }
+  uint64_t GetByteSize() const override { return 8; }
 
 protected:
   std::string GetDefaultDisplayName() const override {
-    return m_pointed_to ? m_pointed_to->GetDisplayName() + " *" : "void *";
+    return GetPointedToType()->GetDisplayName() + " *";
   }
 };
 
 // Unified member structure for both regular members and variant members
 struct OxCamlMember {
   std::optional<std::string> name;     // DW_AT_name (if present)
-  OxCamlType* type;                    // Non-owning pointer to member type
+  Reference<OxCamlType>* type_ref;     // Weak pointer to registry-owned Reference
   uint64_t data_member_location;       // DW_AT_data_member_location
 
   // For bit fields
@@ -162,6 +199,12 @@ struct OxCamlMember {
   bool is_artificial = false;          // DW_AT_artificial
 
   bool IsBitField() const { return bit_offset.has_value() && bit_size.has_value(); }
+  OxCamlType* GetType() const { 
+    if (!type_ref) {
+      llvm::report_fatal_error("Member type reference is null - this should never happen");
+    }
+    return type_ref->get(); 
+  }
 };
 
 // Represents DW_TAG_variant_part with discriminator and variant cases

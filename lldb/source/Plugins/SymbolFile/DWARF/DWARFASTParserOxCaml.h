@@ -17,6 +17,7 @@ class TypeSystemOxCaml;
 class OxCamlType;
 struct OxCamlMember;
 class OxCamlVariantPart;
+template<typename T> class Reference;
 }
 
 class DWARFASTParserOxCaml : public lldb_private::plugin::dwarf::DWARFASTParser {
@@ -74,12 +75,13 @@ private:
   std::unique_ptr<lldb_private::OxCamlType> ParsePointerType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseReferenceType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseStructureType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseUnknownType(const DWARFDIE &die);
   
   // New methods for variant support
   std::optional<lldb_private::OxCamlMember> ParseMember(const lldb_private::SymbolContext &sc, const DWARFDIE &member_die);
   std::optional<lldb_private::OxCamlVariantPart> ParseVariantPart(const lldb_private::SymbolContext &sc, const DWARFDIE &variant_part_die);
   
-  lldb::TypeSP CreateLLDBType(const DWARFDIE &die, lldb_private::OxCamlType* oxcaml_type);
+  lldb::TypeSP CreateLLDBType(const DWARFDIE &die, lldb_private::Reference<lldb_private::OxCamlType>* type_ref);
 };
 
 #endif // LLDB_SOURCE_PLUGINS_SYMBOLFILE_DWARF_DWARFASTPARSEROXCAML_H
