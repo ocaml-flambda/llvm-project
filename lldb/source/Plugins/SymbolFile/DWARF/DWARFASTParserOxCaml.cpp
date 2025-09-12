@@ -149,7 +149,47 @@ std::optional<std::string> DWARFASTParserOxCaml::ExtractTypeName(const DWARFDIE 
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(const DWARFDIE &die) {
-  return std::make_unique<OxCamlBaseType>(die.GetID(), ExtractTypeName(die));
+  auto name_opt = ExtractTypeName(die);
+
+  // Check if this is the fundamental OCaml value type
+  if (name_opt && name_opt.value() == "ocaml_value") {
+    return std::make_unique<OxCamlValueType>(die.GetID(), std::move(name_opt));
+  }
+
+  // This is an unboxed base type - extract encoding and size from DWARF
+  std::optional<uint64_t> byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 0);
+  if (!byte_size || byte_size == 0) {
+    return std::make_unique<OxCamlUnknownType>(die.GetID(), std::move(name_opt),
+                                               8 /* default size */, die.Tag());
+  }
+
+  // Determine the base kind from DWARF encoding
+  std::optional<uint64_t> encoding = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_encoding, 0);
+  if (!encoding.has_value()) {
+    return std::make_unique<OxCamlUnknownType>(die.GetID(), std::move(name_opt),
+                                               byte_size.value(), die.Tag());
+  }
+
+  OxCamlUnboxedBaseType::BaseKind base_kind;
+  switch (encoding.value()) {
+    case llvm::dwarf::DW_ATE_signed:
+    case llvm::dwarf::DW_ATE_signed_char:
+      base_kind = OxCamlUnboxedBaseType::Signed;
+      break;
+    case llvm::dwarf::DW_ATE_unsigned:
+    case llvm::dwarf::DW_ATE_unsigned_char:
+      base_kind = OxCamlUnboxedBaseType::Unsigned;
+      break;
+    case llvm::dwarf::DW_ATE_float:
+      base_kind = OxCamlUnboxedBaseType::Float;
+      break;
+    default:
+      return std::make_unique<OxCamlUnknownType>(die.GetID(), std::move(name_opt),
+                                                 byte_size.value(), die.Tag());
+  }
+
+  return std::make_unique<OxCamlUnboxedBaseType>(die.GetID(), std::move(name_opt),
+                                                 byte_size.value(), base_kind);
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType(const SymbolContext &sc, const DWARFDIE &die) {

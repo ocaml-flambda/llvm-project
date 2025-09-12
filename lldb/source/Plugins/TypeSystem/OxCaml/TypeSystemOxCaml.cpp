@@ -264,8 +264,11 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
 
     // Show additional info based on type kind
     switch (actual_type->GetKind()) {
-      case OxCamlType::Base:
-        output << " (base type, " << actual_type->GetByteSize() << " bytes)";
+      case OxCamlType::Value:
+        output << " (ocaml_value type, " << actual_type->GetByteSize() << " bytes)";
+        break;
+      case OxCamlType::UnboxedBase:
+        output << " (unboxed " << actual_type->GetDefaultDisplayName() << " type, " << actual_type->GetByteSize() << " bytes)";
         break;
       case OxCamlType::Typedef:
         {

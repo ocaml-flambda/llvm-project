@@ -84,7 +84,8 @@ using namespace lldb_private::formatters::oxcaml;
 
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatBase(Stream &stream, OxCamlBaseType* base_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatOxCamlValue(Stream &stream, OxCamlValueType* value_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp);
@@ -266,20 +267,94 @@ static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataE
 }
 
 // Format base OCaml values
-static bool FormatBase(Stream &stream, OxCamlBaseType* base_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  assert(base_type->GetByteSize() == 8 && "OCaml base types must be 8 bytes");
+// Format OCaml boxed values (ocaml_value type)
+static bool FormatOxCamlValue(Stream &stream, OxCamlValueType* value_type, DataExtractor& data, lldb::ProcessSP process_sp) {
+  assert(value_type->GetByteSize() == 8 && "OCaml value types must be 8 bytes");
+  
+  // For now, just display "<value>" as requested
+  stream.Printf("<value>");
+  return true;
+}
 
+// Format unboxed base types (float#, int32#, etc.)
+static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp) {
   lldb::offset_t offset = 0;
-  uint64_t value = data.GetU64(&offset);
-
-  if (value & 1) {
-    // Immediate integer - shift and print
-    int64_t int_val = ((int64_t)value) >> 1;
-    stream.Printf("%" PRId64, int_val);
-  } else {
-    // Pointer value
-    stream.Printf("0x%" PRIx64, value);
+  uint64_t byte_size = unboxed_type->GetByteSize();
+  OxCamlUnboxedBaseType::BaseKind kind = unboxed_type->GetBaseKind();
+  
+  switch (kind) {
+    case OxCamlUnboxedBaseType::Signed: {
+      switch (byte_size) {
+        case 1: {
+          int8_t val = data.GetU8(&offset);
+          stream.Printf("%" PRId8, val);
+          break;
+        }
+        case 2: {
+          int16_t val = data.GetU16(&offset);
+          stream.Printf("%" PRId16, val);
+          break;
+        }
+        case 4: {
+          int32_t val = data.GetU32(&offset);
+          stream.Printf("%" PRId32, val);
+          break;
+        }
+        case 8: {
+          int64_t val = data.GetU64(&offset);
+          stream.Printf("%" PRId64, val);
+          break;
+        }
+        default:
+          stream.Printf("(signed%" PRIu64 ")", byte_size * 8);
+          break;
+      }
+      break;
+    }
+    case OxCamlUnboxedBaseType::Unsigned: {
+      switch (byte_size) {
+        case 1: {
+          uint8_t val = data.GetU8(&offset);
+          stream.Printf("%" PRIu8, val);
+          break;
+        }
+        case 2: {
+          uint16_t val = data.GetU16(&offset);
+          stream.Printf("%" PRIu16, val);
+          break;
+        }
+        case 4: {
+          uint32_t val = data.GetU32(&offset);
+          stream.Printf("%" PRIu32, val);
+          break;
+        }
+        case 8: {
+          uint64_t val = data.GetU64(&offset);
+          stream.Printf("%" PRIu64, val);
+          break;
+        }
+        default:
+          stream.Printf("(unsigned%" PRIu64 ")", byte_size * 8);
+          break;
+      }
+      break;
+    }
+    case OxCamlUnboxedBaseType::Float: {
+      if (byte_size == 4) {
+        uint32_t raw_val = data.GetU32(&offset);
+        float val = *reinterpret_cast<float*>(&raw_val);
+        stream.Printf("%g", val);
+      } else if (byte_size == 8) {
+        uint64_t raw_val = data.GetU64(&offset);
+        double val = *reinterpret_cast<double*>(&raw_val);
+        stream.Printf("%g", val);
+      } else {
+        stream.Printf("(float%" PRIu64 ")", byte_size * 8);
+      }
+      break;
+    }
   }
+  
   return true;
 }
 
@@ -666,8 +741,10 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
   }
 
   switch (type->GetKind()) {
-    case OxCamlType::Base:
-      return FormatBase(stream, static_cast<OxCamlBaseType*>(type), data, process_sp);
+    case OxCamlType::Value:
+      return FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp);
+    case OxCamlType::UnboxedBase:
+      return FormatUnboxedBase(stream, static_cast<OxCamlUnboxedBaseType*>(type), data, process_sp);
     case OxCamlType::Enum:
       return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), data, process_sp);
     case OxCamlType::Pointer:

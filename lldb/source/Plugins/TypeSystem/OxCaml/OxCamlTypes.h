@@ -28,7 +28,7 @@ class OxCamlEnumType;
 // OxCamlType class hierarchy
 class OxCamlType {
 public:
-  enum Kind { Base, Typedef, Enum, Pointer, Structure, Placeholder, Unknown };
+  enum Kind { Value, UnboxedBase, Typedef, Enum, Pointer, Structure, Placeholder, Unknown };
 
   OxCamlType(Kind k, lldb::user_id_t die_id, std::optional<std::string> name)
     : m_kind(k), m_die_id(die_id), m_name(std::move(name)) {}
@@ -49,25 +49,62 @@ public:
   // Most types return 0, but some (like structures with custom base offset) may return non-zero
   virtual int64_t GetPointerAdjustmentOffset() const { return 0; }
 
-protected:
-  // Derived classes provide their fallback name
+  // Public access to default display name for debugging and utility purposes
   virtual std::string GetDefaultDisplayName() const = 0;
+
+protected:
 
   Kind m_kind;
   lldb::user_id_t m_die_id;
   std::optional<std::string> m_name;  // From DW_AT_name if present
 };
 
-class OxCamlBaseType : public OxCamlType {
+class OxCamlValueType : public OxCamlType {
 public:
-  OxCamlBaseType(lldb::user_id_t die_id, std::optional<std::string> name)
-    : OxCamlType(Base, die_id, std::move(name)) {}
+  OxCamlValueType(lldb::user_id_t die_id, std::optional<std::string> name)
+    : OxCamlType(Value, die_id, std::move(name)) {}
 
   uint64_t GetByteSize() const override { return 8; }
 
 protected:
   std::string GetDefaultDisplayName() const override {
-    return "ocaml_value";  // Default for base types without names
+    return "ocaml_value";  // The fundamental OCaml boxed value type
+  }
+};
+
+class OxCamlUnboxedBaseType : public OxCamlType {
+public:
+  enum BaseKind {
+    Signed,
+    Unsigned,
+    Float
+  };
+
+private:
+  uint64_t m_byte_size;
+  BaseKind m_base_kind;
+
+public:
+  OxCamlUnboxedBaseType(lldb::user_id_t die_id, std::optional<std::string> name,
+                        uint64_t byte_size, BaseKind base_kind)
+    : OxCamlType(UnboxedBase, die_id, std::move(name)),
+      m_byte_size(byte_size), m_base_kind(base_kind) {}
+
+  uint64_t GetByteSize() const override { return m_byte_size; }
+  BaseKind GetBaseKind() const { return m_base_kind; }
+
+protected:
+  std::string GetDefaultDisplayName() const override {
+    uint64_t bits = m_byte_size * 8;
+    switch (m_base_kind) {
+      case Signed:
+        return "int" + std::to_string(bits) + "#";
+      case Unsigned:
+        return "<unsigned " + std::to_string(m_byte_size) + " bytes>";
+      case Float:
+        return "float" + std::to_string(bits) + "#";
+    }
+    return "unknown#";  // Should never reach here
   }
 };
 
