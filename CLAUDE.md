@@ -85,6 +85,101 @@ Run a specific test file:
 cd build && python ../lldb/test/API/dotest.py -p TestBreakpoint.py
 ```
 
+## OCaml Value Types vs Unboxed Types
+
+The OxCaml compiler emits two distinct categories of base types in DWARF debug information, which require different handling in the LLDB plugin.
+
+### Boxed OCaml Values (ocaml_value)
+
+**DWARF Representation:**
+- Base type: `ocaml_value` (8 bytes, `DW_ATE_signed`)
+- Type aliases: `int @ value`, `bool @ value`, `string @ value`, etc.
+- All regular OCaml types use this representation through typedefs
+
+**Runtime Representation:**
+- Tagged pointer system with LSB indicating immediate vs heap values
+- Immediate values: `(value << 1) | 1` (e.g., integers, booleans, characters)
+- Heap pointers: 8-byte aligned addresses to heap blocks (LSB = 0)
+- Special case: `0x0` represents the unit value `()`
+
+**Examples:**
+```ocaml
+let x : int = 42        (* ocaml_value via "int @ value" typedef *)
+let b : bool = true     (* ocaml_value via "bool @ value" typedef *)  
+let s : string = "hi"   (* ocaml_value via "string @ value" typedef *)
+let f : float = 3.14    (* ocaml_value via "float @ value" typedef *)
+```
+
+### Unboxed Primitive Types
+
+**DWARF Representation:**
+- Direct base types with specific encodings
+- `float#` → 8-byte base type (`DW_ATE_float`) with `@ float64` annotation
+- `int32#` → 4-byte base type (`DW_ATE_signed`) with `@ bits32` annotation
+- `int64#` → 8-byte base type (`DW_ATE_signed`) with `@ bits64` annotation
+- No tagged pointer wrapper - stored directly
+
+**Runtime Representation:**
+- Native machine representation without tagging overhead
+- Floats stored as IEEE 754 binary formats
+- Integers stored in two's complement format
+- No heap allocation required
+
+**Examples:**
+```ocaml
+let x : float# = #3.14      (* 8-byte IEEE 754 double *)
+let i : int32# = #42l       (* 4-byte signed integer *)
+let j : int64# = #1000L     (* 8-byte signed integer *)
+```
+
+### Type Annotations
+
+OxCaml uses specific type name suffixes to distinguish representations:
+
+- `@ value` - Boxed OCaml values using `ocaml_value` base type
+- `@ float64` - Unboxed 64-bit IEEE 754 floats  
+- `@ float32` - Unboxed 32-bit IEEE 754 floats
+- `@ bits64` - Unboxed 64-bit signed integers
+- `@ bits32` - Unboxed 32-bit signed integers  
+- `@ word` - Unboxed native-sized integers
+- `@ bits16` - Unboxed 16-bit signed integers
+- `@ bits8` - Unboxed 8-bit signed integers
+
+### Mixed Data Structures
+
+Complex types can combine both categories:
+
+```ocaml
+(* Record with mixed field types *)
+type mixed = { 
+  boxed: int;        (* ocaml_value *)
+  unboxed: float#    (* 8-byte IEEE 754 *)
+}
+
+(* Unboxed tuple - all elements unboxed *)
+type unboxed_tuple = #(float# * int32#)
+
+(* Unboxed record - all fields unboxed *)  
+type unboxed_record = #{ x: float#; y: int32# }
+```
+
+### LLDB Plugin Implications
+
+**Type System:**
+- Must handle both `ocaml_value` and native base types
+- Create different `OxCamlType` subclasses for each category
+- Parse type annotations to determine representation
+
+**Value Formatting:**
+- Boxed values: Decode tagged representation (shift right for immediates, dereference for heap pointers)
+- Unboxed values: Display directly using native format
+- Mixed structures: Apply appropriate decoding per field
+
+**Memory Access:**
+- Boxed values: 8-byte reads, tag bit examination
+- Unboxed values: Read exact type size (1, 2, 4, or 8 bytes)
+- Heap dereferencing: Account for OCaml block headers when following pointers
+
 ## LLDB Plugin Architecture
 
 ### Language Plugin Structure
