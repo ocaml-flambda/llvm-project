@@ -1,0 +1,95 @@
+//===-- OxCamlFormatHelpers.h ------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+/// \file
+/// This file provides helper functions for formatting integers and floats
+/// using LLVM's arbitrary precision types (APInt, APFloat).
+///
+/// These helpers are shared between unboxed value formatting and OCaml 
+/// value decoding to ensure consistent number formatting across the
+/// OCaml LLDB plugin.
+
+#ifndef LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLFORMATHELPERS_H
+#define LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLFORMATHELPERS_H
+
+#include "lldb/lldb-private.h"
+#include "lldb/Utility/DataExtractor.h"
+#include "lldb/Utility/Stream.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
+#include <optional>
+#include <string>
+
+namespace lldb_private {
+namespace formatters {
+namespace oxcaml {
+namespace helpers {
+
+
+/// Float size specification for IEEE semantics selection
+enum class FloatSize : unsigned {
+  Half = 2,    ///< IEEE half precision (float16#)
+  Single = 4,  ///< IEEE single precision (float32#)
+  Double = 8   ///< IEEE double precision (float#)
+};
+
+/// Extract an arbitrary precision integer from a DataExtractor.
+/// Handles endianness correctly and supports any byte size.
+/// \param data The DataExtractor to read from
+/// \param offset_ptr Pointer to offset, updated after reading
+/// \param byte_size Number of bytes to read (1-8+ supported)
+/// \returns APInt if successful, nullopt if read fails
+std::optional<llvm::APInt> ExtractAPInt(const DataExtractor &data,
+                                        lldb::offset_t *offset_ptr,
+                                        lldb::offset_t byte_size);
+
+/// Format an arbitrary precision integer to a stream in decimal format.
+/// Supports signed/unsigned interpretation with OCaml sign conventions.
+/// \param stream Output stream to write to
+/// \param apint The APInt value to format
+/// \param is_signed Whether to interpret as signed or unsigned
+/// \param prefix String to prepend (e.g., "#" for unboxed integers)
+/// \param suffix String to append (e.g., "l" for int32)
+void FormatAPInt(Stream *stream, const llvm::APInt &apint, 
+                 bool is_signed,
+                 const std::string &prefix = "",
+                 const std::string &suffix = "");
+
+/// Format an arbitrary precision float to a stream with OCaml conventions.
+/// Handles OCaml-specific formatting like negative sign placement and 
+/// trailing ".0" for integer-looking floats.
+/// \param stream Output stream to write to
+/// \param apfloat The APFloat value to format
+/// \param format_max_padding Optional maximum zero padding for formatting
+/// \param prefix String to prepend (e.g., "#" for unboxed floats)
+/// \param suffix String to append (e.g., "s" for float32)
+void FormatAPFloat(Stream *stream, const llvm::APFloat &apfloat,
+                   std::optional<unsigned> format_max_padding = std::nullopt,
+                   const std::string &prefix = "",
+                   const std::string &suffix = "");
+
+/// Extract an APFloat from a DataExtractor using IEEE semantics.
+/// Automatically selects the correct IEEE semantics based on float size.
+/// Supports OCaml float types:
+///   - Half: IEEE half precision (future float16# support)
+///   - Single: IEEE single precision (float32# @ float32)
+///   - Double: IEEE double precision (float# @ float64)
+/// \param data The DataExtractor to read from
+/// \param offset_ptr Pointer to offset, updated after reading
+/// \param float_size Float precision specification
+/// \returns APFloat if successful, nullopt if unsupported size or read fails
+std::optional<llvm::APFloat> ExtractAPFloat(const DataExtractor &data,
+                                            lldb::offset_t *offset_ptr,
+                                            FloatSize float_size);
+
+} // namespace helpers
+} // namespace oxcaml
+} // namespace formatters
+} // namespace lldb_private
+
+#endif // LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLFORMATHELPERS_H

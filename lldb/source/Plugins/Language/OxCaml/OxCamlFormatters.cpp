@@ -64,6 +64,8 @@
 /// 6. FormatBase formats each integer from its respective DataExtractor
 
 #include "OxCamlFormatters.h"
+#include "OxCamlFormatHelpers.h"
+#include "OxCamlValueFormatters.h"
 #include "LogChannelOxCaml.h"
 #include "lldb/ValueObject/ValueObject.h"
 #include "lldb/Utility/DataExtractor.h"
@@ -84,7 +86,6 @@ using namespace lldb_private::formatters::oxcaml;
 
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatOxCamlValue(Stream &stream, OxCamlValueType* value_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp);
@@ -266,96 +267,85 @@ static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataE
   return true;
 }
 
-// Format base OCaml values
-// Format OCaml boxed values (ocaml_value type)
-static bool FormatOxCamlValue(Stream &stream, OxCamlValueType* value_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  assert(value_type->GetByteSize() == 8 && "OCaml value types must be 8 bytes");
-  
-  // For now, just display "<value>" as requested
-  stream.Printf("<value>");
-  return true;
+
+// Helper to convert byte size to FloatSize enum
+static std::optional<oxcaml::helpers::FloatSize> ByteSizeToFloatSize(uint64_t byte_size) {
+  switch (byte_size) {
+    case 2: return oxcaml::helpers::FloatSize::Half;    // float16#
+    case 4: return oxcaml::helpers::FloatSize::Single;  // float32#
+    case 8: return oxcaml::helpers::FloatSize::Double;  // float#
+    default: return std::nullopt;
+  }
 }
+
+// Helper to get suffix for signed integers
+static std::string GetSignedIntegerSuffix(uint64_t byte_size) {
+  switch (byte_size) {
+    case 1: return "";      // int8# (no standard suffix)
+    case 2: return "";      // int16# (no standard suffix)
+    case 4: return "l";     // int32# -> #42l
+    case 8: return "L";     // int64# -> #42L
+    default: return "";     // fallback
+  }
+}
+
+// Helper to get suffix for unsigned integers
+// Note: Unsigned suffixes (ul, UL) don't actually exist in OCaml,
+// but we use them here for clarity in the debugger
+static std::string GetUnsignedIntegerSuffix(uint64_t byte_size) {
+  switch (byte_size) {
+    case 1: return "";      // uint8# (no standard suffix)
+    case 2: return "";      // uint16# (no standard suffix)
+    case 4: return "ul";    // uint32# -> #42ul
+    case 8: return "UL";    // uint64# -> #42UL
+    default: return "";     // fallback
+  }
+}
+
 
 // Format unboxed base types (float#, int32#, etc.)
 static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  lldb::offset_t offset = 0;
   uint64_t byte_size = unboxed_type->GetByteSize();
   OxCamlUnboxedBaseType::BaseKind kind = unboxed_type->GetBaseKind();
-  
+
+  // Early exit for invalid byte sizes
+  if (byte_size == 0) {
+    stream.PutCString("<0 byte base type>");
+    return true;
+  }
+
+  // Dispatch to specific formatters
+  lldb::offset_t offset = 0;
   switch (kind) {
     case OxCamlUnboxedBaseType::Signed: {
-      switch (byte_size) {
-        case 1: {
-          int8_t val = data.GetU8(&offset);
-          stream.Printf("%" PRId8, val);
-          break;
-        }
-        case 2: {
-          int16_t val = data.GetU16(&offset);
-          stream.Printf("%" PRId16, val);
-          break;
-        }
-        case 4: {
-          int32_t val = data.GetU32(&offset);
-          stream.Printf("%" PRId32, val);
-          break;
-        }
-        case 8: {
-          int64_t val = data.GetU64(&offset);
-          stream.Printf("%" PRId64, val);
-          break;
-        }
-        default:
-          stream.Printf("(signed%" PRIu64 ")", byte_size * 8);
-          break;
-      }
-      break;
+      std::optional<llvm::APInt> apint = oxcaml::helpers::ExtractAPInt(data, &offset, byte_size);
+      if (!apint) { llvm::report_fatal_error("Failed to extract signed integer"); }
+      std::string suffix = GetSignedIntegerSuffix(byte_size);
+      oxcaml::helpers::FormatAPInt(&stream, *apint, true, "#", suffix);
+      return true;
     }
     case OxCamlUnboxedBaseType::Unsigned: {
-      switch (byte_size) {
-        case 1: {
-          uint8_t val = data.GetU8(&offset);
-          stream.Printf("%" PRIu8, val);
-          break;
-        }
-        case 2: {
-          uint16_t val = data.GetU16(&offset);
-          stream.Printf("%" PRIu16, val);
-          break;
-        }
-        case 4: {
-          uint32_t val = data.GetU32(&offset);
-          stream.Printf("%" PRIu32, val);
-          break;
-        }
-        case 8: {
-          uint64_t val = data.GetU64(&offset);
-          stream.Printf("%" PRIu64, val);
-          break;
-        }
-        default:
-          stream.Printf("(unsigned%" PRIu64 ")", byte_size * 8);
-          break;
-      }
-      break;
+      std::optional<llvm::APInt> apint = oxcaml::helpers::ExtractAPInt(data, &offset, byte_size);
+      if (!apint) { llvm::report_fatal_error("Failed to extract unsigned integer"); }
+      std::string suffix = GetUnsignedIntegerSuffix(byte_size);
+      oxcaml::helpers::FormatAPInt(&stream, *apint, false, "#", suffix);
+      return true;
     }
     case OxCamlUnboxedBaseType::Float: {
-      if (byte_size == 4) {
-        uint32_t raw_val = data.GetU32(&offset);
-        float val = *reinterpret_cast<float*>(&raw_val);
-        stream.Printf("%g", val);
-      } else if (byte_size == 8) {
-        uint64_t raw_val = data.GetU64(&offset);
-        double val = *reinterpret_cast<double*>(&raw_val);
-        stream.Printf("%g", val);
-      } else {
-        stream.Printf("(float%" PRIu64 ")", byte_size * 8);
+      std::optional<oxcaml::helpers::FloatSize> float_size = ByteSizeToFloatSize(byte_size);
+      if (!float_size) {
+        stream.Printf("<%" PRIu64 "-byte float>", byte_size);
+        return true;
       }
-      break;
+      std::optional<llvm::APFloat> apfloat = oxcaml::helpers::ExtractAPFloat(data, &offset, *float_size);
+      if (!apfloat) { llvm::report_fatal_error("Failed to extract float"); }
+      std::string suffix = (*float_size == oxcaml::helpers::FloatSize::Single) ? "s" : "";
+      oxcaml::helpers::FormatAPFloat(&stream, *apfloat, std::nullopt, "#", suffix);
+      return true;
     }
   }
-  
-  return true;
+
+  llvm_unreachable("Unknown unboxed base type kind");
 }
 
 // Format enum values
@@ -742,7 +732,7 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
 
   switch (type->GetKind()) {
     case OxCamlType::Value:
-      return FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp);
+      return oxcaml::FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp);
     case OxCamlType::UnboxedBase:
       return FormatUnboxedBase(stream, static_cast<OxCamlUnboxedBaseType*>(type), data, process_sp);
     case OxCamlType::Enum:
