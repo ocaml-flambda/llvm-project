@@ -21,6 +21,7 @@
 #include "lldb/Utility/Status.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
+#include <map>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -69,6 +70,39 @@ static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wos
                                     DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp);
+
+// Custom type formatter function pointer
+//
+// Custom formatters receive:
+// - stream: Output stream for formatting
+// - identifier: Custom block identifier string (e.g., "_i", "_j", "_n")
+// - data_ptr: Pointer to first word AFTER the custom block header (value + 8)
+// - wosize: Word size of the custom block from the header
+// - process_sp: Process for additional memory reads if needed
+//
+// The main FormatOxCamlCustom function handles reading the custom_operations
+// pointer and identifier string from the header, then passes the data pointer
+// (skipping the header) to the specific formatter.
+typedef bool (*CustomTypeFormatter)(Stream &stream, const std::string &identifier,
+                                   uint64_t data_ptr, uint64_t wosize,
+                                   lldb::ProcessSP process_sp);
+
+// Forward declarations for custom type formatters
+static bool FormatInt32Custom(Stream &stream, const std::string &identifier,
+                             uint64_t data_ptr, uint64_t wosize,
+                             lldb::ProcessSP process_sp);
+static bool FormatInt64Custom(Stream &stream, const std::string &identifier,
+                             uint64_t data_ptr, uint64_t wosize,
+                             lldb::ProcessSP process_sp);
+static bool FormatNativeIntCustom(Stream &stream, const std::string &identifier,
+                                 uint64_t data_ptr, uint64_t wosize,
+                                 lldb::ProcessSP process_sp);
+static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
+                                uint64_t data_ptr, uint64_t wosize,
+                                lldb::ProcessSP process_sp);
+static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
+                               uint64_t data_ptr, uint64_t wosize,
+                               lldb::ProcessSP process_sp);
 
 bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
                                                          OxCamlValueType* value_type,
@@ -318,9 +352,167 @@ static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wos
   return !had_error;
 }
 
+// Custom type formatters implementation
+
+static bool FormatInt32Custom(Stream &stream, const std::string &identifier,
+                             uint64_t data_ptr, uint64_t wosize,
+                             lldb::ProcessSP process_sp) {
+  // Int32.t: read 32-bit integer from data_ptr and format with "l" suffix
+  Status error;
+
+  // Read only 4 bytes for Int32.t (matches actual data size)
+  uint32_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
+      data_ptr, 4, 0, error);
+
+  if (error.Fail()) {
+    stream.Printf("<custom \"%s\" (could not read data field for int32)>", identifier.c_str());
+    return false;
+  }
+
+  // Use helper function for consistent integer formatting
+  llvm::APInt apint(32, int_value);
+  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "l");
+  return true;
+}
+
+static bool FormatInt64Custom(Stream &stream, const std::string &identifier,
+                             uint64_t data_ptr, uint64_t wosize,
+                             lldb::ProcessSP process_sp) {
+  // Int64.t: read 64-bit integer from data_ptr and format with "L" suffix
+  Status error;
+  const uint64_t word_size = 8;
+
+  uint64_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
+      data_ptr, word_size, 0, error);
+
+  if (error.Fail()) {
+    stream.Printf("<custom \"%s\" (could not read data field for int64)>", identifier.c_str());
+    return false;
+  }
+
+  // Use helper function for consistent integer formatting
+  llvm::APInt apint(64, int_value);
+  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "L");
+  return true;
+}
+
+static bool FormatNativeIntCustom(Stream &stream, const std::string &identifier,
+                                 uint64_t data_ptr, uint64_t wosize,
+                                 lldb::ProcessSP process_sp) {
+  // Nativeint.t: read native integer from data_ptr and format with "n" suffix
+  Status error;
+  const uint64_t word_size = 8;
+
+  uint64_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
+      data_ptr, word_size, 0, error);
+
+  if (error.Fail()) {
+    stream.Printf("<custom \"%s\" (could not read data field for nativeint)>", identifier.c_str());
+    return false;
+  }
+
+  // Use helper function for consistent integer formatting (64-bit for native int)
+  llvm::APInt apint(64, int_value);
+  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "n");
+  return true;
+}
+
+static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
+                                uint64_t data_ptr, uint64_t wosize,
+                                lldb::ProcessSP process_sp) {
+  // Bigarray: read data pointer and dimensions from the data area
+  Status error;
+  const uint64_t word_size = 8;
+
+  // Read bigarray data pointer from data_ptr (first field)
+  lldb::addr_t bigarray_data_ptr = process_sp->ReadPointerFromMemory(data_ptr, error);
+  if (error.Fail()) {
+    stream.Printf("<bigarray (could not read data pointer)>");
+    return false;
+  }
+
+  // Read number of dimensions from data_ptr+8 (second field)
+  uint64_t num_dims = process_sp->ReadUnsignedIntegerFromMemory(
+      data_ptr + word_size, word_size, 0, error);
+  if (error.Fail()) {
+    stream.Printf("<bigarray (could not read dimensions)>");
+    return false;
+  }
+
+  stream.Printf("<bigarray%" PRIu64 "|data=%p>", num_dims, (void*)bigarray_data_ptr);
+  return true;
+}
+
+static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
+                               uint64_t data_ptr, uint64_t wosize,
+                               lldb::ProcessSP process_sp) {
+  // Float32: read 32-bit float from data_ptr and format with "s" suffix
+  Status error;
+
+  // Read 32-bit float bits from data_ptr (only 4 bytes)
+  uint32_t float_bits = process_sp->ReadUnsignedIntegerFromMemory(
+      data_ptr, 4, 0, error);
+
+  if (error.Fail()) {
+    stream.Printf("<could not read float32>");
+    return false;
+  }
+
+  // Convert to APFloat using IEEE single precision semantics
+  llvm::APInt apint(32, float_bits);
+  llvm::APFloat apfloat(llvm::APFloat::IEEEsingle(), apint);
+
+  // Use helper function with "s" suffix for float32
+  lldb_private::formatters::oxcaml::helpers::FormatAPFloat(&stream, apfloat,
+                                                          std::nullopt, "", "s");
+  return true;
+}
+
+// Custom formatter registry: maps identifier strings to formatter functions
+static const std::map<std::string, CustomTypeFormatter> custom_formatters = {
+    {"_i", FormatInt32Custom},        // Int32.t
+    {"_j", FormatInt64Custom},        // Int64.t
+    {"_n", FormatNativeIntCustom},    // Nativeint.t
+    {"_bigarr02", FormatBigarrayCustom},  // Bigarray
+    {"_f32", FormatFloat32Custom}     // Float32
+};
+
 static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp) {
-  // Placeholder: OCaml custom block (Int32.t, Int64.t, etc.)
-  stream.Printf("<custom>");
-  return true;
+  // OCaml custom block: dispatch to appropriate formatter based on identifier
+  Status error;
+
+  // Read custom_operations pointer from the first word
+  lldb::addr_t custom_ops_ptr = process_sp->ReadPointerFromMemory(value, error);
+  if (error.Fail()) {
+    stream.Printf("<could not read struct custom_operations pointer from custom block>");
+    return false;
+  }
+
+  // Read identifier pointer from the custom_operations struct (first field)
+  lldb::addr_t identifier_ptr = process_sp->ReadPointerFromMemory(custom_ops_ptr, error);
+  if (error.Fail()) {
+    stream.Printf("<could not read identifier pointer from struct custom_operations>");
+    return false;
+  }
+
+  // Read the identifier string from memory
+  std::string identifier_str;
+  if (!process_sp->ReadCStringFromMemory(identifier_ptr, identifier_str, error) || error.Fail()) {
+    stream.Printf("<could not read identifier string from custom block>");
+    return false;
+  }
+
+  // Look up the formatter in our registry
+  auto formatter_it = custom_formatters.find(identifier_str);
+  if (formatter_it != custom_formatters.end()) {
+    // Found a specific formatter, pass data pointer (skipping the header)
+    const uint64_t word_size = 8;
+    uint64_t data_ptr = value + word_size;
+    return formatter_it->second(stream, identifier_str, data_ptr, wosize, process_sp);
+  } else {
+    // Unknown custom type, use fallback format
+    stream.Printf("<custom|\"%s\">", identifier_str.c_str());
+    return true;
+  }
 }
