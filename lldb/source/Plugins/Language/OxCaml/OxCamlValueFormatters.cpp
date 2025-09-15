@@ -239,9 +239,8 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
   uint64_t string_length = wosize * word_size - padding_byte - 1;
 
   // Read the string data from memory
-  std::vector<uint8_t> str_buffer;
-  str_buffer.resize(string_length + 1); // +1 for safety
-  size_t bytes_read = process_sp->ReadMemory(value, &str_buffer.front(),
+  std::vector<uint8_t> str_buffer(string_length);
+  size_t bytes_read = process_sp->ReadMemory(value, str_buffer.data(),
                                             string_length, error);
 
   if (error.Fail() || bytes_read < string_length) {
@@ -250,7 +249,7 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
   }
 
   // Use the helper function to format with proper OCaml escaping
-  const char *string_data = reinterpret_cast<const char*>(&str_buffer.front());
+  const char *string_data = reinterpret_cast<const char*>(str_buffer.data());
   lldb_private::formatters::oxcaml::helpers::FormatOCamlString(&stream,
                                                                string_data,
                                                                string_length);
