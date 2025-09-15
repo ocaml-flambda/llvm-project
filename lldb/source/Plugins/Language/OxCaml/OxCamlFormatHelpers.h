@@ -87,6 +87,13 @@ std::optional<llvm::APFloat> ExtractAPFloat(const DataExtractor &data,
                                             lldb::offset_t *offset_ptr,
                                             FloatSize float_size);
 
+/// Format an OCaml string with proper escaping and quotes.
+/// Uses OCaml's string literal format matching bytes.ml unsafe_escape function.
+/// \param stream Output stream to write to
+/// \param data Pointer to string data
+/// \param string_length Number of characters in string
+void FormatOCamlString(Stream *stream, const char *data, uint64_t string_length);
+
 } // namespace helpers
 } // namespace oxcaml
 } // namespace formatters

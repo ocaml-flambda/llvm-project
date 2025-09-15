@@ -32,7 +32,7 @@ static bool NeedsTrailingDotZero(llvm::StringRef str) {
 }
 
 // Based on GetAPInt/DumpAPInt from upstream LLDB's DumpDataExtractor.cpp
-std::optional<llvm::APInt> 
+std::optional<llvm::APInt>
 lldb_private::formatters::oxcaml::helpers::ExtractAPInt(const DataExtractor &data,
                                                         lldb::offset_t *offset_ptr,
                                                         lldb::offset_t byte_size) {
@@ -43,7 +43,7 @@ lldb_private::formatters::oxcaml::helpers::ExtractAPInt(const DataExtractor &dat
   lldb::offset_t bytes_left = byte_size;
   uint64_t u64;
   const lldb::ByteOrder byte_order = data.GetByteOrder();
-  
+
   if (byte_order == lldb::eByteOrderLittle) {
     while (bytes_left > 0) {
       if (bytes_left >= 8) {
@@ -80,16 +80,16 @@ lldb_private::formatters::oxcaml::helpers::ExtractAPInt(const DataExtractor &dat
 }
 
 // Based on GetAPInt/DumpAPInt from upstream LLDB's DumpDataExtractor.cpp
-void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream, 
+void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream,
                                                             const llvm::APInt &apint,
                                                             bool is_signed,
                                                             const std::string &prefix,
                                                             const std::string &suffix) {
   if (!stream)
     return;
-    
+
   std::string apint_str = llvm::toString(apint, 10, is_signed);
-  
+
   // OCaml Specific:
   // Handle negative sign placement for OCaml format
   if (apint_str.size() > 0 && apint_str[0] == '-') {
@@ -100,7 +100,7 @@ void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream,
     stream->Write(prefix.data(), prefix.size());
     stream->Write(apint_str.data(), apint_str.size());
   }
-  
+
   stream->Write(suffix.data(), suffix.size());
 }
 
@@ -109,16 +109,16 @@ void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream,
 // one that can exactly represent the original float value.
 // Falls back to full precision if none of the shorter ones work.
 // Based on oxcaml-lldb fork's APFloat.h extension.
-static void FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat, 
+static void FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat,
                                             llvm::SmallVectorImpl<char> &Str,
                                             std::optional<unsigned> format_max_padding) {
   unsigned FormatMaxPadding = format_max_padding.value_or(3);
   bool TruncateZero = true;
-  
+
   // Try these precision levels to find the shortest accurate representation
   static const unsigned precisions[] = { 5, 12, 15 };
   static const size_t num_precisions = sizeof(precisions) / sizeof(precisions[0]);
-  
+
   for (size_t i = 0; i < num_precisions; ++i) {
     apfloat.toString(Str, precisions[i], FormatMaxPadding, TruncateZero);
     llvm::StringRef sr = llvm::StringRef(Str.data(), Str.size());
@@ -136,14 +136,14 @@ static void FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat,
 }
 
 // Based on PrintAPIntAsFloat from oxcaml-lldb fork's DumpDataExtractor.cpp
-void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(Stream *stream, 
+void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(Stream *stream,
                                                               const llvm::APFloat &apfloat,
                                                               std::optional<unsigned> format_max_padding,
                                                               const std::string &prefix,
                                                               const std::string &suffix) {
   if (!stream)
     return;
-    
+
   llvm::SmallVector<char, 256> sv;
   FormatFloatWithMinimalPrecision(apfloat, sv, format_max_padding);
 
@@ -164,11 +164,11 @@ void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(Stream *stream,
   if (NeedsTrailingDotZero(llvm::StringRef(sv.data(), sv.size()))) {
     stream->PutCString(".0");
   }
-    
+
   stream->Write(suffix.data(), suffix.size());
 }
 
-std::optional<llvm::APFloat> 
+std::optional<llvm::APFloat>
 lldb_private::formatters::oxcaml::helpers::ExtractAPFloat(const DataExtractor &data,
                                                           lldb::offset_t *offset_ptr,
                                                           FloatSize float_size) {
@@ -185,14 +185,66 @@ lldb_private::formatters::oxcaml::helpers::ExtractAPFloat(const DataExtractor &d
       semantics = &llvm::APFloat::IEEEdouble();  // float# @ float64
       break;
   }
-  
+
   // Get the raw bits as APInt first
   size_t byte_size = static_cast<size_t>(float_size);
   std::optional<llvm::APInt> apint = ExtractAPInt(data, offset_ptr, byte_size);
   if (!apint)
     return std::nullopt;
-    
+
   // Convert APInt to APFloat using the selected IEEE semantics
   return llvm::APFloat(*semantics, *apint);
 }
 
+// Helper function to dump character with OCaml string literal escaping
+// Based on DumpEscapedCharacterOCaml from the oxcaml-lldb fork
+static void FormatOCamlCharacter(Stream &s, const char c) {
+  switch (c) {
+  case '"':
+    s.Printf("\\\"");
+    return;
+  case '\\':
+    s.Printf("\\\\");
+    return;
+  case '\n':
+    s.Printf("\\n");
+    return;
+  case '\t':
+    s.Printf("\\t");
+    return;
+  case '\r':
+    s.Printf("\\r");
+    return;
+  case '\b':
+    s.Printf("\\b");
+    return;
+  default:
+    break;
+  }
+
+  // Handle printable ASCII range ' ' to '~' (32 to 126)
+  if (c >= ' ' && c <= '~') {
+    s.PutChar(c);
+    return;
+  }
+
+  // Use OCaml's 3-digit decimal escape format for non-printable characters
+  // This matches the logic in bytes.ml unsafe_escape function
+  unsigned char a = (unsigned char)c;
+  s.Printf("\\%03d", a);
+}
+
+// Format OCaml string with proper escaping and quotes
+// Based on DumpStringOCaml from the oxcaml-lldb fork's DumpDataExtractor.cpp
+void lldb_private::formatters::oxcaml::helpers::FormatOCamlString(Stream *stream,
+                                                                  const char *data,
+                                                                  uint64_t string_length) {
+  if (!stream)
+    return;
+
+  stream->Printf("\"");
+  for (uint64_t i = 0; i < string_length; ++i) {
+    FormatOCamlCharacter(*stream, data[i]);
+  }
+  stream->Printf("\"");
+}
