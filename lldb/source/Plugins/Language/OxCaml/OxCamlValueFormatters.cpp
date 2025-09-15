@@ -104,9 +104,13 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
 
 static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
                                   lldb::ProcessSP process_sp) {
-  // Placeholder: OCaml immediate value (tagged integer, unit, etc.)
-  // Will decode value >> 1 for integers, handle unit (0x1), etc.
-  stream.Printf("<immediate>");
+  // OCaml immediate value: decode tagged integer by right-shifting by 1
+  // Convert to signed int64_t to handle negative values correctly
+  int64_t signed_value = static_cast<int64_t>(value);
+  int64_t untagged_value = signed_value >> 1;
+  
+  // Display with "i" suffix to indicate tagged integer
+  stream.Printf("%" PRId64 "i", untagged_value);
   return true;
 }
 
@@ -214,8 +218,41 @@ static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize
 
 static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp) {
-  // Placeholder: OCaml string value
-  stream.Printf("<string>");
+  // OCaml string: read string bytes from heap memory
+  Status error;
+  const uint64_t word_size = 8;
+  
+  // Read the last word to get the padding byte (OCaml string encoding)
+  uint64_t last_word_address = value + (wosize - 1) * word_size;
+  uint64_t last_word = process_sp->ReadUnsignedIntegerFromMemory(
+      last_word_address, word_size, 0, error);
+      
+  if (error.Fail()) {
+    stream.Printf("<could not read string length>");
+    return false;
+  }
+  
+  // Extract padding byte from bits 56-63 (last_word >> 56)  
+  // OCaml string length = wosize * word_size - padding - 1
+  uint8_t padding_byte = last_word >> 56;
+  uint64_t string_length = wosize * word_size - padding_byte - 1;
+  
+  // Read the string data from memory
+  std::vector<uint8_t> str_buffer;
+  str_buffer.resize(string_length + 1); // +1 for safety
+  size_t bytes_read = process_sp->ReadMemory(value, &str_buffer.front(), 
+                                            string_length, error);
+                                            
+  if (error.Fail() || bytes_read < string_length) {
+    stream.Printf("<could not read string data>");
+    return false;
+  }
+  
+  // Use the helper function to format with proper OCaml escaping
+  const char *string_data = reinterpret_cast<const char*>(&str_buffer.front());
+  lldb_private::formatters::oxcaml::helpers::FormatOCamlString(&stream, 
+                                                               string_data, 
+                                                               string_length);
   return true;
 }
 
