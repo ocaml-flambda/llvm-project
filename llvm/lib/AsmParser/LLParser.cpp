@@ -2019,6 +2019,11 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'amdgpu_cs'
 ///   ::= 'amdgpu_kernel'
 ///   ::= 'tailcc'
+///   ::= 'oxcaml_fpcc'
+///   ::= 'oxcaml_nofpcc'
+///   ::= 'oxcaml_ccc'
+///   ::= 'oxcaml_c_stackcc'
+///   ::= 'oxcaml_alloccc'
 ///   ::= 'cc' UINT
 ///
 bool LLParser::parseOptionalCallingConv(unsigned &CC) {
@@ -2077,6 +2082,11 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_amdgpu_cs:      CC = CallingConv::AMDGPU_CS; break;
   case lltok::kw_amdgpu_kernel:  CC = CallingConv::AMDGPU_KERNEL; break;
   case lltok::kw_tailcc:         CC = CallingConv::Tail; break;
+  case lltok::kw_oxcaml_fpcc:    CC = CallingConv::OxCaml_WithFP; break;
+  case lltok::kw_oxcaml_nofpcc:  CC = CallingConv::OxCaml_WithoutFP; break;
+  case lltok::kw_oxcaml_ccc:     CC = CallingConv::OxCaml_C_Call; break;
+  case lltok::kw_oxcaml_c_stackcc:CC = CallingConv::OxCaml_C_Call_StackArgs; break;
+  case lltok::kw_oxcaml_alloccc: CC = CallingConv::OxCaml_Alloc; break;
   case lltok::kw_cc: {
       Lex.Lex();
       return parseUInt32(CC);

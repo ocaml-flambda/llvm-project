@@ -520,7 +520,8 @@ def RetCC_X86_64 : CallingConv<[
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<RetCC_X86_Win64_C>>,
 
   // OxCaml CCs
-  CCIfCC<"CallingConv::OxCaml", CCDelegateTo<RetCC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithFP", CCDelegateTo<RetCC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithoutFP", CCDelegateTo<RetCC_X86_64_OxCaml>>,
   CCIfCC<"CallingConv::OxCaml_C_Call", CCDelegateTo<RetCC_X86_64_OxCaml_C_Call>>,
   CCIfCC<"CallingConv::OxCaml_C_Call_StackArgs",
     CCDelegateTo<RetCC_X86_64_OxCaml_C_Call_StackArgs>>,
@@ -744,6 +745,8 @@ def CC_X86_64_OxCaml : CallingConv<[
   // runtime) must be preserved through the run of the program. To ensure LLVM
   // doesn't mess with them, they are explicitly threaded through function calls
   // and returns. These are R14 and R15.
+  // Note that whether frame pointers are enabled or not doesn't impact the
+  // argument or return conventions. It only changes the callee-saved registers.
   CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
@@ -1177,7 +1180,8 @@ def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::X86_INTR", CCCustom<"CC_X86_Intr">>,
   
   // OxCaml calling conventions
-  CCIfCC<"CallingConv::OxCaml", CCDelegateTo<CC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithFP", CCDelegateTo<CC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithoutFP", CCDelegateTo<CC_X86_64_OxCaml>>,
   CCIfCC<"CallingConv::OxCaml_C_Call", CCDelegateTo<CC_X86_64_OxCaml_C_Call>>,
   CCIfCC<"CallingConv::OxCaml_C_Call_StackArgs",
     CCDelegateTo<CC_X86_64_OxCaml_C_Call_StackArgs>>,
@@ -1312,8 +1316,8 @@ def CSR_SysV64_RegCall_NoSSE : CalleeSavedRegs<(add RBX, RBP,
 def CSR_SysV64_RegCall       : CalleeSavedRegs<(add CSR_SysV64_RegCall_NoSSE,               
                                                (sequence "XMM%u", 8, 15))>;
 
-// Only FP-enabled OxCaml is supported for now.
 def CSR_64_OxCaml_WithFP : CalleeSavedRegs<(add RBP)>;
+def CSR_64_OxCaml_WithoutFP : CalleeSavedRegs<(add)>;
 
 // R14 and R15 (and also R12 in the latter) are used as return registers,
 // so they aren't callee saved.
