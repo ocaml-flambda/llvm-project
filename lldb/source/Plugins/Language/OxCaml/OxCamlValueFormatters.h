@@ -30,9 +30,11 @@ namespace oxcaml {
 /// \param value_type The OxCamlValueType representing ocaml_value
 /// \param data DataExtractor containing the 8-byte value
 /// \param process_sp Process for memory access
+/// \param exe_ctx_ref ExecutionContext for address resolution
 /// \returns true if formatting succeeded, false otherwise
 bool FormatOxCamlValue(Stream &stream, OxCamlValueType* value_type,
-                       DataExtractor& data, lldb::ProcessSP process_sp);
+                       DataExtractor& data, lldb::ProcessSP process_sp,
+                       const ExecutionContextRef &exe_ctx_ref);
 
 } // namespace oxcaml
 } // namespace formatters

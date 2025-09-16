@@ -85,13 +85,13 @@ using namespace lldb_private::formatters;
 using namespace lldb_private::formatters::oxcaml;
 
 // Forward declarations
-static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref);
 static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp);
+static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref);
+static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref);
+static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref);
 static bool FormatPlaceholder(Stream &stream, OxCamlPlaceholderType* placeholder_type, DataExtractor& data, lldb::ProcessSP process_sp);
 static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataExtractor& data, lldb::ProcessSP process_sp);
 
@@ -369,7 +369,8 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor&
 
 // Format pointer values by dereferencing
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
-                         DataExtractor& data, lldb::ProcessSP process_sp) {
+                         DataExtractor& data, lldb::ProcessSP process_sp,
+                         const ExecutionContextRef &exe_ctx_ref) {
   assert(ptr_type->GetByteSize() == 8 && "OCaml pointer types must be 8 bytes");
 
   lldb::offset_t offset = 0;
@@ -463,17 +464,18 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
                              data.GetAddressByteSize());
 
   // Recursively format with the new DataExtractor
-  return FormatValue(stream, pointed_to, pointed_data, process_sp);
+  return FormatValue(stream, pointed_to, pointed_data, process_sp, exe_ctx_ref);
 }
 
 // Format typedef by looking through to underlying type
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type,
-                         DataExtractor& data, lldb::ProcessSP process_sp) {
-  return FormatValue(stream, typedef_type->GetUnderlyingType(), data, process_sp);
+                         DataExtractor& data, lldb::ProcessSP process_sp,
+                         const ExecutionContextRef &exe_ctx_ref) {
+  return FormatValue(stream, typedef_type->GetUnderlyingType(), data, process_sp, exe_ctx_ref);
 }
 
 // Format a single member (regular or bit field)
-static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtractor& data, lldb::ProcessSP process_sp) {
+static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref) {
   // Handle bit fields by extracting specific bits
   if (member.IsBitField()) {
     lldb::offset_t offset = member.data_member_location;
@@ -494,12 +496,12 @@ static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtract
                            data.GetByteOrder(),
                            data.GetAddressByteSize());
 
-    return FormatValue(stream, member.GetType(), bit_data, process_sp);
+    return FormatValue(stream, member.GetType(), bit_data, process_sp, exe_ctx_ref);
   }
 
   // Regular member - read from data_member_location
   DataExtractor member_data(data, member.data_member_location, member.GetType()->GetByteSize());
-  return FormatValue(stream, member.GetType(), member_data, process_sp);
+  return FormatValue(stream, member.GetType(), member_data, process_sp, exe_ctx_ref);
 }
 
 // Enum to classify variant argument types for OCaml formatting
@@ -512,6 +514,7 @@ enum VariantKind {
 // Format variant part with generic square bracket format: Name[mem1 = val1; mem2 = val2]
 static bool FormatVariantPartGeneric(Stream &stream, const OxCamlVariantPart& variant_part,
                                      DataExtractor& data, lldb::ProcessSP process_sp,
+                                     const ExecutionContextRef &exe_ctx_ref,
                                      uint64_t discr_value, const std::vector<OxCamlMember>& members) {
   // Try to get discriminator name if it's an enum
   std::string discr_name = "Unknown";
@@ -533,7 +536,7 @@ static bool FormatVariantPartGeneric(Stream &stream, const OxCamlVariantPart& va
       if (members[i].name.has_value()) {
         stream.Printf("%s = ", members[i].name.value().c_str());
       }
-      FormatMember(stream, members[i], data, process_sp);
+      FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
     }
     stream.Printf("]");
   }
@@ -544,6 +547,7 @@ static bool FormatVariantPartGeneric(Stream &stream, const OxCamlVariantPart& va
 // Format variant part with OCaml-style formatting
 static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& variant_part,
                                     DataExtractor& data, lldb::ProcessSP process_sp,
+                                    const ExecutionContextRef &exe_ctx_ref,
                                     uint64_t discr_value, const std::vector<OxCamlMember>& members) {
   // Step 1: Get constructor name from enum
   const auto& discriminator = variant_part.GetDiscriminator();
@@ -626,7 +630,7 @@ static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& var
       }
     }
 
-    FormatMember(stream, members[i], data, process_sp);
+    FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
   }
 
   // Print closing delimiter
@@ -641,7 +645,7 @@ static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& var
 // - Artificial discriminators (e.g., Pointer/Immediate) with exactly one member
 //   in the active variant are displayed transparently (member content only)
 // - All other cases dispatch to either OCaml or generic formatting
-static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp, bool is_ocaml_variant = false) {
+static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_part, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref, bool is_ocaml_variant = false) {
   // Read discriminator value using helper function
   uint64_t discr_value = ReadDiscriminatorValue(variant_part, data);
 
@@ -657,15 +661,15 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
   // Special case: artificial discriminator with exactly one member
   // Display the member content directly without discriminator name/brackets
   if (variant_part.HasArtificialDiscriminator() && members.size() == 1) {
-    FormatMember(stream, members[0], data, process_sp);
+    FormatMember(stream, members[0], data, process_sp, exe_ctx_ref);
     return true;
   }
 
   // Dispatch to appropriate formatter
   if (is_ocaml_variant) {
-    return FormatVariantPartOxCaml(stream, variant_part, data, process_sp, discr_value, members);
+    return FormatVariantPartOxCaml(stream, variant_part, data, process_sp, exe_ctx_ref, discr_value, members);
   } else {
-    return FormatVariantPartGeneric(stream, variant_part, data, process_sp, discr_value, members);
+    return FormatVariantPartGeneric(stream, variant_part, data, process_sp, exe_ctx_ref, discr_value, members);
   }
 }
 
@@ -676,14 +680,15 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
 //   are formatted without braces (just the variant content directly)
 // - This represents the typical OCaml variant structure encoding
 static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
-                           DataExtractor& data, lldb::ProcessSP process_sp) {
+                           DataExtractor& data, lldb::ProcessSP process_sp,
+                           const ExecutionContextRef &exe_ctx_ref) {
   const auto& members = struct_type->GetMembers();
   const auto& variant_parts = struct_type->GetVariantParts();
 
   // Special case: OCaml variant (no direct members, exactly one variant part)
   // Format the variant content directly without structure braces using OCaml formatting
   if (members.empty() && variant_parts.size() == 1) {
-    return FormatVariantPart(stream, variant_parts[0], data, process_sp, true);
+    return FormatVariantPart(stream, variant_parts[0], data, process_sp, exe_ctx_ref, true);
   }
 
   // Regular case: structure with members and/or multiple variant parts
@@ -705,7 +710,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
       stream.Printf("%s = ", members[i].name.value().c_str());
     }
 
-    FormatMember(stream, members[i], data, process_sp);
+    FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
     has_content = true;
   }
 
@@ -713,7 +718,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
   for (size_t i = 0; i < variant_parts.size(); ++i) {
     if (has_content) stream.Printf("%s", separator);
 
-    FormatVariantPart(stream, variant_parts[i], data, process_sp, false);
+    FormatVariantPart(stream, variant_parts[i], data, process_sp, exe_ctx_ref, false);
     has_content = true;
   }
 
@@ -723,7 +728,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
 }
 
 // Main dispatcher function
-static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp) {
+static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref) {
   if (!type) {
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(log, "FormatValue: No type information available, using fallback formatter");
@@ -732,17 +737,17 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
 
   switch (type->GetKind()) {
     case OxCamlType::Value:
-      return oxcaml::FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp);
+      return oxcaml::FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::UnboxedBase:
       return FormatUnboxedBase(stream, static_cast<OxCamlUnboxedBaseType*>(type), data, process_sp);
     case OxCamlType::Enum:
       return FormatEnum(stream, static_cast<OxCamlEnumType*>(type), data, process_sp);
     case OxCamlType::Pointer:
-      return FormatPointer(stream, static_cast<OxCamlPointerType*>(type), data, process_sp);
+      return FormatPointer(stream, static_cast<OxCamlPointerType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::Typedef:
-      return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), data, process_sp);
+      return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::Structure:
-      return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), data, process_sp);
+      return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::Placeholder:
       return FormatPlaceholder(stream, static_cast<OxCamlPlaceholderType*>(type), data, process_sp);
     case OxCamlType::Unknown:
@@ -768,5 +773,9 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   OxCamlType* type = ExtractOxCamlType(compiler_type);
 
   lldb::ProcessSP process_sp = valobj.GetProcessSP();
-  return FormatValue(stream, type, data, process_sp);
+  
+  // Get ExecutionContext for address resolution
+  const ExecutionContextRef &exe_ctx_ref = valobj.GetExecutionContextRef();
+  
+  return FormatValue(stream, type, data, process_sp, exe_ctx_ref);
 }

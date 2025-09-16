@@ -16,9 +16,14 @@
 #include "OxCamlValueFormatters.h"
 #include "OxCamlFormatHelpers.h"
 #include "LogChannelOxCaml.h"
+#include "lldb/Core/Address.h"
+#include "lldb/Target/ExecutionContext.h"
+#include "lldb/Target/ExecutionContextScope.h"
 #include "lldb/Target/Process.h"
+#include "lldb/Target/Target.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Status.h"
+#include "lldb/Utility/StreamString.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 #include <map>
@@ -44,32 +49,42 @@ enum class OxCamlSpecialTag : uint8_t {
 
 // Forward declarations of helper functions
 static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
-                                  lldb::ProcessSP process_sp);
+                                  lldb::ProcessSP process_sp,
+                                  const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
-                                DataExtractor& data, lldb::ProcessSP process_sp);
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag,
                                      uint64_t wosize, DataExtractor& data,
-                                     lldb::ProcessSP process_sp);
+                                     lldb::ProcessSP process_sp,
+                                     const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlLazy(Stream &stream, uint64_t value, uint64_t wosize,
-                             DataExtractor& data, lldb::ProcessSP process_sp);
+                             DataExtractor& data, lldb::ProcessSP process_sp,
+                             const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
-                                DataExtractor& data, lldb::ProcessSP process_sp);
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref, bool is_infix);
 static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp);
-static bool FormatOxCamlInfix(Stream &stream, uint64_t value, uint64_t wosize,
-                              DataExtractor& data, lldb::ProcessSP process_sp);
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
-                                DataExtractor& data, lldb::ProcessSP process_sp);
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize,
-                                 DataExtractor& data, lldb::ProcessSP process_sp);
+                                 DataExtractor& data, lldb::ProcessSP process_sp,
+                                 const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp);
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp);
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wosize,
-                                    DataExtractor& data, lldb::ProcessSP process_sp);
+                                    DataExtractor& data, lldb::ProcessSP process_sp,
+                                    const ExecutionContextRef &exe_ctx_ref);
 static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp);
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref);
 
 // Custom type formatter function pointer
 //
@@ -107,7 +122,8 @@ static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
 bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
                                                          OxCamlValueType* value_type,
                                                          DataExtractor& data,
-                                                         lldb::ProcessSP process_sp) {
+                                                         lldb::ProcessSP process_sp,
+                                                         const ExecutionContextRef &exe_ctx_ref) {
   assert(value_type->GetByteSize() == 8 && "OCaml value types must be 8 bytes");
 
   // Fatal error: OCaml value formatting requires a valid process for memory access
@@ -129,15 +145,16 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
   // Check LSB for immediate vs pointer discrimination
   if ((value & 0x1) == 1) {
     // LSB = 1: Immediate value (tagged integer, unit, etc.)
-    return FormatOxCamlImmediate(stream, value, process_sp);
+    return FormatOxCamlImmediate(stream, value, process_sp, exe_ctx_ref);
   } else {
     // LSB = 0: Pointer to heap block
-    return FormatOxCamlPointer(stream, value, data, process_sp);
+    return FormatOxCamlPointer(stream, value, data, process_sp, exe_ctx_ref);
   }
 }
 
 static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
-                                  lldb::ProcessSP process_sp) {
+                                  lldb::ProcessSP process_sp,
+                                  const ExecutionContextRef &exe_ctx_ref) {
   // OCaml immediate value: decode tagged integer by right-shifting by 1
   // Convert to signed int64_t to handle negative values correctly
   int64_t signed_value = static_cast<int64_t>(value);
@@ -149,7 +166,8 @@ static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
 }
 
 static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
-                                DataExtractor& data, lldb::ProcessSP process_sp) {
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref) {
   // Check for null pointer
   if (value == 0) {
     stream.Printf("<null>");
@@ -175,83 +193,127 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
   // Dispatch based on tag
   switch (tag) {
     case static_cast<uint8_t>(OxCamlSpecialTag::Lazy_tag):
-      return FormatOxCamlLazy(stream, value, wosize, data, process_sp);
+      return FormatOxCamlLazy(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Closure_tag):
-      return FormatOxCamlClosure(stream, value, wosize, data, process_sp);
+      return FormatOxCamlClosure(stream, value, wosize, data, process_sp, exe_ctx_ref, false);
     case static_cast<uint8_t>(OxCamlSpecialTag::Object_tag):
-      return FormatOxCamlObject(stream, value, wosize, data, process_sp);
+      return FormatOxCamlObject(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Infix_tag):
-      return FormatOxCamlInfix(stream, value, wosize, data, process_sp);
+      return FormatOxCamlClosure(stream, value, wosize, data, process_sp, exe_ctx_ref, true);
     case static_cast<uint8_t>(OxCamlSpecialTag::Forward_tag):
-      return FormatOxCamlForward(stream, value, wosize, data, process_sp);
+      return FormatOxCamlForward(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Abstract_tag):
-      return FormatOxCamlAbstract(stream, value, wosize, data, process_sp);
+      return FormatOxCamlAbstract(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::String_tag):
-      return FormatOxCamlString(stream, value, wosize, data, process_sp);
+      return FormatOxCamlString(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Double_tag):
-      return FormatOxCamlDouble(stream, value, wosize, data, process_sp);
+      return FormatOxCamlDouble(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Double_array_tag):
-      return FormatOxCamlDoubleArray(stream, value, wosize, data, process_sp);
+      return FormatOxCamlDoubleArray(stream, value, wosize, data, process_sp, exe_ctx_ref);
     case static_cast<uint8_t>(OxCamlSpecialTag::Custom_tag):
-      return FormatOxCamlCustom(stream, value, wosize, data, process_sp);
+      return FormatOxCamlCustom(stream, value, wosize, data, process_sp, exe_ctx_ref);
     default:
       // Generic block (tag < 246)
-      return FormatOxCamlGenericBlock(stream, value, tag, wosize, data, process_sp);
+      return FormatOxCamlGenericBlock(stream, value, tag, wosize, data, process_sp, exe_ctx_ref);
   }
 }
 
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag,
                                      uint64_t wosize, DataExtractor& data,
-                                     lldb::ProcessSP process_sp) {
+                                     lldb::ProcessSP process_sp,
+                                     const ExecutionContextRef &exe_ctx_ref) {
   // Placeholder: Generic OCaml block (variant, record, array, etc.)
   stream.Printf("<block>");
   return true;
 }
 
 static bool FormatOxCamlLazy(Stream &stream, uint64_t value, uint64_t wosize,
-                             DataExtractor& data, lldb::ProcessSP process_sp) {
+                             DataExtractor& data, lldb::ProcessSP process_sp,
+                             const ExecutionContextRef &exe_ctx_ref) {
   // Placeholder: OCaml lazy value
   stream.Printf("<lazy>");
   return true;
 }
 
 static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
-                                DataExtractor& data, lldb::ProcessSP process_sp) {
-  // Placeholder: OCaml function closure
-  stream.Printf("<closure>");
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref, 
+                                bool is_infix) {
+  Status error;
+  const uint64_t word_size = 8;
+  const char* closure_type = is_infix ? "infix closure" : "closure";
+  
+  // Read closinfo word from first data word (offset 8 from value)
+  uint64_t closinfo = process_sp->ReadUnsignedIntegerFromMemory(value + word_size, word_size, 0, error);
+  if (error.Fail()) {
+    stream.Printf("<%s, code ptr unreadable>", closure_type);
+    return true;
+  }
+  
+  // Extract arity from top 8 bits of closinfo
+  uint8_t arity = closinfo >> 56;
+  
+  // Calculate code pointer offset based on arity
+  // If arity is 0 or 1, offset is 0; otherwise offset is 2
+  int offset = (arity == 0 || arity == 1) ? 0 : 2;
+  
+  // Read full application code pointer
+  lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(value + offset * word_size, error);
+  if (error.Fail()) {
+    stream.Printf("<%s, code ptr unreadable>", closure_type);
+    return true;
+  }
+  
+  // Try to resolve function name from code pointer
+  lldb::TargetSP target_sp = exe_ctx_ref.GetTargetSP();
+  if (!target_sp) {
+    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+    return true;
+  }
+  
+  Address addr;
+  if (!addr.SetLoadAddress(code_ptr, target_sp.get())) {
+    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+    return true;
+  }
+  
+  // Create a string stream to capture the address output
+  StreamString addr_stream;
+  addr.Dump(&addr_stream, nullptr, Address::DumpStyleResolvedDescription, 
+            Address::DumpStyleFileAddress, 8, false);
+  
+  // Display resolved function name using new format
+  stream.Printf("<%s>@%s", closure_type, addr_stream.GetData());
   return true;
 }
 
 static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp) {
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref) {
   // Placeholder: OCaml object instance
   stream.Printf("<object>");
   return true;
 }
 
-static bool FormatOxCamlInfix(Stream &stream, uint64_t value, uint64_t wosize,
-                              DataExtractor& data, lldb::ProcessSP process_sp) {
-  // Placeholder: OCaml infix closure
-  stream.Printf("<infix>");
-  return true;
-}
-
 static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
-                                DataExtractor& data, lldb::ProcessSP process_sp) {
+                                DataExtractor& data, lldb::ProcessSP process_sp,
+                                const ExecutionContextRef &exe_ctx_ref) {
   // Placeholder: OCaml forwarding pointer (GC)
   stream.Printf("<forward>");
   return true;
 }
 
 static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize,
-                                 DataExtractor& data, lldb::ProcessSP process_sp) {
+                                 DataExtractor& data, lldb::ProcessSP process_sp,
+                                 const ExecutionContextRef &exe_ctx_ref) {
   // Placeholder: OCaml abstract value
   stream.Printf("<abstract>");
   return true;
 }
 
 static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp) {
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref) {
   // OCaml string: read string bytes from heap memory
   Status error;
   const uint64_t word_size = 8;
@@ -291,7 +353,8 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
 }
 
 static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp) {
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref) {
   // OCaml boxed float: read 8 bytes of IEEE double precision data
   Status error;
   const uint64_t word_size = 8;
@@ -315,7 +378,8 @@ static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
 }
 
 static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wosize,
-                                    DataExtractor& data, lldb::ProcessSP process_sp) {
+                                    DataExtractor& data, lldb::ProcessSP process_sp,
+                                    const ExecutionContextRef &exe_ctx_ref) {
   // OCaml float array: display in OCaml syntax [| float1; float2; ... |]
   Status error;
   const uint64_t word_size = 8;
@@ -478,7 +542,8 @@ static const std::map<std::string, CustomTypeFormatter> custom_formatters = {
 };
 
 static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
-                               DataExtractor& data, lldb::ProcessSP process_sp) {
+                               DataExtractor& data, lldb::ProcessSP process_sp,
+                               const ExecutionContextRef &exe_ctx_ref) {
   // OCaml custom block: dispatch to appropriate formatter based on identifier
   Status error;
 
