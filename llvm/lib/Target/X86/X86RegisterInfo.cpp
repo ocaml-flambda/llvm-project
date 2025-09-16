@@ -300,10 +300,15 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   switch (CC) {
   case CallingConv::GHC:
   case CallingConv::HiPE:
-  case CallingConv::OCaml:
     return CSR_NoRegs_SaveList;
-  case CallingConv::OCaml_C_Call:
-    return CSR_64_OCaml_C_Call_SaveList;
+  case CallingConv::OxCaml:
+    return CSR_64_OxCaml_WithFP_SaveList;
+  case CallingConv::OxCaml_C_Call:
+    return CSR_64_OxCaml_C_Call_SaveList;
+  case CallingConv::OxCaml_C_Call_StackArgs:
+    return CSR_64_OxCaml_C_Call_StackArgs_SaveList;
+  case CallingConv::OxCaml_Alloc:
+    return CSR_64_OxCaml_Alloc_SaveList;
   case CallingConv::AnyReg:
     if (HasAVX)
       return CSR_64_AllRegs_AVX_SaveList;
@@ -426,11 +431,16 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   switch (CC) {
   case CallingConv::GHC:
   case CallingConv::HiPE:
-  case CallingConv::OCaml:
     return CSR_NoRegs_RegMask;
-  case CallingConv::OCaml_C_Call:
-    return CSR_64_OCaml_C_Call_RegMask;
-  case CallingConv::AnyReg:
+  case CallingConv::OxCaml:
+    return CSR_64_OxCaml_WithFP_RegMask;
+  case CallingConv::OxCaml_C_Call:
+    return CSR_64_OxCaml_C_Call_RegMask;
+  case CallingConv::OxCaml_C_Call_StackArgs:
+    return CSR_64_OxCaml_C_Call_StackArgs_RegMask;
+  case CallingConv::OxCaml_Alloc:
+    return CSR_64_OxCaml_Alloc_RegMask;
+    case CallingConv::AnyReg:
     if (HasAVX)
       return CSR_64_AllRegs_AVX_RegMask;
     return CSR_64_AllRegs_RegMask;

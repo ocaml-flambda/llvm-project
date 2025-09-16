@@ -241,11 +241,11 @@ namespace CallingConv {
     /// Preserve X2-X15, X19-X29, SP, Z0-Z31, P0-P15.
     AArch64_SME_ABI_Support_Routines_PreserveMost_From_X2 = 103,
 
-    /// Calling convention for OCaml
-    OCaml = 104,
-
-    /// Special case of the C calling convention for calling from OCaml
-    OCaml_C_Call = 105,
+    /// Calling conventions used by OxCaml
+    OxCaml = 104, // normal OxCaml functions
+    OxCaml_C_Call = 105, // [caml_c_call]
+    OxCaml_C_Call_StackArgs = 106, // [caml_c_call_stack_args_llvm_backend]
+    OxCaml_Alloc = 107, // [caml_call_gc] and [caml_local_realloc]
 
     /// The highest possible ID. Must be some 2^k - 1.
     MaxID = 1023
