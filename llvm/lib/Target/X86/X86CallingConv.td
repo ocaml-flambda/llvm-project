@@ -440,12 +440,12 @@ def RetCC_X86_64_HHVM: CallingConv<[
                                  RAX, R10, R11, R13, R14, R15]>>
 ]>;
 
-def RetCC_X86_64_OCaml : CallingConv<[
+def RetCC_X86_64_OxCaml : CallingConv<[
   // Promote all types to i64
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
 
   // Runtime registers (R14, R15) are threaded through function calls
-  // See the argument calling conventions for OCaml for more details
+  // See the argument calling conventions for OxCaml for more details
   CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
@@ -454,7 +454,13 @@ def RetCC_X86_64_OCaml : CallingConv<[
   ]>>
 ]>;
 
-def RetCC_X86_64_OCaml_C_Call : CallingConv<[
+def RetCC_X86_64_OxCaml_C_Call : CallingConv<[
+  CCIfType<[i64], CCAssignToReg<[R14, R15]>>,
+
+  CCDelegateTo<RetCC_X86_64_C>
+]>;
+
+def RetCC_X86_64_OxCaml_C_Call_StackArgs : CallingConv<[
   CCIfType<[i64], CCAssignToReg<[R14, R15]>>,
 
   CCDelegateTo<RetCC_X86_64_C>
@@ -513,9 +519,15 @@ def RetCC_X86_64 : CallingConv<[
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<RetCC_X86_Win64_C>>,
 
-  // Handle OCaml calls
-  CCIfCC<"CallingConv::OCaml", CCDelegateTo<RetCC_X86_64_OCaml>>,
-  CCIfCC<"CallingConv::OCaml_C_Call", CCDelegateTo<RetCC_X86_64_OCaml_C_Call>>,
+  // OxCaml CCs
+  CCIfCC<"CallingConv::OxCaml_WithFP", CCDelegateTo<RetCC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithoutFP", CCDelegateTo<RetCC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_C_Call", CCDelegateTo<RetCC_X86_64_OxCaml_C_Call>>,
+  CCIfCC<"CallingConv::OxCaml_C_Call_StackArgs",
+    CCDelegateTo<RetCC_X86_64_OxCaml_C_Call_StackArgs>>,
+  
+  // See arg CC for OxCaml_Alloc for why we use OxCaml here.
+  CCIfCC<"CallingConv::OxCaml_Alloc", CCDelegateTo<RetCC_X86_64_OxCaml>>,
 
   // Otherwise, drop to normal X86-64 CC
   CCDelegateTo<RetCC_X86_64_C>
@@ -723,7 +735,7 @@ def CC_X86_Win64_VectorCall : CallingConv<[
   CCDelegateTo<CC_X86_Win64_C>
 ]>;
 
-def CC_X86_64_OCaml : CallingConv<[
+def CC_X86_64_OxCaml : CallingConv<[
   // Promote i8/i16/i32 arguments to i64.
   CCIfType<[i8, i16, i32], CCPromoteToType<i64>>,
 
@@ -733,6 +745,8 @@ def CC_X86_64_OCaml : CallingConv<[
   // runtime) must be preserved through the run of the program. To ensure LLVM
   // doesn't mess with them, they are explicitly threaded through function calls
   // and returns. These are R14 and R15.
+  // Note that whether frame pointers are enabled or not doesn't impact the
+  // argument or return conventions. It only changes the callee-saved registers.
   CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, RBX, RDI, RSI, RDX, RCX, R8, R9, R12, R13]>>,
 
   CCIfType<[f32, f64], CCAssignToReg<[
@@ -741,9 +755,21 @@ def CC_X86_64_OCaml : CallingConv<[
   ]>>
 ]>;
 
-def CC_X86_64_OCaml_C_Call : CallingConv<[
-  // OCaml wraps C calls with another function that transfers stack arguments.
-  // RAX contains the function address, and R12 contains the size of the stack arguments.
+def CC_X86_64_OxCaml_C_Call : CallingConv<[
+  // Calling conventions followed by [caml_c_call] which wraps non-noalloc C calls.
+  // RAX contains the function address to call.
+  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX]>>,
+
+  // Follow C convention normally otherwise
+  CCDelegateTo<CC_X86_64_C>
+]>;
+
+def CC_X86_64_OxCaml_C_Call_StackArgs : CallingConv<[
+  // Calling conventions followed by [caml_c_call_stack_args] to additionally handle
+  // transfer of stack arguments. Note that this function normally takes a pair of
+  // pointers on the stack, but since LLVM makes it hard to directly meddle with the
+  // stack, this in reality calls yet anothr wrapper which calculates this range given
+  // the number of stack arguments in bytes in R12.
   CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, R12]>>,
 
   // Follow C convention normally otherwise
@@ -1152,8 +1178,19 @@ def CC_X86_64 : CallingConv<[
     CCIfSubtarget<"isTargetWin64()", CCDelegateTo<CC_X86_Win64_RegCall>>>,
   CCIfCC<"CallingConv::X86_RegCall", CCDelegateTo<CC_X86_SysV64_RegCall>>,
   CCIfCC<"CallingConv::X86_INTR", CCCustom<"CC_X86_Intr">>,
-  CCIfCC<"CallingConv::OCaml", CCDelegateTo<CC_X86_64_OCaml>>,
-  CCIfCC<"CallingConv::OCaml_C_Call", CCDelegateTo<CC_X86_64_OCaml_C_Call>>,
+  
+  // OxCaml calling conventions
+  CCIfCC<"CallingConv::OxCaml_WithFP", CCDelegateTo<CC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_WithoutFP", CCDelegateTo<CC_X86_64_OxCaml>>,
+  CCIfCC<"CallingConv::OxCaml_C_Call", CCDelegateTo<CC_X86_64_OxCaml_C_Call>>,
+  CCIfCC<"CallingConv::OxCaml_C_Call_StackArgs",
+    CCDelegateTo<CC_X86_64_OxCaml_C_Call_StackArgs>>,
+
+  // OxCaml_Alloc follows the same CC as OxCaml, but doesn't pass arguments
+  // (or return) in any non-runtime register. So, as long as it is used that way,
+  // it is safe for it to follow OxCaml's arg and ret CCs and have a different
+  // CSR mask.
+  CCIfCC<"CallingConv::OxCaml_Alloc", CCDelegateTo<CC_X86_64_OxCaml>>,
 
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<CC_X86_Win64_C>>,
@@ -1178,9 +1215,6 @@ def CSR_NoRegs : CalleeSavedRegs<(add)>;
 
 def CSR_32 : CalleeSavedRegs<(add ESI, EDI, EBX, EBP)>;
 def CSR_64 : CalleeSavedRegs<(add RBX, R12, R13, R14, R15, RBP)>;
-
-// R14 and R15 are used as return registers, so they aren't callee saved.
-def CSR_64_OCaml_C_Call : CalleeSavedRegs<(sub CSR_64, R14, R15)>;
 
 def CSR_64_SwiftError : CalleeSavedRegs<(sub CSR_64, R12)>;
 def CSR_64_SwiftTail : CalleeSavedRegs<(sub CSR_64, R13, R14)>;
@@ -1281,3 +1315,16 @@ def CSR_SysV64_RegCall_NoSSE : CalleeSavedRegs<(add RBX, RBP,
                                                (sequence "R%u", 12, 15))>;
 def CSR_SysV64_RegCall       : CalleeSavedRegs<(add CSR_SysV64_RegCall_NoSSE,               
                                                (sequence "XMM%u", 8, 15))>;
+
+def CSR_64_OxCaml_WithFP : CalleeSavedRegs<(add RBP)>;
+def CSR_64_OxCaml_WithoutFP : CalleeSavedRegs<(add)>;
+
+// R14 and R15 (and also R12 in the latter) are used as return registers,
+// so they aren't callee saved.
+def CSR_64_OxCaml_C_Call : CalleeSavedRegs<(sub CSR_64, R14, R15)>;
+def CSR_64_OxCaml_C_Call_StackArgs : CalleeSavedRegs<(sub CSR_64, R14, R15, R12)>;
+
+// See [Proc.destroyed_at_alloc_or_poll] for more details:
+// https://github.com/oxcaml/oxcaml/blob/main/backend/amd64/proc.ml#L457
+// Note that R14 and R15 are also not saved since they are passed as arguments.
+def CSR_64_OxCaml_Alloc : CalleeSavedRegs<(sub CSR_64_AllRegs, R10, R11, R14, R15)>;

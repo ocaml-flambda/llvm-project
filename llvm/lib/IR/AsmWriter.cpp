@@ -340,7 +340,15 @@ static void PrintCallingConv(unsigned cc, raw_ostream &Out) {
   case CallingConv::AMDGPU_CS:     Out << "amdgpu_cs"; break;
   case CallingConv::AMDGPU_KERNEL: Out << "amdgpu_kernel"; break;
   case CallingConv::AMDGPU_Gfx:    Out << "amdgpu_gfx"; break;
-  case CallingConv::OCaml:         Out << "ocamlcc"; break;
+  case CallingConv::OxCaml_WithFP: Out << "oxcaml_fpcc"; break;
+  case CallingConv::OxCaml_WithoutFP:
+    Out << "oxcaml_nofpcc";
+    break;
+  case CallingConv::OxCaml_C_Call: Out << "oxcaml_ccc"; break;
+  case CallingConv::OxCaml_C_Call_StackArgs:
+    Out << "oxcaml_c_stackcc";
+    break;
+  case CallingConv::OxCaml_Alloc:  Out << "oxcaml_alloccc"; break;
   }
 }
 

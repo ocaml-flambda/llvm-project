@@ -173,6 +173,11 @@ enum Kind {
   kw_amdgpu_kernel,
   kw_amdgpu_gfx,
   kw_tailcc,
+  kw_oxcaml_fpcc,
+  kw_oxcaml_nofpcc,
+  kw_oxcaml_ccc,
+  kw_oxcaml_c_stackcc,
+  kw_oxcaml_alloccc,
 
   // Attributes:
   kw_attributes,
