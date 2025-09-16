@@ -173,11 +173,9 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(co
   OxCamlUnboxedBaseType::BaseKind base_kind;
   switch (encoding.value()) {
     case llvm::dwarf::DW_ATE_signed:
-    case llvm::dwarf::DW_ATE_signed_char:
       base_kind = OxCamlUnboxedBaseType::Signed;
       break;
     case llvm::dwarf::DW_ATE_unsigned:
-    case llvm::dwarf::DW_ATE_unsigned_char:
       base_kind = OxCamlUnboxedBaseType::Unsigned;
       break;
     case llvm::dwarf::DW_ATE_float:

@@ -100,12 +100,11 @@ The OxCaml compiler emits two distinct categories of base types in DWARF debug i
 - Tagged pointer system with LSB indicating immediate vs heap values
 - Immediate values: `(value << 1) | 1` (e.g., integers, booleans, characters)
 - Heap pointers: 8-byte aligned addresses to heap blocks (LSB = 0)
-- Special case: `0x0` represents the unit value `()`
 
 **Examples:**
 ```ocaml
 let x : int = 42        (* ocaml_value via "int @ value" typedef *)
-let b : bool = true     (* ocaml_value via "bool @ value" typedef *)  
+let b : bool = true     (* ocaml_value via "bool @ value" typedef *)
 let s : string = "hi"   (* ocaml_value via "string @ value" typedef *)
 let f : float = 3.14    (* ocaml_value via "float @ value" typedef *)
 ```
@@ -137,10 +136,10 @@ let j : int64# = #1000L     (* 8-byte signed integer *)
 OxCaml uses specific type name suffixes to distinguish representations:
 
 - `@ value` - Boxed OCaml values using `ocaml_value` base type
-- `@ float64` - Unboxed 64-bit IEEE 754 floats  
+- `@ float64` - Unboxed 64-bit IEEE 754 floats
 - `@ float32` - Unboxed 32-bit IEEE 754 floats
 - `@ bits64` - Unboxed 64-bit signed integers
-- `@ bits32` - Unboxed 32-bit signed integers  
+- `@ bits32` - Unboxed 32-bit signed integers
 - `@ word` - Unboxed native-sized integers
 - `@ bits16` - Unboxed 16-bit signed integers
 - `@ bits8` - Unboxed 8-bit signed integers
@@ -151,7 +150,7 @@ Complex types can combine both categories:
 
 ```ocaml
 (* Record with mixed field types *)
-type mixed = { 
+type mixed = {
   boxed: int;        (* ocaml_value *)
   unboxed: float#    (* 8-byte IEEE 754 *)
 }
@@ -159,7 +158,7 @@ type mixed = {
 (* Unboxed tuple - all elements unboxed *)
 type unboxed_tuple = #(float# * int32#)
 
-(* Unboxed record - all fields unboxed *)  
+(* Unboxed record - all fields unboxed *)
 type unboxed_record = #{ x: float#; y: int32# }
 ```
 
