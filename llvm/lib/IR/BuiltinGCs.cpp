@@ -43,6 +43,22 @@ public:
   }
 };
 
+
+class OxCamlGC : public GCStrategy {
+public:
+  OxCamlGC() {
+    UseStatepoints = true;
+    UseRS4GC = true;
+    NeededSafePoints = false;
+    UsesMetadata = true; // This is for custom frametable printing.
+  }
+
+  std::optional<bool> isGCManagedPointer(const Type *Ty) const override {
+    const PointerType *PT = cast<PointerType>(Ty);
+    return (1 == PT->getAddressSpace());
+  }
+};
+
 /// A GC strategy for uncooperative targets.  This implements lowering for the
 /// llvm.gc* intrinsics for targets that do not natively support them (which
 /// includes the C backend). Note that the code generated is not quite as
@@ -127,6 +143,7 @@ static GCRegistry::Add<ShadowStackGC>
 static GCRegistry::Add<StatepointGC> D("statepoint-example",
                                        "an example strategy for statepoint");
 static GCRegistry::Add<CoreCLRGC> E("coreclr", "CoreCLR-compatible GC");
+static GCRegistry::Add<OxCamlGC> F("oxcaml", "OxCaml-compatible GC");
 
 // Provide hook to ensure the containing library is fully loaded.
 void llvm::linkAllBuiltinGCs() {}

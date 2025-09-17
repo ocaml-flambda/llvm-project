@@ -451,8 +451,10 @@ static bool shouldRewriteFunction(Function &F) {
     const auto &FunctionGCName = F.getGC();
     const StringRef StatepointExampleName("statepoint-example");
     const StringRef CoreCLRName("coreclr");
+    const StringRef OxCamlName("oxcaml");
     return (StatepointExampleName == FunctionGCName) ||
-           (CoreCLRName == FunctionGCName);
+           (CoreCLRName == FunctionGCName) ||
+           (OxCamlName == FunctionGCName);
   } else
     return false;
 }

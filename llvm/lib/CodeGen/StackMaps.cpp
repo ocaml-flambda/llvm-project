@@ -521,21 +521,24 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
       MCSymbolRefExpr::create(&MILabel, OutContext),
       MCSymbolRefExpr::create(AP.CurrentFnSymForSize, OutContext), OutContext);
 
-  CSInfos.emplace_back(CSOffsetExpr, ID, std::move(Locations),
-                       std::move(LiveOuts));
-
   // Record the stack size of the current function and update callsite count.
   const MachineFrameInfo &MFI = AP.MF->getFrameInfo();
   const TargetRegisterInfo *RegInfo = AP.MF->getSubtarget().getRegisterInfo();
   bool HasDynamicFrameSize =
       MFI.hasVarSizedObjects() || RegInfo->hasStackRealignment(*(AP.MF));
-  uint64_t FrameSize = HasDynamicFrameSize ? UINT64_MAX : MFI.getStackSize();
+  uint64_t StaticFrameSize = MFI.getStackSize();
+  uint64_t FrameSize =  HasDynamicFrameSize ? UINT64_MAX : StaticFrameSize;
 
   auto CurrentIt = FnInfos.find(AP.CurrentFnSym);
   if (CurrentIt != FnInfos.end())
     CurrentIt->second.RecordCount++;
   else
-    FnInfos.insert(std::make_pair(AP.CurrentFnSym, FunctionInfo(FrameSize)));
+    FnInfos.insert(std::make_pair(AP.CurrentFnSym,
+      FunctionInfo(StaticFrameSize, FrameSize)));
+
+  CSInfos.emplace_back(&MILabel, CSOffsetExpr,
+                       FunctionInfo(StaticFrameSize, FrameSize),
+                       ID, std::move(Locations), std::move(LiveOuts));
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
