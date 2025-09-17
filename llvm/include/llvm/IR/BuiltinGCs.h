@@ -28,6 +28,9 @@ void linkOcamlGCPrinter();
 /// Creates an erlang-compatible metadata printer.
 void linkErlangGCPrinter();
 
+/// Creates an oxcaml-compatible metadata printer.
+void linkOxCamlGCPrinter();
+
 } // namespace llvm
 
 #endif // LLVM_IR_BUILTINGCS_H

@@ -64,7 +64,7 @@ public:
   /// Called when the stack maps are generated. Return true if
   /// stack maps with a custom format are generated. Otherwise
   /// returns false and the default format will be used.
-  virtual bool emitStackMaps(StackMaps &SM, AsmPrinter &AP) { return false; }
+  virtual bool emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) { return false; }
 };
 
 } // end namespace llvm

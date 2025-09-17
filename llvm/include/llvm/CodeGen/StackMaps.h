@@ -310,23 +310,29 @@ public:
   using ConstantPool = MapVector<uint64_t, uint64_t>;
 
   struct FunctionInfo {
+    uint64_t StaticStackSize = 0;
     uint64_t StackSize = 0;
     uint64_t RecordCount = 1;
 
     FunctionInfo() = default;
-    explicit FunctionInfo(uint64_t StackSize) : StackSize(StackSize) {}
+    explicit FunctionInfo(uint64_t StaticStackSize, uint64_t StackSize)
+      : StaticStackSize(StaticStackSize), StackSize(StackSize) {}
   };
 
   struct CallsiteInfo {
+    const MCSymbol *CSLabel = nullptr;
     const MCExpr *CSOffsetExpr = nullptr;
+    const FunctionInfo CSFunctionInfo;
     uint64_t ID = 0;
     LocationVec Locations;
     LiveOutVec LiveOuts;
 
     CallsiteInfo() = default;
-    CallsiteInfo(const MCExpr *CSOffsetExpr, uint64_t ID,
+    CallsiteInfo(const MCSymbol *CSLabel, const MCExpr *CSOffsetExpr,
+                 const FunctionInfo CSFunctionInfo, uint64_t ID,
                  LocationVec &&Locations, LiveOutVec &&LiveOuts)
-        : CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
+        : CSLabel(CSLabel), CSOffsetExpr(CSOffsetExpr),
+          CSFunctionInfo(CSFunctionInfo), ID(ID), Locations(std::move(Locations)),
           LiveOuts(std::move(LiveOuts)) {}
   };
 

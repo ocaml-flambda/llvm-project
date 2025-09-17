@@ -21,6 +21,7 @@ add_llvm_component_library(LLVMAsmPrinter
   EHStreamer.cpp
   ErlangGCPrinter.cpp
   OcamlGCPrinter.cpp
+  OxCamlGCPrinter.cpp
   PseudoProbePrinter.cpp
   WinCFGuard.cpp
   WinException.cpp

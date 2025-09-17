@@ -39,6 +39,8 @@
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
+#include "llvm/IR/BuiltinGCs.h"
+#include "llvm/CodeGen/LinkAllAsmWriterComponents.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineDominators.h"
@@ -2187,7 +2189,7 @@ bool AsmPrinter::doFinalization(Module &M) {
   // text sections come after debug info has been emitted. This matters for
   // stack maps as they are arbitrary data, and may even have a custom format
   // through user plugins.
-  emitStackMaps();
+  emitStackMaps(M);
 
   // Finalize debug and EH information.
   for (const HandlerInfo &HI : Handlers) {
@@ -3857,7 +3859,7 @@ GCMetadataPrinter *AsmPrinter::getOrCreateGCPrinter(GCStrategy &S) {
   report_fatal_error("no GCMetadataPrinter registered for GC: " + Twine(Name));
 }
 
-void AsmPrinter::emitStackMaps() {
+void AsmPrinter::emitStackMaps(Module &M) {
   GCModuleInfo *MI = getAnalysisIfAvailable<GCModuleInfo>();
   assert(MI && "AsmPrinter didn't require GCModuleInfo?");
   bool NeedsDefault = false;
@@ -3867,7 +3869,7 @@ void AsmPrinter::emitStackMaps() {
   else
     for (const auto &I : *MI) {
       if (GCMetadataPrinter *MP = getOrCreateGCPrinter(*I))
-        if (MP->emitStackMaps(SM, *this))
+        if (MP->emitStackMaps(M, SM, *this))
           continue;
       // The strategy doesn't have printer or doesn't emit custom stack maps.
       // Use the default format.
