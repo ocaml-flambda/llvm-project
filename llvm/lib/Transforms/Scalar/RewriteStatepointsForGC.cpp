@@ -3087,6 +3087,11 @@ bool RewriteStatepointsForGC::runOnFunction(Function &F, DominatorTree &DT,
                "Don't expect any other calls here!");
         return false;
       }
+
+      // `musttail` calls wrapped in statepoints fail to verify due to
+      // the intrinsic using variadic arguments.
+      if (Call->isMustTailCall()) return false;
+      
       return true;
     }
     return false;

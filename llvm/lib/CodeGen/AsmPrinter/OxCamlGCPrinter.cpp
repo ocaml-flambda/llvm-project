@@ -140,6 +140,20 @@ static unsigned mapLLVMDwarfRegToOxCamlIndex(unsigned DwarfRegNum) {
   }
 }
 
+static uint64_t stackOffsetOfID(uint64_t ID) {
+  return ID & ((1ull << 16) - 1) & ~(1ull);
+}
+
+static uint64_t allocSizeOfID(uint64_t ID) {
+  return ID >> 16;
+}
+
+static bool IDHasAlloc(uint64_t ID) {
+  return ID & 1ull;
+}
+
+static const int allocMask = 2;
+
 bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) {
   MCStreamer &OS = *AP.OutStreamer;
   unsigned PtrSize = M.getDataLayout().getPointerSize(); // Can only be 8 for now
@@ -173,9 +187,15 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
 
     // frame_data
     uint64_t FrameSize = CSI.CSFunctionInfo.StaticStackSize;
-    if (CSI.ID != StatepointDirectives::DefaultStatepointID)
-      FrameSize += CSI.ID; // Stack offset from OxCaml
     FrameSize += PtrSize; // Return address
+
+    if (CSI.ID != StatepointDirectives::DefaultStatepointID) {
+      // Alloc bit
+      if (IDHasAlloc(CSI.ID)) FrameSize |= allocMask;
+      
+      // Stack offset from OxCaml
+      FrameSize += stackOffsetOfID(CSI.ID);
+    }
 
     if (FrameSize >= 1 << 16)
       report_fatal_error("Long frames not supported for OxCaml GC: FrameSize = "
@@ -236,6 +256,11 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
       unsigned OxCamlIndex = mapLLVMDwarfRegToOxCamlIndex(LO.DwarfRegNum);
       uint16_t EncodedReg = (OxCamlIndex << 1) + 1;
       OS.emitInt16(EncodedReg);
+    }
+
+    if (IDHasAlloc(CSI.ID)) {
+      OS.emitInt8(1);
+      OS.emitInt8(allocSizeOfID(CSI.ID));
     }
 
     OS.emitValueToAlignment(Align(PtrSize));
