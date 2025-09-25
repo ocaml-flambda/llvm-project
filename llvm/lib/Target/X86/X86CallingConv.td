@@ -766,11 +766,9 @@ def CC_X86_64_OxCaml_C_Call : CallingConv<[
 
 def CC_X86_64_OxCaml_C_Call_StackArgs : CallingConv<[
   // Calling conventions followed by [caml_c_call_stack_args] to additionally handle
-  // transfer of stack arguments. Note that this function normally takes a pair of
-  // pointers on the stack, but since LLVM makes it hard to directly meddle with the
-  // stack, this in reality calls yet anothr wrapper which calculates this range given
-  // the number of stack arguments in bytes in R12.
-  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, R12]>>,
+  // transfer of stack arguments. As before, RAX is the function ptr, and [R13, R12]
+  // delimit arguments on the stack
+  CCIfType<[i64], CCAssignToReg<[R14, R15, RAX, R13, R12]>>,
 
   // Follow C convention normally otherwise
   CCDelegateTo<CC_X86_64_C>
@@ -1322,7 +1320,7 @@ def CSR_64_OxCaml_WithoutFP : CalleeSavedRegs<(add)>;
 // R14 and R15 (and also R12 in the latter) are used as return registers,
 // so they aren't callee saved.
 def CSR_64_OxCaml_C_Call : CalleeSavedRegs<(sub CSR_64, R14, R15)>;
-def CSR_64_OxCaml_C_Call_StackArgs : CalleeSavedRegs<(sub CSR_64, R14, R15, R12)>;
+def CSR_64_OxCaml_C_Call_StackArgs : CalleeSavedRegs<(sub CSR_64, R14, R15, R13, R12)>;
 
 // See [Proc.destroyed_at_alloc_or_poll] for more details:
 // https://github.com/oxcaml/oxcaml/blob/main/backend/amd64/proc.ml#L457

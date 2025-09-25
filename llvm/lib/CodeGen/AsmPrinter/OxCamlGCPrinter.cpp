@@ -67,7 +67,7 @@ static std::string camlGlobalSymName(const Module &M, const char *Id) {
     }
   }
 
-  report_fatal_error("Module name not provided for OxCaml GC!");
+  report_fatal_error("[OxCamlGCPrinter] module name not provided");
 }
 
 static void emitCamlGlobal(const Module &M, MCStreamer &OS, const char *Id) {
@@ -135,10 +135,34 @@ static unsigned mapLLVMDwarfRegToOxCamlIndex(unsigned DwarfRegNum) {
   } else if (XMMBeginDwarf <= DwarfRegNum && DwarfRegNum <= XMMEndDwarf) {
     return DwarfRegNum - XMMBeginDwarf + XMMBeginOxCaml;
   } else {
-    report_fatal_error("Unrecognised DWARF register for use in OxCaml frametable: "
+    report_fatal_error("[OxCamlGCPrinter] unrecognised DWARF register: "
       + Twine(DwarfRegNum));
   }
 }
+
+// note that although `StackMaps` keeps `ID` as a 64-bit integer, anything
+// above 32 bits gets truncated, so we can't use them.
+
+static uint64_t stackOffsetOfID(uint64_t ID) {
+  return ID & ((1ull << 16) - 1) & ~(1ull);
+}
+
+static uint64_t allocSizeOfID(uint64_t ID) {
+  return ID >> 16;
+}
+
+static bool IDHasAlloc(uint64_t ID) {
+  return ID & 1ull;
+}
+
+// Every 8-bit entry emitted in the frametable is offset by 2 (since that is the
+// min allocation size). So, every slot can represent allocations of size [2, 257]
+static uint8_t encodeAllocSize(uint64_t AllocSize) {
+  return AllocSize - 2;
+}
+
+static const int AllocMask = 2;
+static const int FrameSizeReservedMask = 3; // Debug + Alloc
 
 bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) {
   MCStreamer &OS = *AP.OutStreamer;
@@ -173,12 +197,33 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
 
     // frame_data
     uint64_t FrameSize = CSI.CSFunctionInfo.StaticStackSize;
-    if (CSI.ID != StatepointDirectives::DefaultStatepointID)
-      FrameSize += CSI.ID; // Stack offset from OxCaml
     FrameSize += PtrSize; // Return address
 
+    // The LLVM IR emitted from OxCaml will always set the statepoint ID for
+    // calls to be wrapped in a statepoint. Also, note that DefaultStatepointID
+    // (= 0xABCDEF00 as of now) does not clash with the encoding we use since
+    // anything that sets the upper 16 bits will also set the bottom bit.
+    if (CSI.ID != StatepointDirectives::DefaultStatepointID) {
+      // Stack offset from OxCaml (in case LLVM says we have dynamic objects)
+      // This will get set to UINT64_MAX in `StackMaps.recordStackMapOpers` if
+      // that is the case.
+      if (CSI.CSFunctionInfo.FrameSize != UINT64_MAX) {
+        FrameSize += stackOffsetOfID(CSI.ID);
+      }
+
+      if (FrameSize & FrameSizeReservedMask) {
+        report_fatal_error("[OxCamlGCPrinter] frame size has bottom bits set: "
+          + Twine(FrameSize));
+      }
+      
+      // Alloc bit
+      if (IDHasAlloc(CSI.ID)) {
+        FrameSize |= AllocMask;
+      }
+    }
+
     if (FrameSize >= 1 << 16)
-      report_fatal_error("Long frames not supported for OxCaml GC: FrameSize = "
+      report_fatal_error("[OxCamlGCPrinter] frame size requires long frames: "
         + Twine(FrameSize));
     OS.emitInt16(FrameSize);
 
@@ -195,7 +240,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
 
     if (LiveCount >= 1 << 16) {
       // Very rude!
-      report_fatal_error("Long frames not supported for OxCaml GC: LiveCount = "
+      report_fatal_error("[OxCamlGCPrinter] live count requires long frames: "
         + Twine(LiveCount));
     }
     OS.emitInt16(LiveCount);
@@ -223,7 +268,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
         
         if (Offset < -(1 << 15) || Offset >= (1 << 15)) {
           // Very rude!
-          report_fatal_error("Stack offset too large for OxCaml frametable: "
+          report_fatal_error("[OxCamlGCPrinter] stack offset too large: "
             + Twine(Offset));
         }
         OS.emitInt16(static_cast<uint16_t>(Offset));
@@ -236,6 +281,51 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
       unsigned OxCamlIndex = mapLLVMDwarfRegToOxCamlIndex(LO.DwarfRegNum);
       uint16_t EncodedReg = (OxCamlIndex << 1) + 1;
       OS.emitInt16(EncodedReg);
+    }
+
+    if (IDHasAlloc(CSI.ID)) {
+      int AllocSize = allocSizeOfID(CSI.ID);
+
+      if (AllocSize < 2) {
+        report_fatal_error("[OxCamlGCPrinter] alloc size must at least be two!");
+      }
+
+      // Allocations can theoretically go up to 255 * 257 = 65535 words,
+      // but in practice comballoc never gives us allocations that exceed 255,
+      // so this handling isn't necessarily needed, but it's here just in case.
+
+      int MaxAllocSize = 257;
+
+      if (AllocSize % MaxAllocSize == 0) {
+        size_t NumAlloc = AllocSize / MaxAllocSize;
+        
+        OS.emitInt8(NumAlloc);
+        for (size_t i = 0; i < NumAlloc; ++i) {
+          OS.emitInt8(encodeAllocSize(MaxAllocSize));
+        }
+      } else if (AllocSize % MaxAllocSize == 1) {
+        // This is special since we cannot have allocations of size 1...
+        
+        // Guaranteed to be nonnegative
+        size_t NumMaxAlloc = AllocSize / MaxAllocSize - 1;
+        
+        OS.emitInt8(NumMaxAlloc + 2);
+        for (size_t i = 0; i < NumMaxAlloc; ++i) {
+          OS.emitInt8(encodeAllocSize(MaxAllocSize));
+        }
+        
+        OS.emitInt8(encodeAllocSize(MaxAllocSize - 1));
+        OS.emitInt8(encodeAllocSize(2));
+      } else {
+        size_t NumMaxAlloc = AllocSize / MaxAllocSize;
+        
+        OS.emitInt8(NumMaxAlloc + 1);
+        for (size_t i = 0; i < NumMaxAlloc; ++i) {
+          OS.emitInt8(encodeAllocSize(MaxAllocSize));
+        }
+        
+        OS.emitInt8(encodeAllocSize(AllocSize % MaxAllocSize));
+      }
     }
 
     OS.emitValueToAlignment(Align(PtrSize));
