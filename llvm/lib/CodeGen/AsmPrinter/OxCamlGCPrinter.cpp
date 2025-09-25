@@ -200,7 +200,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
     FrameSize += PtrSize; // Return address
 
     // The LLVM IR emitted from OxCaml will always set the statepoint ID for
-    // calls to be wrapped in a statepoint. Also, dote that DefaultStatepointID
+    // calls to be wrapped in a statepoint. Also, note that DefaultStatepointID
     // (= 0xABCDEF00 as of now) does not clash with the encoding we use since
     // anything that sets the upper 16 bits will also set the bottom bit.
     if (CSI.ID != StatepointDirectives::DefaultStatepointID) {
@@ -219,7 +219,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
     }
 
     if (FrameSize >= 1 << 16)
-      report_fatal_error("[OxCamlGCPrinter] frame size requires long frames:"
+      report_fatal_error("[OxCamlGCPrinter] frame size requires long frames: "
         + Twine(FrameSize));
     OS.emitInt16(FrameSize);
 
@@ -236,7 +236,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
 
     if (LiveCount >= 1 << 16) {
       // Very rude!
-      report_fatal_error("[OxCamlGCPrinter] live count requires long frames:"
+      report_fatal_error("[OxCamlGCPrinter] live count requires long frames: "
         + Twine(LiveCount));
     }
     OS.emitInt16(LiveCount);
