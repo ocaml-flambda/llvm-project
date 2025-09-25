@@ -204,8 +204,12 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
     // (= 0xABCDEF00 as of now) does not clash with the encoding we use since
     // anything that sets the upper 16 bits will also set the bottom bit.
     if (CSI.ID != StatepointDirectives::DefaultStatepointID) {
-      // Stack offset from OxCaml
-      FrameSize += stackOffsetOfID(CSI.ID);
+      // Stack offset from OxCaml (in case LLVM says we have dynamic objects)
+      // This will get set to UINT64_MAX in `StackMaps.recordStackMapOpers` if
+      // that is the case.
+      if (CSI.CSFunctionInfo.FrameSize != UINT64_MAX) {
+        FrameSize += stackOffsetOfID(CSI.ID);
+      }
 
       if (FrameSize & FrameSizeReservedMask) {
         report_fatal_error("[OxCamlGCPrinter] frame size has bottom bits set: "
