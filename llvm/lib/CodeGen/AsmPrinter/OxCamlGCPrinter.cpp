@@ -207,7 +207,7 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
       // Stack offset from OxCaml (in case LLVM says we have dynamic objects)
       // This will get set to UINT64_MAX in `StackMaps.recordStackMapOpers` if
       // that is the case.
-      if (CSI.CSFunctionInfo.StackSize != UINT64_MAX) {
+      if (CSI.CSFunctionInfo.StackSize == UINT64_MAX) {
         FrameSize += stackOffsetOfID(CSI.ID);
       }
 
