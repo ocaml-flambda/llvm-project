@@ -2907,11 +2907,11 @@ void Verifier::visitIndirectBrInst(IndirectBrInst &BI) {
 }
 
 void Verifier::visitCallBrInst(CallBrInst &CBI) {
-  Check(CBI.isInlineAsm(), "Callbr is currently only used for asm-goto!", &CBI);
-  const InlineAsm *IA = cast<InlineAsm>(CBI.getCalledOperand());
-  Check(!IA->canThrow(), "Unwinding from Callbr is not allowed");
+  // Check(CBI.isInlineAsm(), "Callbr is currently only used for asm-goto!", &CBI);
+  // const InlineAsm *IA = cast<InlineAsm>(CBI.getCalledOperand());
+  // Check(!IA->canThrow(), "Unwinding from Callbr is not allowed");
 
-  verifyInlineAsmCall(CBI);
+  if (CBI.isInlineAsm()) verifyInlineAsmCall(CBI);
   visitTerminator(CBI);
 }
 

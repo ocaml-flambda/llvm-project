@@ -2640,8 +2640,13 @@ bool IRTranslator::translateInvoke(const User &U,
 
 bool IRTranslator::translateCallBr(const User &U,
                                    MachineIRBuilder &MIRBuilder) {
-  // FIXME: Implement this.
-  return false;
+  const CallBrInst &I = cast<CallBrInst>(U);
+  
+  if (I.isInlineAsm()) {
+    return translateInlineAsm(I, MIRBuilder);
+  } else {
+    return translateCallBase(I, MIRBuilder);
+  }
 }
 
 bool IRTranslator::translateLandingPad(const User &U,
