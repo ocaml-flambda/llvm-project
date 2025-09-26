@@ -3044,8 +3044,8 @@ void SelectionDAGBuilder::visitCallBr(const CallBrInst &I) {
              {LLVMContext::OB_deopt, LLVMContext::OB_funclet}) &&
          "Cannot lower callbrs with arbitrary operand bundles yet!");
 
-  assert(I.isInlineAsm() && "Only know how to handle inlineasm callbr");
-  visitInlineAsm(I);
+  // assert(I.isInlineAsm() && "Only know how to handle inlineasm callbr");
+  visitCall(I);
   CopyToExportRegsIfNeeded(&I);
 
   // Retrieve successors.
@@ -8092,7 +8092,7 @@ void SelectionDAGBuilder::processIntegerCallValue(const Instruction &I,
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitMemCmpBCmpCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitMemCmpBCmpCall(const CallBase &I) {
   const Value *LHS = I.getArgOperand(0), *RHS = I.getArgOperand(1);
   const Value *Size = I.getArgOperand(2);
   const ConstantSDNode *CSize = dyn_cast<ConstantSDNode>(getValue(Size));
@@ -8184,7 +8184,7 @@ bool SelectionDAGBuilder::visitMemCmpBCmpCall(const CallInst &I) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitMemChrCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitMemChrCall(const CallBase &I) {
   const Value *Src = I.getArgOperand(0);
   const Value *Char = I.getArgOperand(1);
   const Value *Length = I.getArgOperand(2);
@@ -8208,7 +8208,7 @@ bool SelectionDAGBuilder::visitMemChrCall(const CallInst &I) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitMemPCpyCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitMemPCpyCall(const CallBase &I) {
   SDValue Dst = getValue(I.getArgOperand(0));
   SDValue Src = getValue(I.getArgOperand(1));
   SDValue Size = getValue(I.getArgOperand(2));
@@ -8249,7 +8249,7 @@ bool SelectionDAGBuilder::visitMemPCpyCall(const CallInst &I) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitStrCpyCall(const CallInst &I, bool isStpcpy) {
+bool SelectionDAGBuilder::visitStrCpyCall(const CallBase &I, bool isStpcpy) {
   const Value *Arg0 = I.getArgOperand(0), *Arg1 = I.getArgOperand(1);
 
   const SelectionDAGTargetInfo &TSI = DAG.getSelectionDAGInfo();
@@ -8272,7 +8272,7 @@ bool SelectionDAGBuilder::visitStrCpyCall(const CallInst &I, bool isStpcpy) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitStrCmpCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitStrCmpCall(const CallBase &I) {
   const Value *Arg0 = I.getArgOperand(0), *Arg1 = I.getArgOperand(1);
 
   const SelectionDAGTargetInfo &TSI = DAG.getSelectionDAGInfo();
@@ -8295,7 +8295,7 @@ bool SelectionDAGBuilder::visitStrCmpCall(const CallInst &I) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitStrLenCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitStrLenCall(const CallBase &I) {
   const Value *Arg0 = I.getArgOperand(0);
 
   const SelectionDAGTargetInfo &TSI = DAG.getSelectionDAGInfo();
@@ -8316,7 +8316,7 @@ bool SelectionDAGBuilder::visitStrLenCall(const CallInst &I) {
 /// normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitStrNLenCall(const CallInst &I) {
+bool SelectionDAGBuilder::visitStrNLenCall(const CallBase &I) {
   const Value *Arg0 = I.getArgOperand(0), *Arg1 = I.getArgOperand(1);
 
   const SelectionDAGTargetInfo &TSI = DAG.getSelectionDAGInfo();
@@ -8338,7 +8338,7 @@ bool SelectionDAGBuilder::visitStrNLenCall(const CallInst &I) {
 /// false and it will be lowered like a normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitUnaryFloatCall(const CallInst &I,
+bool SelectionDAGBuilder::visitUnaryFloatCall(const CallBase &I,
                                               unsigned Opcode) {
   // We already checked this call's prototype; verify it doesn't modify errno.
   if (!I.onlyReadsMemory())
@@ -8358,7 +8358,7 @@ bool SelectionDAGBuilder::visitUnaryFloatCall(const CallInst &I,
 /// false, and it will be lowered like a normal call.
 /// The caller already checked that \p I calls the appropriate LibFunc with a
 /// correct prototype.
-bool SelectionDAGBuilder::visitBinaryFloatCall(const CallInst &I,
+bool SelectionDAGBuilder::visitBinaryFloatCall(const CallBase &I,
                                                unsigned Opcode) {
   // We already checked this call's prototype; verify it doesn't modify errno.
   if (!I.onlyReadsMemory())
@@ -8374,7 +8374,7 @@ bool SelectionDAGBuilder::visitBinaryFloatCall(const CallInst &I,
   return true;
 }
 
-void SelectionDAGBuilder::visitCall(const CallInst &I) {
+void SelectionDAGBuilder::visitCall(const CallBase &I) {
   // Handle inline assembly differently.
   if (I.isInlineAsm()) {
     visitInlineAsm(I);
@@ -8392,7 +8392,8 @@ void SelectionDAGBuilder::visitCall(const CallInst &I) {
           IID = II->getIntrinsicID(F);
 
       if (IID) {
-        visitIntrinsicCall(I, IID);
+        assert(isa<CallInst>(I) && "Don't know how to handle intrinsic callbr");
+        visitIntrinsicCall(cast<CallInst>(I), IID);
         return;
       }
     }

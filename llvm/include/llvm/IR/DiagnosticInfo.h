@@ -20,6 +20,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SourceMgr.h"
@@ -1096,7 +1097,7 @@ public:
   }
 };
 
-void diagnoseDontCall(const CallInst &CI);
+void diagnoseDontCall(const CallBase &CI);
 
 class DiagnosticInfoDontCall : public DiagnosticInfo {
   StringRef CalleeName;
