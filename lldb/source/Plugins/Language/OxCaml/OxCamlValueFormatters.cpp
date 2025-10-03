@@ -326,8 +326,8 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
 static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp,
                                const ExecutionContextRef &exe_ctx_ref) {
-  // Placeholder: OCaml object instance
-  stream.Printf("<object>");
+  // OCaml object: display word size and address
+  stream.Printf("<object|%" PRIu64 " words|%p>", wosize, (void*)value);
   return true;
 }
 
@@ -362,8 +362,8 @@ static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
 static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize,
                                  DataExtractor& data, lldb::ProcessSP process_sp,
                                  const ExecutionContextRef &exe_ctx_ref) {
-  // Placeholder: OCaml abstract value
-  stream.Printf("<abstract>");
+  // OCaml abstract value: display word size and address
+  stream.Printf("<abstract|%" PRIu64 " words|%p>", wosize, (void*)value);
   return true;
 }
 
