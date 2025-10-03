@@ -119,6 +119,22 @@ static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
                                uint64_t data_ptr, uint64_t wosize,
                                lldb::ProcessSP process_sp);
 
+// Internal helper function that contains the core dispatch logic
+// Used by FormatOxCamlValue and FormatOxCamlForward for recursive formatting
+static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
+                                      DataExtractor& data,
+                                      lldb::ProcessSP process_sp,
+                                      const ExecutionContextRef &exe_ctx_ref) {
+  // Check LSB for immediate vs pointer discrimination
+  if ((value & 0x1) == 1) {
+    // LSB = 1: Immediate value (tagged integer, unit, etc.)
+    return FormatOxCamlImmediate(stream, value, process_sp, exe_ctx_ref);
+  } else {
+    // LSB = 0: Pointer to heap block
+    return FormatOxCamlPointer(stream, value, data, process_sp, exe_ctx_ref);
+  }
+}
+
 bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
                                                          OxCamlValueType* value_type,
                                                          DataExtractor& data,
@@ -142,14 +158,8 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
     return false;
   }
 
-  // Check LSB for immediate vs pointer discrimination
-  if ((value & 0x1) == 1) {
-    // LSB = 1: Immediate value (tagged integer, unit, etc.)
-    return FormatOxCamlImmediate(stream, value, process_sp, exe_ctx_ref);
-  } else {
-    // LSB = 0: Pointer to heap block
-    return FormatOxCamlPointer(stream, value, data, process_sp, exe_ctx_ref);
-  }
+  // Delegate to internal helper
+  return FormatOxCamlValueInternal(stream, value, data, process_sp, exe_ctx_ref);
 }
 
 static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
@@ -230,58 +240,84 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
 static bool FormatOxCamlLazy(Stream &stream, uint64_t value, uint64_t wosize,
                              DataExtractor& data, lldb::ProcessSP process_sp,
                              const ExecutionContextRef &exe_ctx_ref) {
-  // Placeholder: OCaml lazy value
-  stream.Printf("<lazy>");
+  // OCaml lazy value: read computation pointer and recursively format contents
+  Status error;
+
+  // Read computation pointer from the first word (offset 0 from value base)
+  lldb::addr_t computation_ptr = process_sp->ReadPointerFromMemory(value, error);
+  if (error.Fail()) {
+    stream.Printf("<lazy, computation ptr unreadable>");
+    return true;
+  }
+
+  // Check if the lazy value is forced (has a valid pointer)
+  // Unforced lazy values typically have special marker values
+  if (computation_ptr == 0) {
+    stream.Printf("<lazy, unforced>");
+    return true;
+  }
+
+  // Create DataExtractor with the computation pointer value
+  uint64_t computation_value = computation_ptr;
+  DataExtractor pointed_data(&computation_value, 8, process_sp->GetByteOrder(), 8);
+
+  // Format using OCaml syntax: "Lazy.from_val contents"
+  stream.Printf("Lazy.from_val ");
+
+  // Recursively format the pointed value using the internal helper
+  FormatOxCamlValueInternal(stream, computation_ptr, pointed_data,
+                           process_sp, exe_ctx_ref);
+
   return true;
 }
 
 static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
                                 DataExtractor& data, lldb::ProcessSP process_sp,
-                                const ExecutionContextRef &exe_ctx_ref, 
+                                const ExecutionContextRef &exe_ctx_ref,
                                 bool is_infix) {
   Status error;
   const uint64_t word_size = 8;
   const char* closure_type = is_infix ? "infix closure" : "closure";
-  
+
   // Read closinfo word from first data word (offset 8 from value)
   uint64_t closinfo = process_sp->ReadUnsignedIntegerFromMemory(value + word_size, word_size, 0, error);
   if (error.Fail()) {
     stream.Printf("<%s, code ptr unreadable>", closure_type);
     return true;
   }
-  
+
   // Extract arity from top 8 bits of closinfo
   uint8_t arity = closinfo >> 56;
-  
+
   // Calculate code pointer offset based on arity
   // If arity is 0 or 1, offset is 0; otherwise offset is 2
   int offset = (arity == 0 || arity == 1) ? 0 : 2;
-  
+
   // Read full application code pointer
   lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(value + offset * word_size, error);
   if (error.Fail()) {
     stream.Printf("<%s, code ptr unreadable>", closure_type);
     return true;
   }
-  
+
   // Try to resolve function name from code pointer
   lldb::TargetSP target_sp = exe_ctx_ref.GetTargetSP();
   if (!target_sp) {
     stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
     return true;
   }
-  
+
   Address addr;
   if (!addr.SetLoadAddress(code_ptr, target_sp.get())) {
     stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
     return true;
   }
-  
+
   // Create a string stream to capture the address output
   StreamString addr_stream;
-  addr.Dump(&addr_stream, nullptr, Address::DumpStyleResolvedDescription, 
+  addr.Dump(&addr_stream, nullptr, Address::DumpStyleResolvedDescription,
             Address::DumpStyleFileAddress, 8, false);
-  
+
   // Display resolved function name using new format
   stream.Printf("<%s>@%s", closure_type, addr_stream.GetData());
   return true;
@@ -298,9 +334,29 @@ static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
 static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
                                 DataExtractor& data, lldb::ProcessSP process_sp,
                                 const ExecutionContextRef &exe_ctx_ref) {
-  // Placeholder: OCaml forwarding pointer (GC)
-  stream.Printf("<forward>");
-  return true;
+  // OCaml forwarding pointer: transparently display the target value
+  Status error;
+
+  // Read forwarding pointer from the first word (offset 0 from value base)
+  lldb::addr_t forward_ptr = process_sp->ReadPointerFromMemory(value, error);
+  if (error.Fail()) {
+    stream.Printf("<forward, ptr unreadable>");
+    return true;
+  }
+
+  // Check for null forwarding pointer
+  if (forward_ptr == 0) {
+    stream.Printf("<forward, null ptr>");
+    return true;
+  }
+
+  uint64_t forwarded_value = forward_ptr;
+  DataExtractor forwarded_data(&forwarded_value, 8, process_sp->GetByteOrder(), 8);
+
+  // Transparently forward to the internal helper - no wrapper tags
+  // This makes forward pointers completely invisible to the user
+  return FormatOxCamlValueInternal(stream, forward_ptr, forwarded_data,
+                                   process_sp, exe_ctx_ref);
 }
 
 static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize,
