@@ -146,8 +146,16 @@ static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
   } else {
     // LSB = 0: Pointer to heap block
     // Check depth limit before processing blocks (central depth check)
-    if (depth == 0) {
-      stream.Printf("<max depth reached>");
+    if (depth <= 0) {
+      // Read header to get tag information for depth-limited display
+      Status error;
+      uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(value - 8, 8, 0, error);
+      if (error.Fail()) {
+        stream.Printf("<max depth reached>");
+        return true;
+      }
+      uint8_t tag = header & 0xff;
+      stream.Printf("[ tag = %u, addr = %p ]", tag, (void*)value);
       return true;
     }
     // Process the block with decremented depth
@@ -267,8 +275,36 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
                                      lldb::ProcessSP process_sp,
                                      const ExecutionContextRef &exe_ctx_ref,
                                      uint32_t depth) {
-  // Placeholder: Generic OCaml block (variant, record, array, etc.)
-  stream.Printf("<block>");
+  // Generic OCaml block: recursively display all fields
+  // Format: [ tag = N | field1, field2, ... ]
+  stream.Printf("[ tag = %u | ", tag);
+
+  Status error;
+  const uint64_t word_size = 8;
+
+  for (uint64_t i = 0; i < wosize; i++) {
+    if (i > 0) {
+      stream.Printf(", ");
+    }
+
+    // Read field value from memory
+    uint64_t field_value = process_sp->ReadUnsignedIntegerFromMemory(
+        value + i * word_size, word_size, 0, error);
+
+    if (error.Fail()) {
+      stream.Printf("<unreadable>");
+      continue;
+    }
+
+    // Create DataExtractor for recursive formatting
+    DataExtractor field_data(&field_value, 8, process_sp->GetByteOrder(), 8);
+
+    // Recursively format the field (depth already decremented by caller)
+    FormatOxCamlValueInternal(stream, field_value, field_data,
+                              process_sp, exe_ctx_ref, depth);
+  }
+
+  stream.Printf(" ]");
   return true;
 }
 
