@@ -255,6 +255,7 @@ static bool lldb_skip_name(llvm::StringRef mangled,
 
   // No filters for this scheme yet. Include all names in indexing.
   case Mangled::eManglingSchemeMSVC:
+  case Mangled::eManglingSchemeOxCaml:
   case Mangled::eManglingSchemeRustV0:
   case Mangled::eManglingSchemeD:
     return false;

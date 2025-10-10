@@ -57,6 +57,9 @@ char *microsoftDemangle(const char *mangled_name, size_t *n_read, char *buf,
                         size_t *n_buf, int *status,
                         MSDemangleFlags Flags = MSDF_None);
 
+// Demangles an OxCaml mangled symbol
+char *oxcamlDemangle(const char *MangledName);
+
 // Demangles a Rust v0 mangled symbol.
 char *rustDemangle(const char *MangledName);
 

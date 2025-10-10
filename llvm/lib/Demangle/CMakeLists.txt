@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMDemangle
   ItaniumDemangle.cpp
   MicrosoftDemangle.cpp
   MicrosoftDemangleNodes.cpp
+  OxCamlDemangle.cpp
   RustDemangle.cpp
   DLangDemangle.cpp
 
