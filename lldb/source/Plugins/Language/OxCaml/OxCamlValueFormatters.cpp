@@ -57,7 +57,8 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
                                 const ExecutionContextRef &exe_ctx_ref,
                                 uint32_t depth);
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag,
-                                     uint64_t wosize, DataExtractor& data,
+                                     uint64_t scannable_wosize, uint64_t non_scannable_wosize,
+                                     DataExtractor& data,
                                      lldb::ProcessSP process_sp,
                                      const ExecutionContextRef &exe_ctx_ref,
                                      uint32_t depth);
@@ -238,11 +239,24 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
     return false;
   }
 
-  // Extract tag (lower 8 bits) and wosize (upper bits >> 10)
-  uint8_t tag = header & 0xff;
-  uint64_t wosize = header >> 10;
+  // Extract header fields
+  // Header layout for OxCaml (HEADER_RESERVED_BITS = 8):
+  //   bits 0-7:   tag (HEADER_TAG_BITS = 8)
+  //   bits 8-9:   color (HEADER_COLOR_BITS = 2)
+  //   bits 10-55: wosize (HEADER_WOSIZE_BITS = 64 - 8 - 2 - 8 = 46)
+  //   bits 56-63: reserved (HEADER_RESERVED_BITS = 8)
+  const uint64_t HEADER_TAG_MASK = 0xFF;
+  const uint64_t HEADER_WOSIZE_SHIFT = 10;
+  const uint64_t HEADER_RESERVED_SHIFT = 56;
+  const uint64_t HEADER_WOSIZE_BITS = 46;
+  const uint64_t HEADER_WOSIZE_MASK = (((1ULL << HEADER_WOSIZE_BITS) - 1ULL) << HEADER_WOSIZE_SHIFT);
 
-  // Dispatch based on tag
+  uint8_t tag = header & HEADER_TAG_MASK;
+  uint64_t wosize = (header & HEADER_WOSIZE_MASK) >> HEADER_WOSIZE_SHIFT;
+  uint8_t reserved = header >> HEADER_RESERVED_SHIFT;
+
+
+  // Dispatch based on tag; none of the special tags support mixed blocks
   switch (tag) {
     case static_cast<uint8_t>(OxCamlSpecialTag::Lazy_tag):
       return FormatOxCamlLazy(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
@@ -264,35 +278,54 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
       return FormatOxCamlDoubleArray(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
     case static_cast<uint8_t>(OxCamlSpecialTag::Custom_tag):
       return FormatOxCamlCustom(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    default:
+    default: {
       // Generic block (tag < 246)
-      return FormatOxCamlGenericBlock(stream, value, tag, wosize, data, process_sp, exe_ctx_ref, depth);
+      // For mixed blocks, reserved > 0 indicates scannable_wosize
+      // scannable_wosize = reserved - 1 (number of OCaml value fields)
+      // Remaining fields are unboxed (float#, int#, etc.)
+      uint64_t scannable_wosize = (reserved > 0) ? (reserved - 1) : wosize;
+      uint64_t non_scannable_wosize = wosize - scannable_wosize;
+      // Use scannable_wosize to only format OCaml value fields, not unboxed data
+      return FormatOxCamlGenericBlock(stream, value, tag, scannable_wosize, non_scannable_wosize, data, process_sp, exe_ctx_ref, depth);
+    }
   }
 }
 
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag,
-                                     uint64_t wosize, DataExtractor& data,
+                                     uint64_t scannable_wosize, uint64_t non_scannable_wosize,
+                                     DataExtractor& data,
                                      lldb::ProcessSP process_sp,
                                      const ExecutionContextRef &exe_ctx_ref,
                                      uint32_t depth) {
-  // Generic OCaml block: recursively display all fields
-  // Format: [ tag = N | field1, field2, ... ]
-  stream.Printf("[ tag = %u | ", tag);
+  // Generic OCaml block: recursively display scannable fields
+  // Format: [ tag = N | field1, field2, ... ] or [ tag = N; non value fields: M | field1, field2, ... ]
+  if (non_scannable_wosize > 0) {
+    stream.Printf("[ tag = %u; non value fields: %llu) | ", tag, (unsigned long long)non_scannable_wosize);
+  } else {
+    stream.Printf("[ tag = %u | ", tag);
+  }
 
   Status error;
   const uint64_t word_size = 8;
 
-  for (uint64_t i = 0; i < wosize; i++) {
+  // Only format scannable fields (OCaml values), skip non-scannable fields (unboxed data)
+  for (uint64_t i = 0; i < scannable_wosize; i++) {
     if (i > 0) {
       stream.Printf(", ");
     }
 
-    // Read field value from memory
+    // Calculate the address we're about to read
+    uint64_t read_address = value + i * word_size;
+
+    // Read field value from memory with bounds checking
     uint64_t field_value = process_sp->ReadUnsignedIntegerFromMemory(
-        value + i * word_size, word_size, 0, error);
+        read_address, word_size, 0, error);
 
     if (error.Fail()) {
-      stream.Printf("<unreadable>");
+      Log *log = GetLog(OxCamlLog::Formatting);
+      LLDB_LOG(log, "ERROR: Failed to read field {0} at address 0x{1:x}: {2}",
+               i, read_address, error.AsCString());
+      stream.Printf("<unreadable at 0x%llx>", (unsigned long long)read_address);
       continue;
     }
 
