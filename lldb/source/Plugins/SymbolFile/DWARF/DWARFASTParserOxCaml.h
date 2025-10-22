@@ -75,6 +75,7 @@ private:
   std::unique_ptr<lldb_private::OxCamlType> ParsePointerType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseReferenceType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseStructureType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
+  std::unique_ptr<lldb_private::OxCamlType> ParseArrayType(const lldb_private::SymbolContext &sc, const DWARFDIE &die);
   std::unique_ptr<lldb_private::OxCamlType> ParseUnknownType(const DWARFDIE &die);
   
   // New methods for variant support

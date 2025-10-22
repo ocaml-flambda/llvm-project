@@ -387,6 +387,12 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
     return true;
   }
 
+  // Special case: Arrays are variable-sized and need the raw pointer value
+  // Don't dereference - just pass the data (containing pointer) to FormatArray
+  if (pointed_to->GetKind() == OxCamlType::Array) {
+    return FormatValue(stream, pointed_to, data, process_sp, exe_ctx_ref);
+  }
+
   // Read the pointed-to memory into a new DataExtractor
   uint64_t size = pointed_to->GetByteSize();
   if (size == 0) {
@@ -673,6 +679,109 @@ static bool FormatVariantPart(Stream &stream, const OxCamlVariantPart& variant_p
   }
 }
 
+// Format array values by dereferencing the pointer and recursively formatting elements
+static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
+                       DataExtractor& data, lldb::ProcessSP process_sp,
+                       const ExecutionContextRef &exe_ctx_ref) {
+  Log *log = GetLog(OxCamlLog::Formatting);
+
+  // Read the array pointer value (8 bytes)
+  lldb::offset_t offset = 0;
+  uint64_t array_ptr = data.GetU64(&offset);
+
+  if (offset == 0) {
+    stream.Printf("<could not read array pointer>");
+    return false;
+  }
+
+  LLDB_LOG(log, "FormatArray: array pointer = 0x{0:x}", array_ptr);
+
+  // Check for null or immediate values (not actual pointers)
+  if (array_ptr == 0 || array_ptr & 1) {
+    // CR sspies: Log an error here.
+    stream.Printf("<0x%" PRIx64 ">", array_ptr);
+    return true;
+  }
+
+
+  // Read OCaml block header at array_ptr - 8
+  Status error;
+  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(array_ptr - 8, 8, 0, error);
+
+  if (error.Fail()) {
+    LLDB_LOG(log, "FormatArray: Failed to read array header at 0x{0:x}", array_ptr - 8);
+    stream.Printf("<0x%" PRIx64 ">", array_ptr);
+    return true;
+  }
+
+  // Extract wosize (number of elements) from header
+  const uint64_t HEADER_WOSIZE_SHIFT = 10;
+  const uint64_t HEADER_WOSIZE_BITS = 46;
+  const uint64_t HEADER_WOSIZE_MASK = (((1ULL << HEADER_WOSIZE_BITS) - 1ULL) << HEADER_WOSIZE_SHIFT);
+  const uint64_t HEADER_TAG_MASK = 0xFF;
+
+  uint64_t wosize = (header & HEADER_WOSIZE_MASK) >> HEADER_WOSIZE_SHIFT;
+  uint8_t tag = header & HEADER_TAG_MASK;
+
+  LLDB_LOG(log, "FormatArray: wosize = {0}, tag = {1}", wosize, tag);
+
+  // Format as OCaml array syntax: [| elem1; elem2; ... |]
+  stream.Printf("[| ");
+
+  OxCamlType* element_type = array_type->GetElementType();
+  uint64_t stride = array_type->GetStride();
+
+  // OCaml float arrays (tag 254) store unboxed 8-byte IEEE 754 doubles
+  const uint8_t DOUBLE_ARRAY_TAG = 254;
+
+  if (tag == DOUBLE_ARRAY_TAG) {
+    // Float arrays: tag 254 always contains 8-byte doubles
+    // wosize is the number of floats (1 word per float)
+    for (uint64_t i = 0; i < wosize; i++) {
+      if (i > 0) stream.Printf("; ");
+
+      // Read 8-byte float at array_ptr + (i * 8)
+      uint64_t element_address = array_ptr + (i * 8);
+      uint64_t element_value = process_sp->ReadUnsignedIntegerFromMemory(element_address, 8, 0, error);
+
+      if (error.Fail()) {
+        stream.Printf("<error>");
+        continue;
+      }
+
+      DataExtractor element_data(&element_value, 8, data.GetByteOrder(), data.GetAddressByteSize());
+      OxCamlUnboxedBaseType synthetic_float(0, std::nullopt, 8, OxCamlUnboxedBaseType::Float);
+      FormatUnboxedBase(stream, &synthetic_float, element_data, process_sp);
+    }
+  } else {
+    // Regular arrays: calculate number of elements from wosize and stride
+    // wosize is number of words, total bytes = wosize * 8
+    uint64_t total_bytes = wosize * 8;
+    uint64_t num_elements = total_bytes / stride;
+
+    for (uint64_t i = 0; i < num_elements; i++) {
+      if (i > 0) stream.Printf("; ");
+
+      // Read element at array_ptr + (i * stride)
+      uint64_t element_address = array_ptr + (i * stride);
+
+      std::vector<uint8_t> buffer(stride);
+      size_t bytes_read = process_sp->ReadMemory(element_address, buffer.data(), stride, error);
+
+      if (bytes_read != stride || error.Fail()) {
+        stream.Printf("<error>");
+        continue;
+      }
+
+      DataExtractor element_data(buffer.data(), stride, data.GetByteOrder(), data.GetAddressByteSize());
+      FormatValue(stream, element_type, element_data, process_sp, exe_ctx_ref);
+    }
+  }
+
+  stream.Printf(" |]");
+  return true;
+}
+
 // Format structure values using DataExtractor for members
 //
 // Special case for OCaml variants:
@@ -748,6 +857,8 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
       return FormatTypedef(stream, static_cast<OxCamlTypedefType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::Structure:
       return FormatStructure(stream, static_cast<OxCamlStructureType*>(type), data, process_sp, exe_ctx_ref);
+    case OxCamlType::Array:
+      return FormatArray(stream, static_cast<OxCamlArrayType*>(type), data, process_sp, exe_ctx_ref);
     case OxCamlType::Placeholder:
       return FormatPlaceholder(stream, static_cast<OxCamlPlaceholderType*>(type), data, process_sp);
     case OxCamlType::Unknown:
@@ -773,9 +884,9 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   OxCamlType* type = ExtractOxCamlType(compiler_type);
 
   lldb::ProcessSP process_sp = valobj.GetProcessSP();
-  
+
   // Get ExecutionContext for address resolution
   const ExecutionContextRef &exe_ctx_ref = valobj.GetExecutionContextRef();
-  
+
   return FormatValue(stream, type, data, process_sp, exe_ctx_ref);
 }

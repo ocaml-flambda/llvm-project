@@ -294,6 +294,15 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
           output << " (structure, " << st->GetMembers().size() << " members, " << actual_type->GetByteSize() << " bytes)";
         }
         break;
+      case OxCamlType::Array:
+        {
+          auto* at = static_cast<OxCamlArrayType*>(actual_type);
+          output << " (array of " << at->GetElementType()->GetDisplayName();
+          if (at->GetCount().has_value())
+            output << ", count=" << at->GetCount().value();
+          output << ", stride=" << at->GetStride() << " bytes)";
+        }
+        break;
       case OxCamlType::Placeholder:
         output << " (placeholder - parsing in progress)";
         break;

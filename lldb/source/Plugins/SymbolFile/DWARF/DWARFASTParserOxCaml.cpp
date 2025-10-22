@@ -116,6 +116,10 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
       LLDB_LOG(log, "ParseTypeFromDWARF: Parsing structure type");
       new_type = ParseStructureType(sc, die);
       break;
+    case llvm::dwarf::DW_TAG_array_type:
+      LLDB_LOG(log, "ParseTypeFromDWARF: Parsing array type");
+      new_type = ParseArrayType(sc, die);
+      break;
     default:
       LLDB_LOG(log, "ParseTypeFromDWARF: Unsupported DWARF tag: 0x{0:x} - creating unknown type", die.Tag());
       new_type = ParseUnknownType(die);
@@ -703,6 +707,58 @@ std::optional<OxCamlVariantPart> DWARFASTParserOxCaml::ParseVariantPart(const Sy
   LLDB_LOG(log, "ParseVariantPart: Created variant part with {0} variants", variants.size());
 
   return OxCamlVariantPart{std::move(*discriminator_member), std::move(variants)};
+}
+
+std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseArrayType(const SymbolContext &sc, const DWARFDIE &die) {
+  Log *log = GetLog(OxCamlLog::TypeParsing);
+  user_id_t die_id = die.GetID();
+
+  LLDB_LOG(log, "ParseArrayType: DIE 0x{0:x16}", die_id);
+
+  // Get the element type via DW_AT_type
+  DWARFDIE element_type_die = die.GetAttributeValueAsReferenceDIE(llvm::dwarf::DW_AT_type);
+  if (!element_type_die.IsValid()) {
+    LLDB_LOG(log, "ParseArrayType: No valid element type found");
+    return nullptr;
+  }
+
+  // Extract optional name
+  std::optional<std::string> name = ExtractTypeName(die);
+
+  // Parse the element type (recursively)
+  ParseTypeFromDWARF(sc, element_type_die, nullptr);
+
+  // Get the Reference
+  auto element_type_opt = m_oxcaml_typesystem.GetType(element_type_die.GetID());
+  if (!element_type_opt.has_value()) {
+    llvm::report_fatal_error("ParseArrayType: Failed to get reference for element type");
+  }
+  Reference<OxCamlType>* element_type_ref = element_type_opt.value();
+
+  // Get byte stride (default to 8 bytes for OCaml pointers)
+  uint64_t byte_stride = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_stride, 8);
+
+  // Look for DW_TAG_subrange_type child to get array count
+  std::optional<uint64_t> count;
+  DWARFDIE child_die = die.GetFirstChild();
+  while (child_die.IsValid()) {
+    if (child_die.Tag() == llvm::dwarf::DW_TAG_subrange_type) {
+      // Get DW_AT_count attribute
+      uint64_t subrange_count = child_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_count, UINT64_MAX);
+      if (subrange_count != UINT64_MAX) {
+        count = subrange_count;
+        LLDB_LOG(log, "ParseArrayType: Found subrange count: {0}", subrange_count);
+      }
+      break;  // Only process first subrange
+    }
+    child_die = child_die.GetSibling();
+  }
+
+  LLDB_LOG(log, "ParseArrayType: Creating OxCamlArrayType with element type {0}, stride {1}, count {2}",
+           element_type_ref->get()->GetDisplayName(), byte_stride,
+           count.has_value() ? std::to_string(count.value()) : "unknown");
+
+  return std::make_unique<OxCamlArrayType>(die_id, std::move(name), element_type_ref, count, byte_stride);
 }
 
 // Parse unknown/unsupported DWARF types

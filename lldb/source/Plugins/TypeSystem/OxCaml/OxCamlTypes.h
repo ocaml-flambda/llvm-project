@@ -28,7 +28,7 @@ class OxCamlEnumType;
 // OxCamlType class hierarchy
 class OxCamlType {
 public:
-  enum Kind { Value, UnboxedBase, Typedef, Enum, Pointer, Structure, Placeholder, Unknown };
+  enum Kind { Value, UnboxedBase, Typedef, Enum, Pointer, Structure, Array, Placeholder, Unknown };
 
   OxCamlType(Kind k, lldb::user_id_t die_id, std::optional<std::string> name)
     : m_kind(k), m_die_id(die_id), m_name(std::move(name)) {}
@@ -219,6 +219,30 @@ public:
 protected:
   std::string GetDefaultDisplayName() const override {
     return GetPointedToType()->GetDisplayName() + " *";
+  }
+};
+
+class OxCamlArrayType : public OxCamlType {
+  Reference<OxCamlType>* m_element_type_ref;  // Weak pointer to registry-owned Reference
+  std::optional<uint64_t> m_count;             // Element count from DW_TAG_subrange_type
+  uint64_t m_stride;                           // Byte stride (typically 8 for OCaml)
+
+public:
+  OxCamlArrayType(lldb::user_id_t die_id, std::optional<std::string> name,
+                  Reference<OxCamlType>* element_type_ref,
+                  std::optional<uint64_t> count, uint64_t stride)
+    : OxCamlType(Array, die_id, std::move(name)),
+      m_element_type_ref(element_type_ref), m_count(count), m_stride(stride) {}
+
+  OxCamlType* GetElementType() const { return m_element_type_ref->get(); }
+  std::optional<uint64_t> GetCount() const { return m_count; }
+  uint64_t GetStride() const { return m_stride; }
+  uint64_t GetByteSize() const override { return 8; }  // Arrays are pointers in OCaml
+
+protected:
+  std::string GetDefaultDisplayName() const override {
+    // Use OCaml array syntax: "element_type array"
+    return GetElementType()->GetDisplayName() + " array";
   }
 };
 
