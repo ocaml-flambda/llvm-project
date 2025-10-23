@@ -38,31 +38,15 @@ All ~39 pure virtual methods from TypeSystem base class must be implemented, eve
 
 ### Universal Format Specifier Pattern
 The TypeSystemOxCaml uses "ocaml_value" as a universal format specifier:
-- `GetTypeName()` always returns "ocaml_value" for any OCaml type
-- This ensures all types match the single formatter in the Language plugin
-- Actual type information is preserved in the OxCamlType hierarchy
+- `GetTypeName()` always returns "ocaml_value" for all OCaml types
+- This ensures all types match a single formatter registration in the Language plugin
+- The formatter then performs runtime type dispatch based on `OxCamlType::GetKind()`
+- This pattern enables dynamic dispatch with single registration point
+- Actual type information is preserved in the OxCamlType hierarchy and accessible via opaque pointer
 
-### OxCamlType Class Hierarchy
-```cpp
-class OxCamlType {
-  enum Kind { Base, Typedef, Enum };
-  // Abstract base for all OCaml types
-};
-
-class OxCamlBaseType : public OxCamlType {
-  // Represents the fundamental ocaml_value type
-};
-
-class OxCamlTypedefType : public OxCamlType {
-  OxCamlType* m_underlying;  // Non-owning pointer to underlying type
-  // Represents type aliases like "int @ value"
-};
-
-class OxCamlEnumType : public OxCamlType {
-  std::vector<Enumerator> m_enumerators;
-  // Represents enumerations with name/value pairs
-};
-```
+**Key Insight**: "ocaml_value" is the formatter hook (not a descriptive name). The actual
+type dispatch happens inside the formatter by examining the OxCamlType* retrieved via
+`CompilerType::GetOpaqueQualType()`.
 
 ### Type Registry Management
 - Types are stored in `m_type_registry` indexed by DWARF DIE ID

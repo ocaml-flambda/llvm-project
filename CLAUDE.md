@@ -326,7 +326,9 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 ## Current OxCaml Plugin Status
 
 ### Fully Working
-- **Breakpoints**: Set using OCaml module.function syntax (e.g., `break Test.main`)
+- **Breakpoints**: Full breakpoint support
+  - Function breakpoints: `break Module.function`
+  - Line-based breakpoints: `break -f file.ml -l 10`
 - **Variable Display**: Integer values display correctly in decimal format
 - **Type System**: Basic ocaml_value type with proper typedef support
 - **Enumeration Types**: Full support for bool, char with value display
@@ -342,19 +344,28 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 - **Parametric Types**: Generic variants work correctly
   - Option: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
   - Either: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
+- **Arrays**: Array support with OCaml syntax
+  - Regular arrays: `[| 1i; 2i; 3i |]`
+  - Float arrays (tag 254): `[| 3.14; 2.71; 1.41 |]`
+  - Mixed type arrays with proper element formatting
+- **Boxed Floats**: Proper IEEE 754 float display (e.g., `3.14`, `2.71828`)
+- **Strings**: Display with OCaml escaping (e.g., `"hello\nworld"`, `"test\"quote"`)
+- **Unboxed Types**: Float#, int32#, int64# with appropriate prefixes/suffixes
+  - Unboxed floats: `#3.14`, `#2.71s` (for float32#)
+  - Unboxed integers: `#42l` (int32#), `#1000L` (int64#), `#99n` (nativeint#)
+- **Custom Blocks**: Int32.t, Int64.t, Nativeint.t, Bigarray, Float32 formatters
+- **Closures**: Function pointer resolution with source location display
+- **Lazy Values**: Display as `Lazy.from_val <contents>`
+- **Special Blocks**: Forward pointers (transparent), objects, abstract values
 - **DWARF Support**: Complete parsing of variant parts and discriminated unions
 - **Custom Attributes**: Support for `DW_AT_ocaml_offset_record_from_pointer` (0x3106)
 - **Memory Management**: Intelligent size estimation for variant structures
 
 ### In Progress
-- Line-based breakpoints
 - Expression evaluation
 
 ### Known Limitations
-- Float dereferencing shows addresses instead of values (e.g., `0x47afc0`)
-- String dereferencing shows addresses instead of content (e.g., `0x47ae90`)
-- Unboxed float# fields show as raw integer bits instead of float values
-- Some pointer fields show addresses instead of dereferenced values
+- Expression evaluation not yet implemented
 
 ## DWARF Type Encoding
 
@@ -384,24 +395,33 @@ OxCaml uses complex DWARF variant part structures:
 - **DWARF encoding**: Uses `DW_TAG_variant_part` with nested `DW_TAG_variant` structures
 - **Size limitation**: DWARF reports base size (8 bytes) but actual data requires more memory
 
-### Current Display
-- **Records**: `{x = 1; y = 2}`, `{a = 42; c = true; d = 0x47af08; b = 2307126535107494543}`
-- **Tuples**: `(42, 1.5)`, `(value1, value2, value3)`
-- **Simple Variants**: `{ Immediate[A] }`, `{ Pointer[{ C[42] }] }`
-- **Complex Variants**: `{ Pointer[{ Record[x = 10; y = 0x47afc0] }] }`
-- **Option Types**: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
-- **Either Types**: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
-- **Immediate values**: Show as integers with correct OCaml tagging
-- **Boxed floats**: Show as hex addresses (dereferencing limitation)
-- **Unboxed floats**: Show as raw integer bits (interpretation limitation)
+### Current Display Examples
+- **Records**: `{x = 1i; y = 2i}`, `{a = 42i; c = true; b = 2307126535107494543i}`
+- **Tuples**: `(42i, 3.14)`, `(value1, value2, value3)`
+- **Simple Variants**: `{ Immediate[A] }`, `{ Pointer[{ C[42i] }] }`
+- **Complex Variants**: `{ Pointer[{ Record[x = 10i; y = 3.14] }] }`
+- **Option Types**: `{ Immediate[None] }`, `{ Pointer[{ Some[42i] }] }`
+- **Either Types**: `{ Pointer[{ Left[42i] }] }`, `{ Pointer[{ Right["hello"] }] }`
+- **Arrays**: `[| 1i; 2i; 3i |]`, `[| 3.14; 2.71; 1.41 |]` (float array)
+- **Strings**: `"hello"`, `"world\n"`, `"test\"quote"`
+- **Immediate values**: `42i`, `true`, `false` (tagged integers with `i` suffix)
+- **Boxed floats**: `3.14`, `2.71828`, `-1.5` (proper IEEE 754 display)
+- **Unboxed floats**: `#3.14`, `#2.71s` (float32#), `#1.41` (float64#)
+- **Unboxed integers**: `#42l` (int32#), `#1000L` (int64#), `#99n` (nativeint#)
+- **Custom blocks**: `42l` (Int32.t), `1000L` (Int64.t), `99n` (Nativeint.t)
+- **Closures**: `<closure>@Module.function_name` or `<closure>@0x<address>`
+- **Lazy values**: `Lazy.from_val <contents>` (when forced)
 
 ### Testing Quick Start
 ```bash
 # Build LLDB
 ninja -C build lldb
 
-# Test with OCaml binary using -o options (recommended)
+# Test with function breakpoints (recommended)
 ./build/bin/lldb your_ocaml_program -o "break Module.function" -o "run" -o "frame variable" -o "quit"
+
+# Test with line-based breakpoints
+./build/bin/lldb your_ocaml_program -o "break -f file.ml -l 10" -o "run" -o "frame variable" -o "quit"
 
 # Note: Don't break on 'main' - OCaml's main is typically just initialization
 # Break on your actual functions instead

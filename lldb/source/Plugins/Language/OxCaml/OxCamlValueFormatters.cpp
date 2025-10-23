@@ -7,11 +7,16 @@
 //===----------------------------------------------------------------------===//
 
 /// \file
-/// This file implements formatting functions for OCaml boxed values.
+/// This file implements formatting for OCaml boxed values and immediates (ocaml_value type).
 ///
-/// Currently provides placeholder formatting. Will be expanded in the future
-/// to include full OCaml runtime structure decoding using the helper functions
-/// from OxCamlFormatHelpers.
+/// Provides decoding for:
+/// - Immediate values (tagged integers, etc.)
+/// - Heap-allocated blocks (strings, floats, arrays, closures, etc.)
+/// - Custom blocks (Int32.t, Int64.t, Nativeint.t, Bigarray, Float32)
+/// - Special runtime blocks (lazy values, objects, forwarding pointers)
+///
+/// The formatter uses a depth-limited recursive approach to handle nested structures
+/// while preventing infinite loops on cyclic data.
 
 #include "OxCamlValueFormatters.h"
 #include "OxCamlFormatHelpers.h"

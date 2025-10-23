@@ -12,8 +12,8 @@
 using namespace lldb;
 using namespace lldb_private;
 
-// TODO: Move more method implementations from the header file to this implementation file
-// to reduce header dependencies and compilation times.
+// CR sspies: Consider moving more method implementations from the header file to this
+// implementation file to reduce header dependencies and compilation times.
 
 // OxCamlPlaceholderType implementation
 uint64_t OxCamlPlaceholderType::GetByteSize() const {
@@ -40,7 +40,7 @@ OxCamlUnknownType::OxCamlUnknownType(lldb::user_id_t die_id,
 
 uint64_t OxCamlUnknownType::GetByteSize() const {
   Log *log = GetLog(OxCamlLog::TypeRegistry);
-  LLDB_LOG(log, "OxCamlUnknownType::GetByteSize() called for DIE 0x{0:x16}, DWARF tag 0x{1:x}, returning {2}", 
+  LLDB_LOG(log, "OxCamlUnknownType::GetByteSize() called for DIE 0x{0:x16}, DWARF tag 0x{1:x}, returning {2}",
            GetDieId(), m_dwarf_tag, m_byte_size);
   return m_byte_size;
 }
@@ -51,7 +51,7 @@ uint32_t OxCamlUnknownType::GetDwarfTag() const {
 
 std::string OxCamlUnknownType::GetDefaultDisplayName() const {
   Log *log = GetLog(OxCamlLog::TypeRegistry);
-  LLDB_LOG(log, "OxCamlUnknownType::GetDefaultDisplayName() called for DIE 0x{0:x16}, DWARF tag 0x{1:x}", 
+  LLDB_LOG(log, "OxCamlUnknownType::GetDefaultDisplayName() called for DIE 0x{0:x16}, DWARF tag 0x{1:x}",
            GetDieId(), m_dwarf_tag);
   return llvm::formatv("<unknown DWARF tag 0x{0:x}>", m_dwarf_tag);
 }

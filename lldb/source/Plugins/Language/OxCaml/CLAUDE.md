@@ -170,13 +170,20 @@ When adding support for more OCaml types:
   - `CanPassInRegisters` returns true
   - `GetTypeClass` returns `eTypeClassBuiltin`
 
-### Known Limitations
-- Line-based breakpoints not yet supported (need more DWARF parsing)
-- Float dereferencing shows addresses instead of values
-- String dereferencing shows addresses instead of content
-- Unboxed float# fields show as raw integer bits
-- ValueObject's GetValueAsUnsigned() doesn't work (we use raw data instead)
+- **Boxed Floats (Double_tag)**: Display as proper IEEE 754 values (e.g., `3.14`)
+- **Float Arrays (Double_array_tag)**: Display as `[| 3.14; 2.71; ... |]`
+- **Strings (String_tag)**: Display with proper OCaml escaping (e.g., `"hello\nworld"`)
+- **Unboxed Float# Fields**: Display with `#` prefix (e.g., `#3.14`, `#2.71s` for float32#)
+- **Arrays**: Full array support with OCaml syntax `[| elem1; elem2; ... |]`
+- **Custom Blocks**: Int32.t, Int64.t, Nativeint.t, Bigarray, Float32 with proper suffixes
+- **Closures**: Function pointer resolution showing source location
+- **Lazy Values**: Display as `Lazy.from_val <contents>`
+- **Forward Pointers**: Transparently follow GC forwarding pointers
+- **Generic Blocks**: Display tag and scannable fields recursively
+- **Line-based Breakpoints**: Full support for setting breakpoints by file and line number
 
+### Known Limitations
+- Expression evaluation not yet implemented
 ## Formatter Architecture
 
 The OxCaml formatter uses a single-formatter, multi-type dispatch pattern:
@@ -188,9 +195,17 @@ The OxCaml formatter uses a single-formatter, multi-type dispatch pattern:
 4. **Type-Based Display**: Formats value based on the resolved type class
 
 ### Supported Type Classes
-- **OxCamlBaseType**: Display as integer (immediate value >> 1)
+- **OxCamlValueType**: Tagged `ocaml_value` type with runtime discrimination (immediate vs heap pointer)
+  - Immediates: Tagged integers (LSB=1), decoded with right-shift
+  - Heap pointers: Addresses to blocks (LSB=0), dereferenced based on block tag
+- **OxCamlUnboxedBaseType**: Unboxed primitives stored directly (float#, int32#, int64#, etc.)
 - **OxCamlTypedefType**: Transparently resolved to underlying type
 - **OxCamlEnumType**: Display enumerator name if found, else numeric value
+- **OxCamlPointerType**: Dereferences and formats pointed-to values
+- **OxCamlStructureType**: Records, tuples, and variants with proper OCaml syntax
+- **OxCamlArrayType**: Arrays formatted as `[| elem1; elem2; ... |]`
+- **OxCamlPlaceholderType**: Shows `<resolving>` during recursive type parsing
+- **OxCamlUnknownType**: Shows `<unknown DWARF tag 0xNN>` for unsupported types
 
 ### Example Flow
 ```
@@ -210,9 +225,15 @@ The TypeSystemOxCaml implements a clean type hierarchy:
 ### OxCamlType Class Hierarchy
 ```cpp
 OxCamlType (abstract base)
-├── OxCamlBaseType      // The fundamental "ocaml_value" type
-├── OxCamlTypedefType   // Type aliases (e.g., "int @ value")
-└── OxCamlEnumType      // Enumerations with name/value pairs
+├── OxCamlValueType        // The fundamental "ocaml_value" type (tagged pointer: immediate or heap pointer)
+├── OxCamlUnboxedBaseType  // Unboxed primitives (float#, int32#, int64#, etc.)
+├── OxCamlTypedefType      // Type aliases (e.g., "int @ value")
+├── OxCamlEnumType         // Enumerations with name/value pairs
+├── OxCamlPointerType      // Pointer types (references to other types)
+├── OxCamlStructureType    // Records, tuples, and variant structures
+├── OxCamlArrayType        // OCaml arrays
+├── OxCamlPlaceholderType  // Temporary placeholder during recursive parsing
+└── OxCamlUnknownType      // Unsupported/unknown DWARF types
 ```
 
 ### Type Registry
