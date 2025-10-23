@@ -267,17 +267,7 @@ lldb/source/Plugins/
 
 ## Building and Testing
 
-### Build Commands
-```bash
-# Quick rebuild of OxCaml components only
-ninja -C build lldbPluginLanguageOxCaml lldbPluginTypeSystemOxCaml
-
-# Full LLDB rebuild
-ninja -C build lldb
-
-# Build and run tests
-ninja -C build check-lldb
-```
+For build commands and general testing, see **@/CLAUDE.md** (sections: "Build System", "Testing").
 
 ### Testing with OCaml Binaries
 
@@ -439,22 +429,107 @@ The OxCaml compiler should emit accurate structure sizes that account for all po
 
 ## OCaml Value Representation
 
-OCaml uses a uniform value representation with tagged pointers:
+The OxCaml compiler emits three distinct categories of types in DWARF debug information, all of which may use the `ocaml_value` runtime representation but with varying levels of type information.
 
-### Immediate Values (LSB = 1)
-- Integers: actual_value = (tagged_value >> 1)
-- Characters, booleans, and other small values
+### 1. Base `ocaml_value` Type (Generic Tagged Pointer)
 
-### Heap Pointers (LSB = 0)
-- Point to heap-allocated blocks
+**DWARF Representation:**
+- Base type: `ocaml_value` (8 bytes, `DW_ATE_signed`)
+- No additional type information beyond the base type
+
+**Runtime Representation:**
+- Tagged pointer system with LSB indicating immediate vs heap values
+- Immediate values: `(value << 1) | 1` (e.g., integers, booleans, characters)
+- Heap pointers: 8-byte aligned addresses to heap blocks (LSB = 0)
 - Special case: 0x0 represents unit value ()
-- Block header contains size and tag information
+- **Discrimination**: Runtime only - must examine tag bits and block headers
 
-### Memory Layout
+**Memory Layout:**
 ```
 Immediate: [63-1 bits: value][1 bit: 1]
 Pointer:   [63-1 bits: address][1 bit: 0]
 ```
+
+### 2. Typed OCaml Values (With DWARF Type Information)
+
+These still use the tagged pointer representation at runtime, but DWARF provides additional compile-time type information.
+
+**DWARF Structures:**
+- **Typedefs**: `int @ value`, `string @ value` → typedef to `ocaml_value` with semantic name
+- **Enums**: `bool @ value`, `char @ value` → typedef to enumeration type with known values
+- **Structures**: `point @ value` → typedef to structure with known fields (records, tuples)
+- **Arrays**: Array types → structure with element type and count information
+- **Pointers**: Pointer types → reference to underlying type
+- **Variants**: Complex discriminated unions using `DW_TAG_variant_part`
+
+**Key Difference from Base Type**:
+- Runtime representation identical to base `ocaml_value`
+- DWARF encodes semantic type information (field names, enumerator values, structure layout)
+- Debugger can display values with type-aware formatting
+
+**Examples:**
+```ocaml
+let x : int = 42        (* Typed: "int @ value" typedef to ocaml_value *)
+let b : bool = true     (* Typed: "bool @ value" typedef to enum type *)
+let p = {x = 1; y = 2}  (* Typed: structure with known fields *)
+let arr = [| 1; 2; 3 |] (* Typed: array with element type *)
+```
+
+### 3. Unboxed Primitive Types (No Tagging)
+
+**DWARF Representation:**
+- Direct base types with specific encodings
+- `float#` → 8-byte base type (`DW_ATE_float`) with `@ float64` annotation
+- `int32#` → 4-byte base type (`DW_ATE_signed`) with `@ bits32` annotation
+- `int64#` → 8-byte base type (`DW_ATE_signed`) with `@ bits64` annotation
+- No tagged pointer wrapper - stored directly
+
+**Runtime Representation:**
+- Native machine representation without tagging overhead
+- Floats stored as IEEE 754 binary formats
+- Integers stored in two's complement format
+- No heap allocation required
+
+**Examples:**
+```ocaml
+let x : float# = #3.14      (* 8-byte IEEE 754 double *)
+let i : int32# = #42l       (* 4-byte signed integer *)
+let j : int64# = #1000L     (* 8-byte signed integer *)
+```
+
+### Layout Annotations
+
+OxCaml uses specific type name suffixes to distinguish representations:
+
+- `@ value` - Boxed OCaml values using `ocaml_value` base type
+- `@ float64` - Unboxed 64-bit IEEE 754 floats
+- `@ float32` - Unboxed 32-bit IEEE 754 floats
+- `@ bits64` - Unboxed 64-bit signed integers
+- `@ bits32` - Unboxed 32-bit signed integers
+- `@ word` - Unboxed native-sized integers
+- `@ bits16` - Unboxed 16-bit signed integers
+- `@ bits8` - Unboxed 8-bit signed integers
+
+These should not be relied upon and, instead, the DWARF information should be used.
+
+### Mixed Data Structures
+
+Complex types can combine both categories:
+
+```ocaml
+(* Record with mixed field types *)
+type mixed = {
+  boxed: int;        (* ocaml_value *)
+  unboxed: float#    (* 8-byte IEEE 754 *)
+}
+
+(* Unboxed tuple - all elements unboxed *)
+type unboxed_tuple = #(float# * int32#)
+
+(* Unboxed record - all fields unboxed *)
+type unboxed_record = #{ x: float#; y: int32# }
+```
+
 
 ## Development Guidelines
 

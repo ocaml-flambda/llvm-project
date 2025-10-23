@@ -85,99 +85,16 @@ Run a specific test file:
 cd build && python ../lldb/test/API/dotest.py -p TestBreakpoint.py
 ```
 
-## OCaml Value Types vs Unboxed Types
+## OCaml Value Types
 
-The OxCaml compiler emits two distinct categories of base types in DWARF debug information, which require different handling in the LLDB plugin.
+The OxCaml compiler emits three categories of types in DWARF:
 
-### Boxed OCaml Values (ocaml_value)
+1. **Base `ocaml_value` type** - Generic tagged pointer (immediate values or heap pointers), runtime discrimination only
+2. **Typed `ocaml_value` variants** - Still use tagged pointers at runtime, but DWARF provides type information (typedefs, enums, structures, arrays, pointers, etc.)
+3. **Unboxed Primitives** - Direct native representation without tagging (float#, int32#, int64#, etc.)
 
-**DWARF Representation:**
-- Base type: `ocaml_value` (8 bytes, `DW_ATE_signed`)
-- Type aliases: `int @ value`, `bool @ value`, `string @ value`, etc.
-- All regular OCaml types use this representation through typedefs
-
-**Runtime Representation:**
-- Tagged pointer system with LSB indicating immediate vs heap values
-- Immediate values: `(value << 1) | 1` (e.g., integers, booleans, characters)
-- Heap pointers: 8-byte aligned addresses to heap blocks (LSB = 0)
-
-**Examples:**
-```ocaml
-let x : int = 42        (* ocaml_value via "int @ value" typedef *)
-let b : bool = true     (* ocaml_value via "bool @ value" typedef *)
-let s : string = "hi"   (* ocaml_value via "string @ value" typedef *)
-let f : float = 3.14    (* ocaml_value via "float @ value" typedef *)
-```
-
-### Unboxed Primitive Types
-
-**DWARF Representation:**
-- Direct base types with specific encodings
-- `float#` → 8-byte base type (`DW_ATE_float`) with `@ float64` annotation
-- `int32#` → 4-byte base type (`DW_ATE_signed`) with `@ bits32` annotation
-- `int64#` → 8-byte base type (`DW_ATE_signed`) with `@ bits64` annotation
-- No tagged pointer wrapper - stored directly
-
-**Runtime Representation:**
-- Native machine representation without tagging overhead
-- Floats stored as IEEE 754 binary formats
-- Integers stored in two's complement format
-- No heap allocation required
-
-**Examples:**
-```ocaml
-let x : float# = #3.14      (* 8-byte IEEE 754 double *)
-let i : int32# = #42l       (* 4-byte signed integer *)
-let j : int64# = #1000L     (* 8-byte signed integer *)
-```
-
-### Type Annotations
-
-OxCaml uses specific type name suffixes to distinguish representations:
-
-- `@ value` - Boxed OCaml values using `ocaml_value` base type
-- `@ float64` - Unboxed 64-bit IEEE 754 floats
-- `@ float32` - Unboxed 32-bit IEEE 754 floats
-- `@ bits64` - Unboxed 64-bit signed integers
-- `@ bits32` - Unboxed 32-bit signed integers
-- `@ word` - Unboxed native-sized integers
-- `@ bits16` - Unboxed 16-bit signed integers
-- `@ bits8` - Unboxed 8-bit signed integers
-
-### Mixed Data Structures
-
-Complex types can combine both categories:
-
-```ocaml
-(* Record with mixed field types *)
-type mixed = {
-  boxed: int;        (* ocaml_value *)
-  unboxed: float#    (* 8-byte IEEE 754 *)
-}
-
-(* Unboxed tuple - all elements unboxed *)
-type unboxed_tuple = #(float# * int32#)
-
-(* Unboxed record - all fields unboxed *)
-type unboxed_record = #{ x: float#; y: int32# }
-```
-
-### LLDB Plugin Implications
-
-**Type System:**
-- Must handle both `ocaml_value` and native base types
-- Create different `OxCamlType` subclasses for each category
-- Parse type annotations to determine representation
-
-**Value Formatting:**
-- Boxed values: Decode tagged representation (shift right for immediates, dereference for heap pointers)
-- Unboxed values: Display directly using native format
-- Mixed structures: Apply appropriate decoding per field
-
-**Memory Access:**
-- Boxed values: 8-byte reads, tag bit examination
-- Unboxed values: Read exact type size (1, 2, 4, or 8 bytes)
-- Heap dereferencing: Account for OCaml block headers when following pointers
+For detailed information about OCaml value representation, DWARF encoding, and plugin implications, see:
+**@lldb/source/Plugins/Language/OxCaml/CLAUDE.md** (sections: "OCaml Value Representation", "Type System Design")
 
 ## LLDB Plugin Architecture
 
@@ -319,100 +236,21 @@ The OxCaml plugin provides comprehensive logging through the "oxcaml" log channe
 (lldb) log disable oxcaml
 ```
 
-### Safety Considerations
-- DO NOT, under any circumstances, use raw integers such as 1 as pointers.
-- Always validate that address ranges exist before creating Function objects
-
 ## Current OxCaml Plugin Status
 
-### Fully Working
-- **Breakpoints**: Full breakpoint support
-  - Function breakpoints: `break Module.function`
-  - Line-based breakpoints: `break -f file.ml -l 10`
-- **Variable Display**: Integer values display correctly in decimal format
-- **Type System**: Basic ocaml_value type with proper typedef support
-- **Enumeration Types**: Full support for bool, char with value display
-- **Records**: Display as `{field1 = value1; field2 = value2}`
-- **Tuples**: Display as `(value1, value2, value3)`
-- **Simple Variants**: Complete support with proper discrimination
-  - Immediate: `{ Immediate[A] }`, `{ Immediate[B] }`
-  - Pointer: `{ Pointer[{ C[42] }] }`, `{ Pointer[{ D[0x47b018] }] }`
-- **Complex Variants**: Full support for variants with nested structures
-  - Record variants: `{ Pointer[{ Record[x = 10; y = 0x47afc0] }] }`
-  - Tuple variants: `{ Pointer[{ Pair[42; 0x47afe8] }] }`
-  - Mixed variants: `{ Pointer[{ Mixed[a = 100; c = true; b = 2307126535107494543] }] }`
-- **Parametric Types**: Generic variants work correctly
-  - Option: `{ Immediate[None] }`, `{ Pointer[{ Some[42] }] }`
-  - Either: `{ Pointer[{ Left[42] }] }`, `{ Pointer[{ Right[0x47ae90] }] }`
-- **Arrays**: Array support with OCaml syntax
-  - Regular arrays: `[| 1i; 2i; 3i |]`
-  - Float arrays (tag 254): `[| 3.14; 2.71; 1.41 |]`
-  - Mixed type arrays with proper element formatting
-- **Boxed Floats**: Proper IEEE 754 float display (e.g., `3.14`, `2.71828`)
-- **Strings**: Display with OCaml escaping (e.g., `"hello\nworld"`, `"test\"quote"`)
-- **Unboxed Types**: Float#, int32#, int64# with appropriate prefixes/suffixes
-  - Unboxed floats: `#3.14`, `#2.71s` (for float32#)
-  - Unboxed integers: `#42l` (int32#), `#1000L` (int64#), `#99n` (nativeint#)
-- **Custom Blocks**: Int32.t, Int64.t, Nativeint.t, Bigarray, Float32 formatters
-- **Closures**: Function pointer resolution with source location display
-- **Lazy Values**: Display as `Lazy.from_val <contents>`
-- **Special Blocks**: Forward pointers (transparent), objects, abstract values
-- **DWARF Support**: Complete parsing of variant parts and discriminated unions
-- **Custom Attributes**: Support for `DW_AT_ocaml_offset_record_from_pointer` (0x3106)
-- **Memory Management**: Intelligent size estimation for variant structures
+The plugin provides comprehensive OCaml debugging support including:
 
-### In Progress
-- Expression evaluation
+- **Breakpoints**: Function (`break Module.func`) and line-based (`break -f file.ml -l 10`)
+- **Value Formatting**: All OCaml types (records, tuples, variants, arrays, strings, floats, custom blocks)
+- **Type System**: Complete DWARF parsing for all OCaml type constructs
+- **DWARF Support**: Variant discrimination, custom attributes, intelligent memory management
 
-### Known Limitations
-- Expression evaluation not yet implemented
+**Known Limitation**: Expression evaluation not yet implemented
 
-## DWARF Type Encoding
+For the complete feature list with examples, see:
+**@lldb/source/Plugins/Language/OxCaml/CLAUDE.md** (section: "Working Features")
 
-### Custom DWARF Attributes
-
-**DW_AT_ocaml_offset_record_from_pointer (0x3106)**:
-- Custom OCaml DWARF extension for pointer offset adjustment
-- Specifies how many bytes to adjust when dereferencing pointers to structures
-- Typical value: `-8` (to account for OCaml heap block headers)
-- Applied automatically in `FormatPointer` when reading variant and record data
-- Enables proper reading of heap-allocated OCaml structures
-
-### Records and Tuples
-OxCaml uses: `DW_TAG_typedef → DW_TAG_reference_type → DW_TAG_structure_type`
-
-- **Type names**: End with `@ value` (e.g., `point @ value`, `int * string @ value`)
-- **Records**: Structure members have `DW_AT_name` attributes
-- **Tuples**: Structure members have no names
-- **Layout**: 8-byte members, 8-byte aligned offsets
-
-### Variants
-OxCaml uses complex DWARF variant part structures:
-
-- **Two-level discrimination**: LSB bit + constructor tags
-- **Immediate variants**: Stored directly in the value (odd numbers)
-- **Pointer variants**: Point to heap blocks with discriminator tags
-- **DWARF encoding**: Uses `DW_TAG_variant_part` with nested `DW_TAG_variant` structures
-- **Size limitation**: DWARF reports base size (8 bytes) but actual data requires more memory
-
-### Current Display Examples
-- **Records**: `{x = 1i; y = 2i}`, `{a = 42i; c = true; b = 2307126535107494543i}`
-- **Tuples**: `(42i, 3.14)`, `(value1, value2, value3)`
-- **Simple Variants**: `{ Immediate[A] }`, `{ Pointer[{ C[42i] }] }`
-- **Complex Variants**: `{ Pointer[{ Record[x = 10i; y = 3.14] }] }`
-- **Option Types**: `{ Immediate[None] }`, `{ Pointer[{ Some[42i] }] }`
-- **Either Types**: `{ Pointer[{ Left[42i] }] }`, `{ Pointer[{ Right["hello"] }] }`
-- **Arrays**: `[| 1i; 2i; 3i |]`, `[| 3.14; 2.71; 1.41 |]` (float array)
-- **Strings**: `"hello"`, `"world\n"`, `"test\"quote"`
-- **Immediate values**: `42i`, `true`, `false` (tagged integers with `i` suffix)
-- **Boxed floats**: `3.14`, `2.71828`, `-1.5` (proper IEEE 754 display)
-- **Unboxed floats**: `#3.14`, `#2.71s` (float32#), `#1.41` (float64#)
-- **Unboxed integers**: `#42l` (int32#), `#1000L` (int64#), `#99n` (nativeint#)
-- **Custom blocks**: `42l` (Int32.t), `1000L` (Int64.t), `99n` (Nativeint.t)
-- **Closures**: `<closure>@Module.function_name` or `<closure>@0x<address>`
-- **Lazy values**: `Lazy.from_val <contents>` (when forced)
-
-### Testing Quick Start
+## Testing Quick Start
 ```bash
 # Build LLDB
 ninja -C build lldb
