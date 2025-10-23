@@ -755,3 +755,121 @@ DW_TAG_structure_type (for heap blocks)
 - **Null Handling**: Use nullptr for unimplemented features until properly designed
 - **Error Handling**: Return appropriate error values rather than crashing
 - **Memory Management**: Use smart pointers (TypeSP, CompilerType) consistently
+
+## Future Enhancements
+
+### Dynamic Member Location Evaluation with DWARF Expressions
+
+Current implementation assumes `DW_AT_data_member_location` is always a constant offset. However, for OxCaml variants where member layout depends on runtime discriminator values, DWARF may emit location expressions that need to be evaluated with runtime context. This is also useful for other DWARF entries.
+
+**Current Limitation**:
+- `ExtractDataMemberLocation()` (from Clang parser) evaluates DWARF expressions immediately at parse time
+- This works for statically computable offsets but fails for expressions needing runtime state
+- Example failing cases: expressions with `DW_OP_deref`, `DW_OP_breg*`, or any operation requiring actual memory/registers
+
+#### Solution, Part 1: Parse Time (No Runtime Context)
+
+Store DWARF expressions without evaluating them:
+
+```cpp
+// Modify OxCamlMember structure in OxCamlTypes.h
+struct OxCamlMember {
+  // ... existing fields ...
+
+  // NEW: Member location can be either constant or expression
+  struct MemberLocation {
+    enum Kind { Constant, Expression };
+    Kind kind;
+
+    uint64_t constant_offset;        // When kind == Constant
+    DWARFExpression dwarf_expr;      // When kind == Expression
+
+    static MemberLocation MakeConstant(uint64_t offset);
+    static MemberLocation MakeExpression(const DWARFExpression& expr);
+  };
+
+  MemberLocation location;  // Replaces: uint64_t data_member_location
+};
+```
+
+**DWARF Parsing**:
+```cpp
+// In DWARFASTParserOxCaml.cpp
+case DW_AT_data_member_location: {
+  if (!form_value.BlockData()) {
+    // Constant offset - store directly
+    member.location = MemberLocation::MakeConstant(form_value.Unsigned());
+  } else {
+    // Expression block - capture expression for later evaluation
+    const DWARFDataExtractor &data = die.GetData();
+    uint32_t block_length = form_value.Unsigned();
+    uint32_t block_offset = form_value.BlockData() - data.GetDataStart();
+
+    DataExtractor expr_data(data, block_offset, block_length);
+    DWARFExpression dwarf_expr(expr_data);  // Stores expression, doesn't evaluate
+
+    member.location = MemberLocation::MakeExpression(dwarf_expr);
+  }
+  break;
+}
+```
+
+#### Solution, Part 2: Format Time (With Runtime Context)
+
+Evaluate expressions when displaying values:
+
+```cpp
+// In OxCamlLanguage.cpp formatter
+static uint64_t EvaluateMemberLocation(
+    const OxCamlMember& member,
+    lldb::addr_t base_address,
+    ExecutionContext& exe_ctx) {
+
+  if (member.HasConstantLocation()) {
+    return member.GetConstantOffset();  // Fast path - no evaluation
+  }
+
+  // Set up initial value = base address of structure instance
+  Value initial_value;
+  initial_value.SetValueType(Value::ValueType::LoadAddress);
+  initial_value.GetScalar() = base_address;
+
+  // Evaluate expression with full runtime context
+  const DWARFExpression& expr = member.GetLocationExpression();
+  llvm::Expected<Value> result = DWARFExpression::Evaluate(
+      &exe_ctx,                          // Has process, frame, registers
+      exe_ctx.GetRegisterContext(),      // For DW_OP_breg* operations
+      exe_ctx.GetModuleSP(),             // For symbol resolution
+      expr.GetData(),                    // Expression
+      die.GetCU(),                       // DWARF compilation unit delegate
+      eRegisterKindDWARF,
+      &initial_value,                    // Base address on stack
+      nullptr
+  );
+
+  if (!result) {
+    // Log error, return 0 as fallback
+    return 0;
+  }
+
+  return result->GetScalar().ULongLong();
+}
+```
+
+**Use in formatter**:
+```cpp
+bool FormatStructure(ValueObject& valobj, Stream& stream,
+                     const OxCamlStructureType* struct_type) {
+
+  lldb::addr_t base_addr = valobj.GetLoadAddress();
+  ExecutionContext exe_ctx(valobj.GetExecutionContextRef());
+
+  for (const auto& member : struct_type->GetMembers()) {
+    // Evaluate member location (handles both constant and expression cases)
+    uint64_t member_offset = EvaluateMemberLocation(member, base_addr, exe_ctx);
+
+    // Read and format member at computed offset
+    FormatMemberValue(stream, member, base_addr + member_offset, exe_ctx);
+  }
+}
+```
