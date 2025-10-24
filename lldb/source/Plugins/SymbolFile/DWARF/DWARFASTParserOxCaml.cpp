@@ -36,6 +36,9 @@ using namespace lldb_private::plugin::dwarf;
 // For now, we declare it as an ad-hoc attribute here.
 static constexpr uint32_t DW_AT_ocaml_offset_record_from_pointer = 0x3106;
 
+// Default size for OCaml values when size attribute is missing
+static constexpr uint64_t DEFAULT_OCAML_VALUE_SIZE = 8;
+
 DWARFASTParserOxCaml::DWARFASTParserOxCaml(TypeSystemOxCaml &oxcaml_typesystem)
     : DWARFASTParser(Kind::DWARFASTParserOxCaml),
       m_oxcaml_typesystem(oxcaml_typesystem) {}
@@ -80,10 +83,10 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
 
   // Extract DWARF information for placeholder
   std::optional<std::string> dwarf_name = ExtractTypeName(die);
-  uint64_t dwarf_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);
+  auto dwarf_size_opt = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
 
   // Create placeholder with actual DWARF info
-  auto placeholder = std::make_unique<OxCamlPlaceholderType>(die_id, dwarf_name, dwarf_size);
+  auto placeholder = std::make_unique<OxCamlPlaceholderType>(die_id, dwarf_name, dwarf_size_opt.value_or(DEFAULT_OCAML_VALUE_SIZE));
 
   // Register with the placeholder
   Reference<OxCamlType>* type_ref = m_oxcaml_typesystem.RegisterType(die_id, std::move(placeholder));
@@ -153,6 +156,7 @@ std::optional<std::string> DWARFASTParserOxCaml::ExtractTypeName(const DWARFDIE 
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(const DWARFDIE &die) {
+  Log *log = GetLog(LLDBLog::Types);
   auto name_opt = ExtractTypeName(die);
 
   // Check if this is the fundamental OCaml value type
@@ -161,17 +165,18 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(co
   }
 
   // This is an unboxed base type - extract encoding and size from DWARF
-  std::optional<uint64_t> byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 0);
-  if (!byte_size || byte_size == 0) {
-    return std::make_unique<OxCamlUnknownType>(die.GetID(), std::move(name_opt),
-                                               8 /* default size */, die.Tag());
+  // Both are required attributes for base types
+  std::optional<uint64_t> byte_size = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
+  if (!byte_size.has_value() || byte_size.value() == 0) {
+    LLDB_LOG(log, "ParseBaseType: Missing or zero byte_size for DIE 0x{0:x16} - cannot parse", die.GetID());
+    return nullptr;
   }
 
-  // Determine the base kind from DWARF encoding
-  std::optional<uint64_t> encoding = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_encoding, 0);
+  // Determine the base kind from DWARF encoding - required for base types
+  std::optional<uint64_t> encoding = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_encoding);
   if (!encoding.has_value()) {
-    return std::make_unique<OxCamlUnknownType>(die.GetID(), std::move(name_opt),
-                                               byte_size.value(), die.Tag());
+    LLDB_LOG(log, "ParseBaseType: Missing encoding for DIE 0x{0:x16} - cannot parse", die.GetID());
+    return nullptr;
   }
 
   OxCamlUnboxedBaseType::BaseKind base_kind;
@@ -195,10 +200,15 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseBaseType(co
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType(const SymbolContext &sc, const DWARFDIE &die) {
+  Log *log = GetLog(LLDBLog::Types);
+
   // Get underlying type DIE
   DWARFDIE underlying_die = die.GetReferencedDIE(llvm::dwarf::DW_AT_type);
-  if (!underlying_die)
+  if (!underlying_die) {
+    LLDB_LOG(log, "ParseTypedefType: Missing or invalid DW_AT_type reference for DIE 0x{0:x16}",
+             die.GetID());
     return nullptr;
+  }
 
   // Ensure the underlying type has a Reference
   ParseTypeFromDWARF(sc, underlying_die, nullptr);
@@ -214,8 +224,15 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseTypedefType
 }
 
 std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(const DWARFDIE &die) {
-  // Get byte size
-  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 for OCaml
+  Log *log = GetLog(LLDBLog::Types);
+
+  // Get byte size - required for enums since we need to know how to read discriminator values
+  std::optional<uint64_t> byte_size_opt = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
+  if (!byte_size_opt.has_value() || byte_size_opt.value() == 0) {
+    LLDB_LOG(log, "ParseEnumType: Missing or zero byte_size for enum DIE 0x{0:x16} - cannot parse", die.GetID());
+    return nullptr;
+  }
+  uint64_t byte_size = byte_size_opt.value();
 
   // Parse enumerators
   std::vector<OxCamlEnumType::Enumerator> enumerators;
@@ -226,9 +243,14 @@ std::unique_ptr<lldb_private::OxCamlType> DWARFASTParserOxCaml::ParseEnumType(co
         continue;
 
       // Get the enumerator value - OCaml uses unsigned values (odd numbers)
-      int64_t enum_value = child.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_const_value, 0);
+      std::optional<uint64_t> enum_value_opt = child.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_const_value);
+      if (!enum_value_opt.has_value()) {
+        LLDB_LOG(log, "ParseEnumType: Missing const_value for enumerator '{0}' in DIE 0x{1:x16}",
+                 enum_name, die.GetID());
+        continue;
+      }
 
-      enumerators.push_back({enum_name, enum_value});
+      enumerators.push_back({enum_name, static_cast<int64_t>(enum_value_opt.value())});
     }
   }
 
@@ -469,6 +491,8 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParsePointerType(const SymbolC
   // Get the Reference
   auto pointed_to_opt = m_oxcaml_typesystem.GetType(pointed_to_die.GetID());
   if (!pointed_to_opt.has_value()) {
+    LLDB_LOG(log, "ParsePointerType: Failed to get reference for pointed-to type DIE 0x{0:x16}",
+             pointed_to_die.GetID());
     llvm::report_fatal_error("ParsePointerType: Failed to get reference for pointed-to type");
   }
   Reference<OxCamlType>* pointed_to_ref = pointed_to_opt.value();
@@ -515,21 +539,25 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseStructureType(const Symbo
   LLDB_LOG(log, "ParseStructureType: DIE 0x{0:x16}", die_id);
 
   // Get structure size from DW_AT_byte_size
-  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 0);
-  if (byte_size == 0) {
-    LLDB_LOG(log, "ParseStructureType: No byte size found or zero size");
+  std::optional<uint64_t> byte_size_opt = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
+  if (!byte_size_opt.has_value() || byte_size_opt.value() == 0) {
+    LLDB_LOG(log, "ParseStructureType: Missing or zero byte_size for DIE 0x{0:x16}", die_id);
     return nullptr;
   }
+  uint64_t byte_size = byte_size_opt.value();
 
   // Extract optional name
   std::optional<std::string> name = ExtractTypeName(die);
 
   // Check for custom DW_AT_ocaml_offset_record_from_pointer attribute
   auto ocaml_attr = static_cast<llvm::dwarf::Attribute>(DW_AT_ocaml_offset_record_from_pointer);
-  uint64_t attr_value = die.GetAttributeValueAsUnsigned(ocaml_attr, 0);
-  int64_t base_offset = static_cast<int64_t>(attr_value);
+  std::optional<uint64_t> attr_value_opt = die.GetAttributeValueAsOptionalUnsigned(ocaml_attr);
 
-  if (base_offset != 0) {
+  int64_t base_offset = 0;
+  if (attr_value_opt.has_value()) {
+    // Interpret the unsigned value as signed (DWARF stores signed values as unsigned)
+    // This is safe because we're reinterpreting the bit pattern, not converting
+    base_offset = static_cast<int64_t>(attr_value_opt.value());
     LLDB_LOG(log, "ParseStructureType: Found DW_AT_ocaml_offset_record_from_pointer: {0}", base_offset);
   }
 
@@ -599,23 +627,21 @@ std::optional<OxCamlMember> DWARFASTParserOxCaml::ParseMember(const SymbolContex
   }
   Reference<OxCamlType>* member_type_ref = member_type_opt.value();
 
-  // Get member offset
-  uint64_t member_offset = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_member_location, 0);
+  // Get member offset - 0 is a valid offset for first members
+  std::optional<uint64_t> member_offset_opt = member_die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_data_member_location);
+  if (!member_offset_opt.has_value()) {
+    LLDB_LOG(log, "ParseMember: Missing data_member_location for DIE 0x{0:x16}", member_die.GetID());
+    return std::nullopt;
+  }
+  uint64_t member_offset = member_offset_opt.value();
 
   // Get bit field attributes (if present)
-  std::optional<uint64_t> bit_offset;
-  std::optional<uint64_t> bit_size;
-
-  if (member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_bit_offset, UINT64_MAX) != UINT64_MAX) {
-    bit_offset = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_data_bit_offset, 0);
-  }
-
-  if (member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, UINT64_MAX) != UINT64_MAX) {
-    bit_size = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_bit_size, 0);
-  }
+  std::optional<uint64_t> bit_offset = member_die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_data_bit_offset);
+  std::optional<uint64_t> bit_size = member_die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_bit_size);
 
   // Get artificial attribute
-  bool is_artificial = member_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_artificial, 0) != 0;
+  std::optional<uint64_t> artificial_opt = member_die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_artificial);
+  bool is_artificial = artificial_opt.has_value() && artificial_opt.value() != 0;
 
   LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}{3}",
            member_name.value_or("<unnamed>"), member_offset, member_type_ref->get()->GetDisplayName(),
@@ -731,12 +757,22 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseArrayType(const SymbolCon
   // Get the Reference
   auto element_type_opt = m_oxcaml_typesystem.GetType(element_type_die.GetID());
   if (!element_type_opt.has_value()) {
+    LLDB_LOG(log, "ParseArrayType: Failed to get reference for element type DIE 0x{0:x16}",
+             element_type_die.GetID());
     llvm::report_fatal_error("ParseArrayType: Failed to get reference for element type");
   }
   Reference<OxCamlType>* element_type_ref = element_type_opt.value();
 
-  // Get byte stride (default to 8 bytes for OCaml pointers)
-  uint64_t byte_stride = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_stride, 8);
+  // Get byte stride - if not present, compute from element type size (per DWARF spec)
+  std::optional<uint64_t> byte_stride_opt = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_stride);
+  uint64_t byte_stride;
+  if (byte_stride_opt.has_value()) {
+    byte_stride = byte_stride_opt.value();
+  } else {
+    // DWARF spec: if DW_AT_byte_stride is absent, stride equals element size
+    byte_stride = element_type_ref->get()->GetByteSize();
+    LLDB_LOG(log, "ParseArrayType: No explicit byte_stride, using element size: {0}", byte_stride);
+  }
 
   // Look for DW_TAG_subrange_type child to get array count
   std::optional<uint64_t> count;
@@ -744,10 +780,10 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseArrayType(const SymbolCon
   while (child_die.IsValid()) {
     if (child_die.Tag() == llvm::dwarf::DW_TAG_subrange_type) {
       // Get DW_AT_count attribute
-      uint64_t subrange_count = child_die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_count, UINT64_MAX);
-      if (subrange_count != UINT64_MAX) {
-        count = subrange_count;
-        LLDB_LOG(log, "ParseArrayType: Found subrange count: {0}", subrange_count);
+      std::optional<uint64_t> subrange_count_opt = child_die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_count);
+      if (subrange_count_opt.has_value()) {
+        count = subrange_count_opt.value();
+        LLDB_LOG(log, "ParseArrayType: Found subrange count: {0}", count.value());
       }
       break;  // Only process first subrange
     }
@@ -772,7 +808,8 @@ std::unique_ptr<OxCamlType> DWARFASTParserOxCaml::ParseUnknownType(const DWARFDI
 
   // Extract basic information if available
   std::optional<std::string> name = ExtractTypeName(die);
-  uint64_t byte_size = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_byte_size, 8);  // Default to 8 bytes
+  std::optional<uint64_t> byte_size_opt = die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
+  uint64_t byte_size = byte_size_opt.value_or(DEFAULT_OCAML_VALUE_SIZE);
 
   LLDB_LOG(log, "ParseUnknownType: name=\"{0}\", byte_size={1}",
            name ? *name : "<anonymous>", byte_size);
