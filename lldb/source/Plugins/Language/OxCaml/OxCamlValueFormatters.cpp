@@ -393,12 +393,8 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
     return true;
   }
 
-  // Extract arity from top 8 bits of closinfo
-  uint8_t arity = closinfo >> 56;
-
-  // Calculate code pointer offset based on arity
-  // If arity is 0 or 1, offset is 0; otherwise offset is 2
-  int offset = (arity == 0 || arity == 1) ? 0 : 2;
+  // Calculate code pointer offset based on closure arity
+  uint64_t offset = helpers::closure::GetCodePtrOffset(closinfo);
 
   // Read full application code pointer
   lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(

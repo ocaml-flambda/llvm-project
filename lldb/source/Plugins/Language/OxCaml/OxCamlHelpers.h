@@ -78,6 +78,16 @@ namespace constants {
   constexpr uint64_t INT32_SIZE = 4;
   constexpr uint64_t INT64_SIZE = 8;
 
+  /// OCaml closure layout constants
+  /// Closures store arity in the top 8 bits of the closinfo word
+  constexpr int CLOSURE_ARITY_SHIFT = 56;
+
+  /// Code pointer offset based on arity
+  /// - Low arity (0 or 1): code pointer at offset 0 words
+  /// - High arity (>= 2): code pointer at offset 2 words
+  constexpr uint64_t CLOSURE_CODE_PTR_OFFSET_LOW_ARITY = 0;
+  constexpr uint64_t CLOSURE_CODE_PTR_OFFSET_HIGH_ARITY = 2;
+
   /// Verify OCaml runtime invariant: 1 word = 1 double (both 8 bytes on 64-bit)
   static_assert(WORD_SIZE == DOUBLE_SIZE,
                 "OCaml assumes 1 word equals 1 double (8 bytes on 64-bit platforms)");
@@ -261,6 +271,30 @@ namespace string {
   /// \return The actual string length in bytes
   inline uint64_t CalculateStringLength(uint64_t wosize, uint8_t padding_byte) {
     return wosize * constants::WORD_SIZE - padding_byte - 1;
+  }
+}
+
+/// Helper functions for OCaml closure handling
+namespace closure {
+  /// Extract arity from closinfo word
+  /// The arity is stored in the top 8 bits (bits 56-63) of the closinfo word
+  /// \param closinfo The closinfo word from the closure
+  /// \return The arity value (0-255)
+  inline uint8_t ExtractArity(uint64_t closinfo) {
+    return closinfo >> constants::CLOSURE_ARITY_SHIFT;
+  }
+
+  /// Calculate code pointer offset based on closure arity
+  /// OCaml closures store their code pointer at different offsets:
+  /// - Arity 0 or 1: code pointer at offset 0 (first word of closure data)
+  /// - Arity >= 2: code pointer at offset 2 (third word of closure data)
+  /// \param closinfo The closinfo word containing arity information
+  /// \return Offset in words from closure base to code pointer
+  inline uint64_t GetCodePtrOffset(uint64_t closinfo) {
+    uint8_t arity = ExtractArity(closinfo);
+    return (arity == 0 || arity == 1)
+        ? constants::CLOSURE_CODE_PTR_OFFSET_LOW_ARITY
+        : constants::CLOSURE_CODE_PTR_OFFSET_HIGH_ARITY;
   }
 }
 
