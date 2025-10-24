@@ -66,6 +66,7 @@
 #include "OxCamlFormatters.h"
 #include "OxCamlFormatHelpers.h"
 #include "OxCamlValueFormatters.h"
+#include "OxCamlHelpers.h"
 #include "LogChannelOxCaml.h"
 #include "lldb/ValueObject/ValueObject.h"
 #include "lldb/Utility/DataExtractor.h"
@@ -83,6 +84,7 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters;
 using namespace lldb_private::formatters::oxcaml;
+using namespace lldb_private::formatters::oxcaml::helpers;
 
 // Forward declarations
 static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref);
@@ -269,39 +271,14 @@ static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataE
 
 
 // Helper to convert byte size to FloatSize enum
-static std::optional<oxcaml::helpers::FloatSize> ByteSizeToFloatSize(uint64_t byte_size) {
+static std::optional<helpers::FloatSize> ByteSizeToFloatSize(uint64_t byte_size) {
   switch (byte_size) {
-    case 2: return oxcaml::helpers::FloatSize::Half;    // float16#
-    case 4: return oxcaml::helpers::FloatSize::Single;  // float32#
-    case 8: return oxcaml::helpers::FloatSize::Double;  // float#
+    case constants::FLOAT16_SIZE: return helpers::FloatSize::Half;    // float16#
+    case constants::FLOAT32_SIZE: return helpers::FloatSize::Single;  // float32#
+    case constants::FLOAT64_SIZE: return helpers::FloatSize::Double;  // float#
     default: return std::nullopt;
   }
 }
-
-// Helper to get suffix for signed integers
-static std::string GetSignedIntegerSuffix(uint64_t byte_size) {
-  switch (byte_size) {
-    case 1: return "";      // int8# (no standard suffix)
-    case 2: return "";      // int16# (no standard suffix)
-    case 4: return "l";     // int32# -> #42l
-    case 8: return "L";     // int64# -> #42L
-    default: return "";     // fallback
-  }
-}
-
-// Helper to get suffix for unsigned integers
-// Note: Unsigned suffixes (ul, UL) don't actually exist in OCaml,
-// but we use them here for clarity in the debugger
-static std::string GetUnsignedIntegerSuffix(uint64_t byte_size) {
-  switch (byte_size) {
-    case 1: return "";      // uint8# (no standard suffix)
-    case 2: return "";      // uint16# (no standard suffix)
-    case 4: return "ul";    // uint32# -> #42ul
-    case 8: return "UL";    // uint64# -> #42UL
-    default: return "";     // fallback
-  }
-}
-
 
 // Format unboxed base types (float#, int32#, etc.)
 static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_type, DataExtractor& data, lldb::ProcessSP process_sp) {
@@ -318,29 +295,29 @@ static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_typ
   lldb::offset_t offset = 0;
   switch (kind) {
     case OxCamlUnboxedBaseType::Signed: {
-      std::optional<llvm::APInt> apint = oxcaml::helpers::ExtractAPInt(data, &offset, byte_size);
+      std::optional<llvm::APInt> apint = helpers::ExtractAPInt(data, &offset, byte_size);
       if (!apint) { llvm::report_fatal_error("Failed to extract signed integer"); }
-      std::string suffix = GetSignedIntegerSuffix(byte_size);
-      oxcaml::helpers::FormatAPInt(&stream, *apint, true, "#", suffix);
+      std::string suffix = suffixes::GetSignedIntegerSuffix(byte_size);
+      helpers::FormatAPInt(&stream, *apint, true, "#", suffix);
       return true;
     }
     case OxCamlUnboxedBaseType::Unsigned: {
-      std::optional<llvm::APInt> apint = oxcaml::helpers::ExtractAPInt(data, &offset, byte_size);
+      std::optional<llvm::APInt> apint = helpers::ExtractAPInt(data, &offset, byte_size);
       if (!apint) { llvm::report_fatal_error("Failed to extract unsigned integer"); }
-      std::string suffix = GetUnsignedIntegerSuffix(byte_size);
-      oxcaml::helpers::FormatAPInt(&stream, *apint, false, "#", suffix);
+      std::string suffix = suffixes::GetUnsignedIntegerSuffix(byte_size);
+      helpers::FormatAPInt(&stream, *apint, false, "#", suffix);
       return true;
     }
     case OxCamlUnboxedBaseType::Float: {
-      std::optional<oxcaml::helpers::FloatSize> float_size = ByteSizeToFloatSize(byte_size);
+      std::optional<helpers::FloatSize> float_size = ByteSizeToFloatSize(byte_size);
       if (!float_size) {
         stream.Printf("<%" PRIu64 "-byte float>", byte_size);
         return true;
       }
-      std::optional<llvm::APFloat> apfloat = oxcaml::helpers::ExtractAPFloat(data, &offset, *float_size);
+      std::optional<llvm::APFloat> apfloat = helpers::ExtractAPFloat(data, &offset, *float_size);
       if (!apfloat) { llvm::report_fatal_error("Failed to extract float"); }
-      std::string suffix = (*float_size == oxcaml::helpers::FloatSize::Single) ? "s" : "";
-      oxcaml::helpers::FormatAPFloat(&stream, *apfloat, std::nullopt, "#", suffix);
+      std::string suffix = (*float_size == helpers::FloatSize::Single) ? suffixes::FLOAT32_SUFFIX : "";
+      helpers::FormatAPFloat(&stream, *apfloat, std::nullopt, "#", suffix);
       return true;
     }
   }
@@ -350,7 +327,7 @@ static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_typ
 
 // Format enum values
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  assert(enum_type->GetByteSize() == 8 && "OCaml enum types must be 8 bytes");
+  assert(enum_type->GetByteSize() == helpers::constants::WORD_SIZE && "OCaml enum types must be 8 bytes");
 
   lldb::offset_t offset = 0;
   uint64_t value = data.GetU64(&offset);
@@ -371,12 +348,12 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor&
 static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
                          DataExtractor& data, lldb::ProcessSP process_sp,
                          const ExecutionContextRef &exe_ctx_ref) {
-  assert(ptr_type->GetByteSize() == 8 && "OCaml pointer types must be 8 bytes");
+  assert(ptr_type->GetByteSize() == helpers::constants::WORD_SIZE && "OCaml pointer types must be 8 bytes");
 
   lldb::offset_t offset = 0;
   uint64_t ptr_value = data.GetU64(&offset);
 
-  if (ptr_value & 1) {
+  if (helpers::value::IsImmediate(ptr_value)) {
     stream.Printf("<invalid pointer: 0x%" PRIx64 ">", ptr_value);
     return true;
   }
@@ -697,31 +674,30 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
   LLDB_LOG(log, "FormatArray: array pointer = 0x{0:x}", array_ptr);
 
   // Check for null or immediate values (not actual pointers)
-  if (array_ptr == 0 || array_ptr & 1) {
+  if (array_ptr == 0 || helpers::value::IsImmediate(array_ptr)) {
     // CR sspies: Log an error here.
     stream.Printf("<0x%" PRIx64 ">", array_ptr);
     return true;
   }
 
 
-  // Read OCaml block header at array_ptr - 8
+  // Read OCaml block header from the array header address
   Status error;
-  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(array_ptr - 8, 8, 0, error);
+  lldb::addr_t header_addr = header::GetHeaderAddress(array_ptr);
+  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(
+      header_addr, constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
-    LLDB_LOG(log, "FormatArray: Failed to read array header at 0x{0:x}", array_ptr - 8);
+    LLDB_LOG(log, "FormatArray: Failed to read array header at 0x{0:x}", header_addr);
     stream.Printf("<0x%" PRIx64 ">", array_ptr);
     return true;
   }
 
-  // Extract wosize (number of elements) from header
-  const uint64_t HEADER_WOSIZE_SHIFT = 10;
-  const uint64_t HEADER_WOSIZE_BITS = 46;
-  const uint64_t HEADER_WOSIZE_MASK = (((1ULL << HEADER_WOSIZE_BITS) - 1ULL) << HEADER_WOSIZE_SHIFT);
-  const uint64_t HEADER_TAG_MASK = 0xFF;
-
-  uint64_t wosize = (header & HEADER_WOSIZE_MASK) >> HEADER_WOSIZE_SHIFT;
-  uint8_t tag = header & HEADER_TAG_MASK;
+  // Extract wosize and tag from header
+  uint8_t tag;
+  uint64_t wosize;
+  uint8_t reserved;
+  helpers::header::ParseHeader(header, tag, wosize, reserved);
 
   LLDB_LOG(log, "FormatArray: wosize = {0}, tag = {1}", wosize, tag);
 
@@ -732,31 +708,33 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
   uint64_t stride = array_type->GetStride();
 
   // OCaml float arrays (tag 254) store unboxed 8-byte IEEE 754 doubles
-  const uint8_t DOUBLE_ARRAY_TAG = 254;
-
-  if (tag == DOUBLE_ARRAY_TAG) {
-    // Float arrays: tag 254 always contains 8-byte doubles
-    // wosize is the number of floats (1 word per float)
+  if (tag == constants::DOUBLE_ARRAY_TAG) {
+    // Float arrays: tag 254 always contains IEEE 754 doubles
+    // wosize is the number of doubles (1 word = 1 double on 64-bit platforms)
     for (uint64_t i = 0; i < wosize; i++) {
       if (i > 0) stream.Printf("; ");
 
-      // Read 8-byte float at array_ptr + (i * 8)
-      uint64_t element_address = array_ptr + (i * 8);
-      uint64_t element_value = process_sp->ReadUnsignedIntegerFromMemory(element_address, 8, 0, error);
+      // Read IEEE 754 double at array_ptr + (i * DOUBLE_SIZE)
+      uint64_t element_address = array_ptr + (i * constants::DOUBLE_SIZE);
+      uint64_t element_value = process_sp->ReadUnsignedIntegerFromMemory(
+          element_address, constants::DOUBLE_SIZE, 0, error);
 
       if (error.Fail()) {
         stream.Printf("<error>");
         continue;
       }
 
-      DataExtractor element_data(&element_value, 8, data.GetByteOrder(), data.GetAddressByteSize());
-      OxCamlUnboxedBaseType synthetic_float(0, std::nullopt, 8, OxCamlUnboxedBaseType::Float);
+      DataExtractor element_data(&element_value, constants::DOUBLE_SIZE,
+                                 data.GetByteOrder(), data.GetAddressByteSize());
+      OxCamlUnboxedBaseType synthetic_float(0, std::nullopt,
+                                           constants::DOUBLE_SIZE,
+                                           OxCamlUnboxedBaseType::Float);
       FormatUnboxedBase(stream, &synthetic_float, element_data, process_sp);
     }
   } else {
     // Regular arrays: calculate number of elements from wosize and stride
-    // wosize is number of words, total bytes = wosize * 8
-    uint64_t total_bytes = wosize * 8;
+    // wosize is number of words, total bytes = wosize * WORD_SIZE
+    uint64_t total_bytes = wosize * helpers::constants::WORD_SIZE;
     uint64_t num_elements = total_bytes / stride;
 
     for (uint64_t i = 0; i < num_elements; i++) {

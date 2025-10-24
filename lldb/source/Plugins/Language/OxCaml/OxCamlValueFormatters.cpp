@@ -20,6 +20,7 @@
 
 #include "OxCamlValueFormatters.h"
 #include "OxCamlFormatHelpers.h"
+#include "OxCamlHelpers.h"
 #include "LogChannelOxCaml.h"
 #include "lldb/Core/Address.h"
 #include "lldb/Target/ExecutionContext.h"
@@ -36,6 +37,7 @@
 using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters::oxcaml;
+using namespace lldb_private::formatters::oxcaml::helpers;
 
 /// OCaml special block tags from the runtime system.
 /// These are the predefined tags for special OCaml heap blocks.
@@ -145,7 +147,7 @@ static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
                                       const ExecutionContextRef &exe_ctx_ref,
                                       uint32_t depth) {
   // Check LSB for immediate vs pointer discrimination
-  if ((value & 0x1) == 1) {
+  if (helpers::value::IsImmediate(value)) {
     // LSB = 1: Immediate value (tagged integer, unit, etc.)
     // Immediates don't recurse, so no depth check needed
     return FormatOxCamlImmediate(stream, value, process_sp, exe_ctx_ref, depth);
@@ -155,12 +157,14 @@ static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
     if (depth <= 0) {
       // Read header to get tag information for depth-limited display
       Status error;
-      uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(value - 8, 8, 0, error);
+      uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(
+          header::GetHeaderAddress(value),
+          constants::WORD_SIZE, 0, error);
       if (error.Fail()) {
         stream.Printf("<max depth reached>");
         return true;
       }
-      uint8_t tag = header & 0xff;
+      uint8_t tag = header::ExtractTag(header);
       stream.Printf("[ tag = %u, addr = %p ]", tag, (void*)value);
       return true;
     }
@@ -174,7 +178,7 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
                                                          DataExtractor& data,
                                                          lldb::ProcessSP process_sp,
                                                          const ExecutionContextRef &exe_ctx_ref) {
-  assert(value_type->GetByteSize() == 8 && "OCaml value types must be 8 bytes");
+  assert(value_type->GetByteSize() == helpers::constants::WORD_SIZE && "OCaml value types must be 8 bytes");
 
   // Fatal error: OCaml value formatting requires a valid process for memory access
   if (!process_sp) {
@@ -212,13 +216,11 @@ static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
                                   lldb::ProcessSP process_sp,
                                   const ExecutionContextRef &exe_ctx_ref,
                                   uint32_t depth) {
-  // OCaml immediate value: decode tagged integer by right-shifting by 1
-  // Convert to signed int64_t to handle negative values correctly
-  int64_t signed_value = static_cast<int64_t>(value);
-  int64_t untagged_value = signed_value >> 1;
+  // OCaml immediate value: decode tagged integer by right-shifting
+  int64_t untagged_value = helpers::value::UntagImmediate(value);
 
   // Display with "i" suffix to indicate tagged integer
-  stream.Printf("%" PRId64 "i", untagged_value);
+  stream.Printf("%" PRId64 "%s", untagged_value, helpers::suffixes::TAGGED_INT_SUFFIX);
   return true;
 }
 
@@ -232,33 +234,26 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
     return true;
   }
 
-  // Read header from offset -8 to get tag and wosize
+  // Read header from the block header address
   // Note: process_sp is guaranteed to be valid by FormatOxCamlValue
   Status error;
-  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(value - 8, 8, 0, error);
+  lldb::addr_t header_addr = header::GetHeaderAddress(value);
+  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(
+      header_addr, constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
     Log *log = GetLog(OxCamlLog::Formatting);
-    LLDB_LOG(log, "WARNING: Cannot read OCaml block header at 0x{0:x} - memory may be invalid or corrupted", value - 8);
+    LLDB_LOG(log, "WARNING: Cannot read OCaml block header at 0x{0:x} - memory may be invalid or corrupted",
+             header_addr);
     stream.Printf("<error reading block header>");
     return false;
   }
 
-  // Extract header fields
-  // Header layout for OxCaml (HEADER_RESERVED_BITS = 8):
-  //   bits 0-7:   tag (HEADER_TAG_BITS = 8)
-  //   bits 8-9:   color (HEADER_COLOR_BITS = 2)
-  //   bits 10-55: wosize (HEADER_WOSIZE_BITS = 64 - 8 - 2 - 8 = 46)
-  //   bits 56-63: reserved (HEADER_RESERVED_BITS = 8)
-  const uint64_t HEADER_TAG_MASK = 0xFF;
-  const uint64_t HEADER_WOSIZE_SHIFT = 10;
-  const uint64_t HEADER_RESERVED_SHIFT = 56;
-  const uint64_t HEADER_WOSIZE_BITS = 46;
-  const uint64_t HEADER_WOSIZE_MASK = (((1ULL << HEADER_WOSIZE_BITS) - 1ULL) << HEADER_WOSIZE_SHIFT);
-
-  uint8_t tag = header & HEADER_TAG_MASK;
-  uint64_t wosize = (header & HEADER_WOSIZE_MASK) >> HEADER_WOSIZE_SHIFT;
-  uint8_t reserved = header >> HEADER_RESERVED_SHIFT;
+  // Extract header fields using helper functions
+  uint8_t tag;
+  uint64_t wosize;
+  uint8_t reserved;
+  helpers::header::ParseHeader(header, tag, wosize, reserved);
 
 
   // Dispatch based on tag; none of the special tags support mixed blocks
@@ -285,11 +280,9 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
       return FormatOxCamlCustom(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
     default: {
       // Generic block (tag < 246)
-      // For mixed blocks, reserved > 0 indicates scannable_wosize
-      // scannable_wosize = reserved - 1 (number of OCaml value fields)
-      // Remaining fields are unboxed (float#, int#, etc.)
-      uint64_t scannable_wosize = (reserved > 0) ? (reserved - 1) : wosize;
-      uint64_t non_scannable_wosize = wosize - scannable_wosize;
+      // For mixed blocks, calculate scannable and non-scannable sizes
+      uint64_t scannable_wosize = helpers::header::ExtractScannableWosize(reserved, wosize);
+      uint64_t non_scannable_wosize = helpers::header::ExtractNonScannableWosize(reserved, wosize);
       // Use scannable_wosize to only format OCaml value fields, not unboxed data
       return FormatOxCamlGenericBlock(stream, value, tag, scannable_wosize, non_scannable_wosize, data, process_sp, exe_ctx_ref, depth);
     }
@@ -311,7 +304,6 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
   }
 
   Status error;
-  const uint64_t word_size = 8;
 
   // Only format scannable fields (OCaml values), skip non-scannable fields (unboxed data)
   for (uint64_t i = 0; i < scannable_wosize; i++) {
@@ -320,11 +312,11 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
     }
 
     // Calculate the address we're about to read
-    uint64_t read_address = value + i * word_size;
+    uint64_t read_address = value + i * helpers::constants::WORD_SIZE;
 
     // Read field value from memory with bounds checking
     uint64_t field_value = process_sp->ReadUnsignedIntegerFromMemory(
-        read_address, word_size, 0, error);
+        read_address, helpers::constants::WORD_SIZE, 0, error);
 
     if (error.Fail()) {
       Log *log = GetLog(OxCamlLog::Formatting);
@@ -335,7 +327,8 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
     }
 
     // Create DataExtractor for recursive formatting
-    DataExtractor field_data(&field_value, 8, process_sp->GetByteOrder(), 8);
+    DataExtractor field_data(&field_value, helpers::constants::WORD_SIZE,
+                             process_sp->GetByteOrder(), helpers::constants::WORD_SIZE);
 
     // Recursively format the field (depth already decremented by caller)
     FormatOxCamlValueInternal(stream, field_value, field_data,
@@ -369,7 +362,8 @@ static bool FormatOxCamlLazy(Stream &stream, uint64_t value, uint64_t wosize,
 
   // Create DataExtractor with the computation pointer value
   uint64_t computation_value = computation_ptr;
-  DataExtractor pointed_data(&computation_value, 8, process_sp->GetByteOrder(), 8);
+  DataExtractor pointed_data(&computation_value, helpers::constants::WORD_SIZE,
+                             process_sp->GetByteOrder(), helpers::constants::WORD_SIZE);
 
   // Format using OCaml syntax: "Lazy.from_val contents"
   stream.Printf("Lazy.from_val ");
@@ -388,11 +382,12 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
                                 bool is_infix,
                                 uint32_t depth) {
   Status error;
-  const uint64_t word_size = 8;
   const char* closure_type = is_infix ? "infix closure" : "closure";
 
-  // Read closinfo word from first data word (offset 8 from value)
-  uint64_t closinfo = process_sp->ReadUnsignedIntegerFromMemory(value + word_size, word_size, 0, error);
+  // Read closinfo word from first data word (offset WORD_SIZE from value)
+  uint64_t closinfo = process_sp->ReadUnsignedIntegerFromMemory(
+      value + helpers::constants::WORD_SIZE,
+      helpers::constants::WORD_SIZE, 0, error);
   if (error.Fail()) {
     stream.Printf("<%s, code ptr unreadable>", closure_type);
     return true;
@@ -406,7 +401,8 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
   int offset = (arity == 0 || arity == 1) ? 0 : 2;
 
   // Read full application code pointer
-  lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(value + offset * word_size, error);
+  lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(
+      value + offset * helpers::constants::WORD_SIZE, error);
   if (error.Fail()) {
     stream.Printf("<%s, code ptr unreadable>", closure_type);
     return true;
@@ -465,7 +461,8 @@ static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
   }
 
   uint64_t forwarded_value = forward_ptr;
-  DataExtractor forwarded_data(&forwarded_value, 8, process_sp->GetByteOrder(), 8);
+  DataExtractor forwarded_data(&forwarded_value, helpers::constants::WORD_SIZE,
+                               process_sp->GetByteOrder(), helpers::constants::WORD_SIZE);
 
   // Transparently forward to the internal helper - no wrapper tags
   // This makes forward pointers completely invisible to the user
@@ -489,23 +486,21 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
                                uint32_t depth) {
   // OCaml string: read string bytes from heap memory
   Status error;
-  const uint64_t word_size = 8;
 
   // Read the last word to get the padding byte (OCaml string encoding)
-  uint64_t last_word_address = value + (wosize - 1) * word_size;
+  uint64_t last_word_address = header::GetLastWordAddress(value, wosize);
   uint64_t last_word = process_sp->ReadUnsignedIntegerFromMemory(
-      last_word_address, word_size, 0, error);
+      last_word_address, helpers::constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<could not read string length>");
     return false;
   }
 
-  // Extract padding byte from bits 56-63 (last_word >> 56)
-  // OCaml string length = wosize * word_size - padding - 1
+  // Extract padding byte and calculate string length
   // CR sspies: This fixes a particular endianness. Generalize.
-  uint8_t padding_byte = last_word >> 56;
-  uint64_t string_length = wosize * word_size - padding_byte - 1;
+  uint8_t padding_byte = helpers::string::ExtractPaddingByte(last_word);
+  uint64_t string_length = helpers::string::CalculateStringLength(wosize, padding_byte);
 
   // Read the string data from memory
   std::vector<uint8_t> str_buffer(string_length);
@@ -519,7 +514,7 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
 
   // Use the helper function to format with proper OCaml escaping
   const char *string_data = reinterpret_cast<const char*>(str_buffer.data());
-  lldb_private::formatters::oxcaml::helpers::FormatOCamlString(&stream,
+  helpers::FormatOCamlString(&stream,
                                                                string_data,
                                                                string_length);
   return true;
@@ -529,13 +524,12 @@ static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp,
                                const ExecutionContextRef &exe_ctx_ref,
                                uint32_t depth) {
-  // OCaml boxed float: read 8 bytes of IEEE double precision data
+  // OCaml boxed float: read IEEE 754 double precision data
   Status error;
-  const uint64_t word_size = 8;
 
-  // Read the float bits from memory at the value address
+  // Read the double bits from memory at the value address
   uint64_t float_bits = process_sp->ReadUnsignedIntegerFromMemory(
-      value, word_size, 0, error);
+      value, constants::DOUBLE_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<could not read float data>");
@@ -543,11 +537,11 @@ static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
   }
 
   // Convert to APFloat using IEEE double semantics
-  llvm::APInt apint(8 * word_size, float_bits);
+  llvm::APInt apint(8 * constants::DOUBLE_SIZE, float_bits);
   llvm::APFloat apfloat(llvm::APFloat::IEEEdouble(), apint);
 
   // Use helper function for proper OCaml float formatting
-  lldb_private::formatters::oxcaml::helpers::FormatAPFloat(&stream, apfloat);
+  helpers::FormatAPFloat(&stream, apfloat);
   return true;
 }
 
@@ -557,28 +551,27 @@ static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wos
                                     uint32_t depth) {
   // OCaml float array: display in OCaml syntax [| float1; float2; ... |]
   Status error;
-  const uint64_t word_size = 8;
   bool had_error = false;
 
   stream.Printf("[| ");
 
   for (uint64_t index = 0; index < wosize; index++) {
-    // Read float bits from memory at value + (index * word_size)
-    uint64_t element_address = value + (index * word_size);
+    // Read float bits from memory at value + (index * WORD_SIZE)
+    uint64_t element_address = value + (index * helpers::constants::WORD_SIZE);
     uint64_t float_bits = process_sp->ReadUnsignedIntegerFromMemory(
-        element_address, word_size, 0, error);
+        element_address, helpers::constants::WORD_SIZE, 0, error);
 
     if (error.Fail()) {
       stream.Printf("<could not read float array element %" PRIu64 ">", index);
       had_error = true;
     } else {
       // Convert to APFloat using IEEE double semantics
-      llvm::APInt apint(8 * word_size, float_bits);
+      llvm::APInt apint(8 * helpers::constants::WORD_SIZE, float_bits);
       llvm::APFloat apfloat(llvm::APFloat::IEEEdouble(), apint);
 
       // Use helper function for proper OCaml float formatting
       // CR sspies: Consider adding "#" prefix for float array elements since they are internally unboxed
-      lldb_private::formatters::oxcaml::helpers::FormatAPFloat(&stream, apfloat);
+      helpers::FormatAPFloat(&stream, apfloat);
     }
 
     // Add separator between elements (but not after the last one)
@@ -601,7 +594,7 @@ static bool FormatInt32Custom(Stream &stream, const std::string &identifier,
 
   // Read only 4 bytes for Int32.t (matches actual data size)
   uint32_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
-      data_ptr, 4, 0, error);
+      data_ptr, helpers::constants::INT32_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<custom \"%s\" (could not read data field for int32)>", identifier.c_str());
@@ -609,8 +602,8 @@ static bool FormatInt32Custom(Stream &stream, const std::string &identifier,
   }
 
   // Use helper function for consistent integer formatting
-  llvm::APInt apint(32, int_value);
-  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "l");
+  llvm::APInt apint(helpers::constants::INT32_SIZE * 8, int_value);
+  helpers::FormatAPInt(&stream, apint, true, "", helpers::suffixes::INT32_SUFFIX);
   return true;
 }
 
@@ -619,10 +612,9 @@ static bool FormatInt64Custom(Stream &stream, const std::string &identifier,
                              lldb::ProcessSP process_sp) {
   // Int64.t: read 64-bit integer from data_ptr and format with "L" suffix
   Status error;
-  const uint64_t word_size = 8;
 
   uint64_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
-      data_ptr, word_size, 0, error);
+      data_ptr, helpers::constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<custom \"%s\" (could not read data field for int64)>", identifier.c_str());
@@ -630,8 +622,8 @@ static bool FormatInt64Custom(Stream &stream, const std::string &identifier,
   }
 
   // Use helper function for consistent integer formatting
-  llvm::APInt apint(64, int_value);
-  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "L");
+  llvm::APInt apint(helpers::constants::INT64_SIZE * 8, int_value);
+  helpers::FormatAPInt(&stream, apint, true, "", helpers::suffixes::INT64_SUFFIX);
   return true;
 }
 
@@ -640,19 +632,18 @@ static bool FormatNativeIntCustom(Stream &stream, const std::string &identifier,
                                  lldb::ProcessSP process_sp) {
   // Nativeint.t: read native integer from data_ptr and format with "n" suffix
   Status error;
-  const uint64_t word_size = 8;
 
   uint64_t int_value = process_sp->ReadUnsignedIntegerFromMemory(
-      data_ptr, word_size, 0, error);
+      data_ptr, helpers::constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<custom \"%s\" (could not read data field for nativeint)>", identifier.c_str());
     return false;
   }
 
-  // Use helper function for consistent integer formatting (64-bit for native int)
-  llvm::APInt apint(64, int_value);
-  lldb_private::formatters::oxcaml::helpers::FormatAPInt(&stream, apint, true, "", "n");
+  // Use helper function for consistent integer formatting (native word size)
+  llvm::APInt apint(helpers::constants::WORD_SIZE * 8, int_value);
+  helpers::FormatAPInt(&stream, apint, true, "", helpers::suffixes::NATIVEINT_SUFFIX);
   return true;
 }
 
@@ -661,7 +652,6 @@ static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
                                 lldb::ProcessSP process_sp) {
   // Bigarray: read data pointer and dimensions from the data area
   Status error;
-  const uint64_t word_size = 8;
 
   // Read bigarray data pointer from data_ptr (first field)
   lldb::addr_t bigarray_data_ptr = process_sp->ReadPointerFromMemory(data_ptr, error);
@@ -670,9 +660,10 @@ static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
     return false;
   }
 
-  // Read number of dimensions from data_ptr+8 (second field)
+  // Read number of dimensions from data_ptr + WORD_SIZE (second field)
   uint64_t num_dims = process_sp->ReadUnsignedIntegerFromMemory(
-      data_ptr + word_size, word_size, 0, error);
+      data_ptr + helpers::constants::WORD_SIZE,
+      helpers::constants::WORD_SIZE, 0, error);
   if (error.Fail()) {
     stream.Printf("<bigarray (could not read dimensions)>");
     return false;
@@ -690,7 +681,7 @@ static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
 
   // Read 32-bit float bits from data_ptr (only 4 bytes)
   uint32_t float_bits = process_sp->ReadUnsignedIntegerFromMemory(
-      data_ptr, 4, 0, error);
+      data_ptr, helpers::constants::FLOAT32_SIZE, 0, error);
 
   if (error.Fail()) {
     stream.Printf("<could not read float32>");
@@ -698,12 +689,12 @@ static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
   }
 
   // Convert to APFloat using IEEE single precision semantics
-  llvm::APInt apint(32, float_bits);
+  llvm::APInt apint(helpers::constants::FLOAT32_SIZE * 8, float_bits);
   llvm::APFloat apfloat(llvm::APFloat::IEEEsingle(), apint);
 
   // Use helper function with "s" suffix for float32
-  lldb_private::formatters::oxcaml::helpers::FormatAPFloat(&stream, apfloat,
-                                                          std::nullopt, "", "s");
+  helpers::FormatAPFloat(&stream, apfloat,
+                         std::nullopt, "", helpers::suffixes::FLOAT32_SUFFIX);
   return true;
 }
 
@@ -748,8 +739,7 @@ static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
   auto formatter_it = custom_formatters.find(identifier_str);
   if (formatter_it != custom_formatters.end()) {
     // Found a specific formatter, pass data pointer (skipping the header)
-    const uint64_t word_size = 8;
-    uint64_t data_ptr = value + word_size;
+    uint64_t data_ptr = value + helpers::constants::WORD_SIZE;
     return formatter_it->second(stream, identifier_str, data_ptr, wosize, process_sp);
   } else {
     // Unknown custom type, use fallback format
