@@ -1,6 +1,6 @@
-# OxCaml LLDB Plugin - CLAUDE.md
+# OxCaml LLDB Plugin - Agent Guide
 
-This file provides guidance for Claude Code when working with the OxCaml LLDB plugin.
+This file provides guidance for AI coding agents when working with the OxCaml LLDB plugin.
 
 ## Overview
 
@@ -267,7 +267,7 @@ lldb/source/Plugins/
 
 ## Building and Testing
 
-For build commands and general testing, see **@/CLAUDE.md** (sections: "Build System", "Testing").
+For build commands and general testing, see **@/AGENTS.md** (sections: "Build System", "Testing").
 
 ### Testing with OCaml Binaries
 

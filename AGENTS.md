@@ -1,11 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance for AI coding agents when working with code in this repository.
 
 ## Related Documentation
 
-- **OxCaml Plugin Details**: See @lldb/source/Plugins/Language/OxCaml/CLAUDE.md for in-depth plugin architecture, implementation details, and DWARF structure documentation.
-- **TypeSystem Implementation**: See @lldb/source/Plugins/TypeSystem/OxCaml/CLAUDE.md for TypeSystem-specific guidance and implementation notes.
+- **OxCaml Plugin Details**: See @lldb/source/Plugins/Language/OxCaml/AGENTS.md for in-depth plugin architecture, implementation details, and DWARF structure documentation.
+- **TypeSystem Implementation**: See @lldb/source/Plugins/TypeSystem/OxCaml/AGENTS.md for TypeSystem-specific guidance and implementation notes.
 
 ## Project Overview
 
@@ -94,7 +94,7 @@ The OxCaml compiler emits three categories of types in DWARF:
 3. **Unboxed Primitives** - Direct native representation without tagging (float#, int32#, int64#, etc.)
 
 For detailed information about OCaml value representation, DWARF encoding, and plugin implications, see:
-**@lldb/source/Plugins/Language/OxCaml/CLAUDE.md** (sections: "OCaml Value Representation", "Type System Design")
+**@lldb/source/Plugins/Language/OxCaml/AGENTS.md** (sections: "OCaml Value Representation", "Type System Design")
 
 ## LLDB Plugin Architecture
 
@@ -248,7 +248,7 @@ The plugin provides comprehensive OCaml debugging support including:
 **Known Limitation**: Expression evaluation not yet implemented
 
 For the complete feature list with examples, see:
-**@lldb/source/Plugins/Language/OxCaml/CLAUDE.md** (section: "Working Features")
+**@lldb/source/Plugins/Language/OxCaml/AGENTS.md** (section: "Working Features")
 
 ## Testing Quick Start
 ```bash

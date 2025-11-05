@@ -1,11 +1,11 @@
-# CLAUDE.md
+# TypeSystem Agent Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance for AI coding agents when working with code in this repository.
 
 ## Primary Documentation
 
 See the main OxCaml plugin documentation at:
-`lldb/source/Plugins/Language/OxCaml/CLAUDE.md`
+`lldb/source/Plugins/Language/OxCaml/AGENTS.md`
 
 ## TypeSystem-Specific Notes
 
