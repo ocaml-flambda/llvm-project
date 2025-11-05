@@ -259,12 +259,13 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
                                      lldb::ProcessSP process_sp,
                                      const ExecutionContextRef &exe_ctx_ref,
                                      uint32_t depth) {
-  // Format: [ tag = N | field1, field2, ... ] or [ tag = N; non value fields: M | field1, field2, ... ]
-  if (non_scannable_wosize > 0) {
-    stream.Printf("[ tag = %u; non value fields: %llu) | ", tag, (unsigned long long)non_scannable_wosize);
-  } else {
-    stream.Printf("[ tag = %u | ", tag);
-  }
+  // Note: alternative compact form we may adopt later:
+  // block(tag | field1, field2 | non-value words: N)
+
+  if (tag > 0)
+    stream.Printf("%u:[", tag);
+  else
+    stream.Printf("[");
 
   Status error;
 
@@ -293,7 +294,11 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
                               process_sp, exe_ctx_ref, depth);
   }
 
-  stream.Printf(" ]");
+  if (non_scannable_wosize > 0)
+    stream.Printf(" | non-value words: %llu",
+                  (unsigned long long)non_scannable_wosize);
+
+  stream.Printf("]");
   return true;
 }
 

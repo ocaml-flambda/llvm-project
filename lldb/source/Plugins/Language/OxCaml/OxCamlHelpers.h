@@ -128,7 +128,7 @@ namespace suffixes {
   constexpr const char* UINT64_SUFFIX = "uL"; // uint64# -> #42uL
 
   /// Other OCaml type suffixes
-  constexpr const char* TAGGED_INT_SUFFIX = "i";  // Tagged OCaml int -> 42i
+  constexpr const char* TAGGED_INT_SUFFIX = "";   // Tagged OCaml int -> 42
   constexpr const char* NATIVEINT_SUFFIX = "n";   // Nativeint.t -> #42n
   constexpr const char* FLOAT32_SUFFIX = "s";     // float32# -> #3.14s
 
