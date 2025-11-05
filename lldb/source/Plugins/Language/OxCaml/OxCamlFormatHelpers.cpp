@@ -14,11 +14,17 @@
 /// OCaml-specific formatting conventions.
 
 #include "OxCamlFormatHelpers.h"
+#include "LogChannelOxCaml.h"
+#include "OxCamlHelpers.h"
 #include "lldb/Target/ExecutionContextScope.h"
+#include "lldb/Target/Process.h"
 #include "lldb/Target/Target.h"
+#include "lldb/Utility/Log.h"
+#include "lldb/Utility/Status.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
+#include <vector>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -247,4 +253,43 @@ void lldb_private::formatters::oxcaml::helpers::FormatOCamlString(Stream *stream
     FormatOCamlCharacter(*stream, data[i]);
   }
   stream->Printf("\"");
+}
+
+// Read OCaml string data from process memory
+// Core implementation shared by FormatOxCamlString and ReadOCamlString
+std::optional<std::string>
+lldb_private::formatters::oxcaml::helpers::ReadOCamlStringData(lldb::addr_t data_addr,
+                                                                uint64_t wosize,
+                                                                lldb::ProcessSP process_sp) {
+  Status error;
+  Log *log = GetLog(OxCamlLog::Formatting);
+
+  // Read last word to extract padding byte
+  uint64_t last_word_address = header::GetLastWordAddress(data_addr, wosize);
+  uint64_t last_word = process_sp->ReadUnsignedIntegerFromMemory(
+      last_word_address, constants::WORD_SIZE, 0, error);
+
+  if (error.Fail()) {
+    LLDB_LOG(log, "Failed to read last word at address 0x{0:x}: {1}",
+             last_word_address, error.AsCString());
+    return std::nullopt;
+  }
+
+  // Calculate string length from wosize and padding byte
+  uint8_t padding_byte = string::ExtractPaddingByte(last_word);
+  uint64_t string_length = string::CalculateStringLength(wosize, padding_byte);
+
+  // Read string data from memory
+  std::vector<uint8_t> str_buffer(string_length);
+  size_t bytes_read = process_sp->ReadMemory(data_addr, str_buffer.data(),
+                                             string_length, error);
+
+  if (error.Fail() || bytes_read < string_length) {
+    LLDB_LOG(log, "Failed to read string data at address 0x{0:x}, expected {1} bytes, got {2}: {3}",
+             data_addr, string_length, bytes_read, error.AsCString());
+    return std::nullopt;
+  }
+
+  // Return string (std::string handles null bytes correctly via length parameter)
+  return std::string(reinterpret_cast<const char*>(str_buffer.data()), string_length);
 }

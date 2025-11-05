@@ -418,6 +418,168 @@ static bool FormatTypedef(Stream &stream, OxCamlTypedefType* typedef_type,
   return FormatValue(stream, typedef_type->GetUnderlyingType(), data, process_sp, exe_ctx_ref);
 }
 
+// Format an OCaml exception value
+//
+// OCaml Exception Representation:
+// ================================
+// Every exception constructor gets a unique value, which is a block with Object_tag (0xf8).
+// This Object_tag block stores the exception's constructor name as a string in its first field.
+//
+// Exception Value Encoding (two cases):
+//
+// 1. Exception with NO arguments (e.g., "exception Empty"):
+//    The exception value IS a pointer to the Object_tag block:
+//      value -> [Object_tag block]
+//                 field 0: pointer to string "Empty"
+//
+// 2. Exception WITH arguments (e.g., "exception Found of int"):
+//    The exception value is a pointer to a separate block (tag 0x00) that stores:
+//      value -> [Exception block, tag 0x00]
+//                 field 0: pointer to Object_tag block (the exception value)
+//                 field 1+: exception arguments
+//
+//    Where the Object_tag block contains:
+//      [Object_tag block, tag 0xf8]
+//        field 0: pointer to string "Found"
+
+// Information extracted from an OCaml exception value
+struct ExceptionInfo {
+  std::string constructor_name;       // Exception constructor name
+  std::vector<uint64_t> arguments;    // Exception arguments (empty if no arguments)
+};
+
+static std::optional<ExceptionInfo> ExtractExceptionInfo(lldb::addr_t exception_addr,
+                                                         lldb::ProcessSP process_sp) {
+  Status error;
+  Log *log = GetLog(OxCamlLog::Formatting);
+
+  uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(
+      exception_addr - constants::WORD_SIZE, constants::WORD_SIZE, 0, error);
+  if (error.Fail()) {
+    LLDB_LOG(log, "Failed to read exception block header at 0x{0:x}: {1}",
+             exception_addr, error.AsCString());
+    return std::nullopt;
+  }
+
+  uint8_t tag = header::ExtractTag(header);
+  uint64_t wosize = header::ExtractWosize(header);
+
+  std::vector<uint64_t> arguments;
+  lldb::addr_t string_addr;
+
+  switch (tag) {
+    case static_cast<uint8_t>(constants::SpecialTag::Object_tag): {
+      uint64_t string_ptr = process_sp->ReadUnsignedIntegerFromMemory(
+          exception_addr, constants::WORD_SIZE, 0, error);
+      if (error.Fail() || (string_ptr & 1) != 0 || string_ptr == 0) {
+        LLDB_LOG(log, "Failed to read valid string pointer from Object_tag block at 0x{0:x}",
+                 exception_addr);
+        return std::nullopt;
+      }
+      string_addr = string_ptr;
+      break;
+    }
+
+    case constants::EXCEPTION_BLOCK_TAG: {
+      uint64_t obj_tag_ptr = process_sp->ReadUnsignedIntegerFromMemory(
+          exception_addr, constants::WORD_SIZE, 0, error);
+      if (error.Fail() || (obj_tag_ptr & 1) != 0 || obj_tag_ptr == 0) {
+        LLDB_LOG(log, "Failed to read valid Object_tag pointer from exception block at 0x{0:x}",
+                 exception_addr);
+        return std::nullopt;
+      }
+
+      uint64_t string_ptr = process_sp->ReadUnsignedIntegerFromMemory(
+          obj_tag_ptr, constants::WORD_SIZE, 0, error);
+      if (error.Fail() || (string_ptr & 1) != 0 || string_ptr == 0) {
+        LLDB_LOG(log, "Failed to read valid string pointer from Object_tag at 0x{0:x}",
+                 obj_tag_ptr);
+        return std::nullopt;
+      }
+      string_addr = string_ptr;
+
+      for (uint64_t i = 1; i < wosize; i++) {
+        uint64_t arg_value = process_sp->ReadUnsignedIntegerFromMemory(
+            exception_addr + i * constants::WORD_SIZE, constants::WORD_SIZE, 0, error);
+        if (error.Fail()) {
+          LLDB_LOG(log, "Failed to read exception arguments from block at 0x{0:x}",
+                   exception_addr);
+          return std::nullopt;
+        }
+        arguments.push_back(arg_value);
+      }
+      break;
+    }
+
+    default:
+      LLDB_LOG(log, "Unknown exception block tag {0} at 0x{1:x}", tag, exception_addr);
+      return std::nullopt;
+  }
+
+  uint64_t string_header = process_sp->ReadUnsignedIntegerFromMemory(
+      string_addr - constants::WORD_SIZE, constants::WORD_SIZE, 0, error);
+  if (error.Fail() || header::ExtractTag(string_header) != static_cast<uint8_t>(constants::SpecialTag::String_tag)) {
+    LLDB_LOG(log, "Failed to read valid string header at 0x{0:x}", string_addr);
+    return std::nullopt;
+  }
+
+  uint64_t wosize_string = header::ExtractWosize(string_header);
+
+  auto string_opt = helpers::ReadOCamlStringData(string_addr, wosize_string, process_sp);
+  if (!string_opt) {
+    LLDB_LOG(log, "Failed to read string data at 0x{0:x}", string_addr);
+    return std::nullopt;
+  }
+
+  ExceptionInfo info;
+  info.constructor_name = std::move(*string_opt);
+  info.arguments = std::move(arguments);
+
+  return info;
+}
+
+// Format an OCaml exception value
+static bool FormatException(Stream &stream, DataExtractor& data, lldb::ProcessSP process_sp,
+                           const ExecutionContextRef &exe_ctx_ref) {
+  lldb::offset_t offset = 0;
+  uint64_t exception_value = data.GetU64(&offset);
+
+  if (exception_value == 0 || (exception_value & 1) == 1) {
+    stream.Printf("<exception>");
+    return false;
+  }
+
+  auto info_opt = ExtractExceptionInfo(exception_value, process_sp);
+
+  if (!info_opt) {
+    stream.Printf("<exception>");
+    return false;
+  }
+
+  stream.Printf("%s", info_opt->constructor_name.c_str());
+
+  if (!info_opt->arguments.empty()) {
+    bool use_parens = (info_opt->arguments.size() > 1);
+    stream.Printf(use_parens ? " (" : " ");
+
+    for (size_t i = 0; i < info_opt->arguments.size(); i++) {
+      if (i > 0) {
+        stream.Printf(", ");
+      }
+
+      DataExtractor arg_data(&info_opt->arguments[i], constants::WORD_SIZE,
+                            process_sp->GetByteOrder(), constants::WORD_SIZE);
+      oxcaml::FormatOxCamlValue(stream, arg_data, process_sp, exe_ctx_ref);
+    }
+
+    if (use_parens) {
+      stream.Printf(")");
+    }
+  }
+
+  return true;
+}
+
 static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref) {
   if (member.IsBitField()) {
     lldb::offset_t offset = member.data_member_location;
@@ -704,6 +866,20 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType* struct_type,
     return FormatVariantPart(stream, variant_parts[0], data, process_sp, exe_ctx_ref, true);
   }
 
+  // Special case: OCaml exceptions (union-style structure with "exn" and "raw" members)
+  // Exceptions have both members at the same offset - format only the "raw" member
+  if (members.size() == 2 && variant_parts.empty()) {
+    // Check if this is the exception pattern: two members named "exn" and "raw" at offset 0
+    if (members[0].name.has_value() && members[1].name.has_value() &&
+        members[0].data_member_location == 0 && members[1].data_member_location == 0) {
+      const std::string& name0 = members[0].name.value();
+      const std::string& name1 = members[1].name.value();
+      if ((name0 == "exn" && name1 == "raw") || (name0 == "raw" && name1 == "exn")) {
+        return FormatException(stream, data, process_sp, exe_ctx_ref);
+      }
+    }
+  }
+
   // Regular case: structure with members and/or multiple variant parts
   // Determine formatting based on type
   bool is_tuple = struct_type->IsTuple();
@@ -749,7 +925,7 @@ static bool FormatValue(Stream &stream, OxCamlType* type, DataExtractor& data, l
 
   switch (type->GetKind()) {
     case OxCamlType::Value:
-      return oxcaml::FormatOxCamlValue(stream, static_cast<OxCamlValueType*>(type), data, process_sp, exe_ctx_ref);
+      return oxcaml::FormatOxCamlValue(stream, data, process_sp, exe_ctx_ref);
     case OxCamlType::UnboxedBase:
       return FormatUnboxedBase(stream, static_cast<OxCamlUnboxedBaseType*>(type), data, process_sp);
     case OxCamlType::Enum:

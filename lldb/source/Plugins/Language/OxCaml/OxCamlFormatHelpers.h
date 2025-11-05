@@ -94,6 +94,18 @@ std::optional<llvm::APFloat> ExtractAPFloat(const DataExtractor &data,
 /// \param string_length Number of characters in string
 void FormatOCamlString(Stream *stream, const char *data, uint64_t string_length);
 
+/// Read OCaml string data from process memory.
+/// Reads the string data from a String_tag OCaml block in memory.
+/// Handles padding byte extraction and string length calculation.
+/// Does NOT perform tag validation - caller must ensure address points to string data.
+/// \param data_addr Address of string data (NOT including header)
+/// \param wosize Word size from block header
+/// \param process_sp Process to read from
+/// \returns String contents if successful, std::nullopt on read failure
+std::optional<std::string> ReadOCamlStringData(lldb::addr_t data_addr,
+                                               uint64_t wosize,
+                                               lldb::ProcessSP process_sp);
+
 } // namespace helpers
 } // namespace oxcaml
 } // namespace formatters

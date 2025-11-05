@@ -39,21 +39,6 @@ using namespace lldb_private;
 using namespace lldb_private::formatters::oxcaml;
 using namespace lldb_private::formatters::oxcaml::helpers;
 
-/// OCaml special block tags from the runtime system.
-/// These are the predefined tags for special OCaml heap blocks.
-enum class OxCamlSpecialTag : uint8_t {
-  Lazy_tag = 246,           ///< Lazy values
-  Closure_tag = 247,        ///< Function closures
-  Object_tag = 248,         ///< Object instances
-  Infix_tag = 249,          ///< Infix closures
-  Forward_tag = 250,        ///< Forwarding pointers (GC)
-  Abstract_tag = 251,       ///< Abstract values
-  String_tag = 252,         ///< String values
-  Double_tag = 253,         ///< Boxed float values
-  Double_array_tag = 254,   ///< Float arrays
-  Custom_tag = 255          ///< Custom blocks
-};
-
 // Forward declarations of helper functions
 static bool FormatOxCamlImmediate(Stream &stream, uint64_t value,
                                   lldb::ProcessSP process_sp,
@@ -169,12 +154,9 @@ static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
 }
 
 bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
-                                                         OxCamlValueType* value_type,
                                                          DataExtractor& data,
                                                          lldb::ProcessSP process_sp,
                                                          const ExecutionContextRef &exe_ctx_ref) {
-  assert(value_type->GetByteSize() == helpers::constants::WORD_SIZE && "OCaml value types must be 8 bytes");
-
   if (!process_sp) {
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(log, "FATAL: FormatOxCamlValue called without valid process - this is a critical system error");
@@ -242,25 +224,25 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
 
   // Dispatch based on tag; none of the special tags support mixed blocks
   switch (tag) {
-    case static_cast<uint8_t>(OxCamlSpecialTag::Lazy_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Lazy_tag):
       return FormatOxCamlLazy(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Closure_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Closure_tag):
       return FormatOxCamlClosure(stream, value, wosize, data, process_sp, exe_ctx_ref, false, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Object_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Object_tag):
       return FormatOxCamlObject(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Infix_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Infix_tag):
       return FormatOxCamlClosure(stream, value, wosize, data, process_sp, exe_ctx_ref, true, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Forward_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Forward_tag):
       return FormatOxCamlForward(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Abstract_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Abstract_tag):
       return FormatOxCamlAbstract(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::String_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::String_tag):
       return FormatOxCamlString(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Double_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Double_tag):
       return FormatOxCamlDouble(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Double_array_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Double_array_tag):
       return FormatOxCamlDoubleArray(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
-    case static_cast<uint8_t>(OxCamlSpecialTag::Custom_tag):
+    case static_cast<uint8_t>(constants::SpecialTag::Custom_tag):
       return FormatOxCamlCustom(stream, value, wosize, data, process_sp, exe_ctx_ref, depth);
     default: {
       // Generic block (tag < 246): for mixed blocks, calculate scannable and non-scannable sizes
@@ -441,32 +423,13 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp,
                                const ExecutionContextRef &exe_ctx_ref,
                                uint32_t depth) {
-  Status error;
-
-  uint64_t last_word_address = header::GetLastWordAddress(value, wosize);
-  uint64_t last_word = process_sp->ReadUnsignedIntegerFromMemory(
-      last_word_address, helpers::constants::WORD_SIZE, 0, error);
-
-  if (error.Fail()) {
-    stream.Printf("<could not read string length>");
+  auto string_opt = helpers::ReadOCamlStringData(value, wosize, process_sp);
+  if (!string_opt) {
+    stream.Printf("<unreadable string>");
     return false;
   }
 
-  // CR sspies: This fixes a particular endianness. Generalize.
-  uint8_t padding_byte = helpers::string::ExtractPaddingByte(last_word);
-  uint64_t string_length = helpers::string::CalculateStringLength(wosize, padding_byte);
-
-  std::vector<uint8_t> str_buffer(string_length);
-  size_t bytes_read = process_sp->ReadMemory(value, str_buffer.data(),
-                                            string_length, error);
-
-  if (error.Fail() || bytes_read < string_length) {
-    stream.Printf("<could not read string data>");
-    return false;
-  }
-
-  const char *string_data = reinterpret_cast<const char*>(str_buffer.data());
-  helpers::FormatOCamlString(&stream, string_data, string_length);
+  helpers::FormatOCamlString(&stream, string_opt->c_str(), string_opt->length());
   return true;
 }
 

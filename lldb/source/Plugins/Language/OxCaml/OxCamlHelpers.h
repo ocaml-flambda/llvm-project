@@ -65,6 +65,24 @@ namespace constants {
   /// Float arrays store unboxed 8-byte IEEE 754 doubles
   constexpr uint8_t DOUBLE_ARRAY_TAG = 254;
 
+  /// OCaml special block tags (tags >= 246)
+  enum class SpecialTag : uint8_t {
+    Lazy_tag = 246,           // Lazy values
+    Closure_tag = 247,        // Function closures
+    Object_tag = 248,         // Object instances (0xf8), exception descriptors
+    Infix_tag = 249,          // Infix closures
+    Forward_tag = 250,        // Forwarding pointers (GC)
+    Abstract_tag = 251,       // Abstract values
+    String_tag = 252,         // String values
+    Double_tag = 253,         // Boxed float values
+    Double_array_tag = 254,   // Float arrays
+    Custom_tag = 255          // Custom blocks
+  };
+
+  /// Regular block tag for exceptions with arguments
+  /// (not a "special" tag, but specific to exception representation)
+  constexpr uint8_t EXCEPTION_BLOCK_TAG = 0;
+
   /// Size of IEEE 754 double precision float (8 bytes)
   /// Used for boxed floats (Double_tag) and float arrays (Double_array_tag)
   constexpr uint64_t DOUBLE_SIZE = 8;
