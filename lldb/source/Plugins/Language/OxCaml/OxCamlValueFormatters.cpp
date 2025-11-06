@@ -376,7 +376,11 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
   addr.Dump(&addr_stream, nullptr, Address::DumpStyleResolvedDescription,
             Address::DumpStyleFileAddress, 8, false);
 
-  stream.Printf("<%s>@%s", closure_type, addr_stream.GetData());
+  const char *resolved = addr_stream.GetData();
+  if (!resolved || resolved[0] == '\0')
+    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+  else
+    stream.Printf("%s", resolved);
   return true;
 }
 
@@ -384,7 +388,7 @@ static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp,
                                const ExecutionContextRef &exe_ctx_ref,
                                uint32_t depth) {
-  stream.Printf("<object|%" PRIu64 " words|%p>", wosize, (void*)value);
+  stream.Printf("<object|%" PRIu64 " words>@%p", wosize, (void*)value);
   return true;
 }
 
@@ -420,7 +424,7 @@ static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize
                                  DataExtractor& data, lldb::ProcessSP process_sp,
                                  const ExecutionContextRef &exe_ctx_ref,
                                  uint32_t depth) {
-  stream.Printf("<abstract|%" PRIu64 " words|%p>", wosize, (void*)value);
+  stream.Printf("<abstract|%" PRIu64 " words>@%p", wosize, (void*)value);
   return true;
 }
 
