@@ -6,6 +6,12 @@ This file provides guidance for AI coding agents when working with the OxCaml LL
 
 The OxCaml plugin adds OCaml debugging support to LLDB. It enables LLDB to understand OCaml's type system, parse DWARF debug information from OCaml binaries, and display OCaml values in a meaningful way.
 
+## Formatting Expectations
+
+- Run `clang-format -style=file -i` on any OxCaml `.cpp`/`.h` files you touch.
+- For small edits you can use `git clang-format` to limit changes to your diff.
+- The repository’s `.clang-format` already enforces the LLVM style; please ensure formatting is clean before handing work back.
+
 ## Architecture
 
 ### Component Overview
