@@ -219,7 +219,7 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
   if (value == 0) {
     constexpr const char *marker = "<null>";
     OXCAML_EXPLAIN_ERROR_MARKER(
-        marker, "Encountered unexpected null OCaml block pointer");
+        marker, "{0}", "Encountered unexpected null OCaml block pointer");
     stream.PutCString(marker);
     return true;
   }
