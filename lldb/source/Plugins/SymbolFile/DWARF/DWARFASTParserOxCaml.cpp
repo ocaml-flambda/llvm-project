@@ -50,6 +50,9 @@ lldb::TypeSP DWARFASTParserOxCaml::ParseTypeFromDWARF(const SymbolContext &sc,
                                                        bool *type_is_new_ptr) {
   Log *log = GetLog(OxCamlLog::TypeParsing);
 
+  if (type_is_new_ptr)
+    *type_is_new_ptr = false;
+
   if (!die.IsValid()) {
     LLDB_LOG(log, "ParseTypeFromDWARF: Invalid DIE");
     return TypeSP();
