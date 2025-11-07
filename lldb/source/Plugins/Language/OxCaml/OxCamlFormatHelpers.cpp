@@ -30,7 +30,6 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters::oxcaml::helpers;
 
-
 // Helper function to determine if float needs trailing ".0"
 // Returns true if the string contains only digits and minus sign
 static bool NeedsTrailingDotZero(llvm::StringRef str) {
@@ -39,9 +38,9 @@ static bool NeedsTrailingDotZero(llvm::StringRef str) {
 
 // Based on GetAPInt/DumpAPInt from upstream LLDB's DumpDataExtractor.cpp
 std::optional<llvm::APInt>
-lldb_private::formatters::oxcaml::helpers::ExtractAPInt(const DataExtractor &data,
-                                                        lldb::offset_t *offset_ptr,
-                                                        lldb::offset_t byte_size) {
+lldb_private::formatters::oxcaml::helpers::ExtractAPInt(
+    const DataExtractor &data, lldb::offset_t *offset_ptr,
+    lldb::offset_t byte_size) {
   if (byte_size == 0)
     return std::nullopt;
 
@@ -86,11 +85,9 @@ lldb_private::formatters::oxcaml::helpers::ExtractAPInt(const DataExtractor &dat
 }
 
 // Based on GetAPInt/DumpAPInt from upstream LLDB's DumpDataExtractor.cpp
-void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream,
-                                                            const llvm::APInt &apint,
-                                                            bool is_signed,
-                                                            const std::string &prefix,
-                                                            const std::string &suffix) {
+void lldb_private::formatters::oxcaml::helpers::FormatAPInt(
+    Stream *stream, const llvm::APInt &apint, bool is_signed,
+    const std::string &prefix, const std::string &suffix) {
   if (!stream)
     return;
 
@@ -115,15 +112,17 @@ void lldb_private::formatters::oxcaml::helpers::FormatAPInt(Stream *stream,
 // one that can exactly represent the original float value.
 // Falls back to full precision if none of the shorter ones work.
 // Based on oxcaml-lldb fork's APFloat.h extension.
-static void FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat,
-                                            llvm::SmallVectorImpl<char> &Str,
-                                            std::optional<unsigned> format_max_padding) {
+static void
+FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat,
+                                llvm::SmallVectorImpl<char> &Str,
+                                std::optional<unsigned> format_max_padding) {
   unsigned FormatMaxPadding = format_max_padding.value_or(3);
   bool TruncateZero = true;
 
   // Try these precision levels to find the shortest accurate representation
-  static const unsigned precisions[] = { 5, 12, 15 };
-  static const size_t num_precisions = sizeof(precisions) / sizeof(precisions[0]);
+  static const unsigned precisions[] = {5, 12, 15};
+  static const size_t num_precisions =
+      sizeof(precisions) / sizeof(precisions[0]);
 
   for (size_t i = 0; i < num_precisions; ++i) {
     apfloat.toString(Str, precisions[i], FormatMaxPadding, TruncateZero);
@@ -142,11 +141,10 @@ static void FormatFloatWithMinimalPrecision(const llvm::APFloat &apfloat,
 }
 
 // Based on PrintAPIntAsFloat from oxcaml-lldb fork's DumpDataExtractor.cpp
-void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(Stream *stream,
-                                                              const llvm::APFloat &apfloat,
-                                                              std::optional<unsigned> format_max_padding,
-                                                              const std::string &prefix,
-                                                              const std::string &suffix) {
+void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(
+    Stream *stream, const llvm::APFloat &apfloat,
+    std::optional<unsigned> format_max_padding, const std::string &prefix,
+    const std::string &suffix) {
   if (!stream)
     return;
 
@@ -175,21 +173,21 @@ void lldb_private::formatters::oxcaml::helpers::FormatAPFloat(Stream *stream,
 }
 
 std::optional<llvm::APFloat>
-lldb_private::formatters::oxcaml::helpers::ExtractAPFloat(const DataExtractor &data,
-                                                          lldb::offset_t *offset_ptr,
-                                                          FloatSize float_size) {
+lldb_private::formatters::oxcaml::helpers::ExtractAPFloat(
+    const DataExtractor &data, lldb::offset_t *offset_ptr,
+    FloatSize float_size) {
   // Select IEEE semantics based on float size
   const llvm::fltSemantics *semantics;
   switch (float_size) {
-    case FloatSize::Half:
-      semantics = &llvm::APFloat::IEEEhalf();    // Future float16# support
-      break;
-    case FloatSize::Single:
-      semantics = &llvm::APFloat::IEEEsingle();  // float32# @ float32
-      break;
-    case FloatSize::Double:
-      semantics = &llvm::APFloat::IEEEdouble();  // float# @ float64
-      break;
+  case FloatSize::Half:
+    semantics = &llvm::APFloat::IEEEhalf(); // Future float16# support
+    break;
+  case FloatSize::Single:
+    semantics = &llvm::APFloat::IEEEsingle(); // float32# @ float32
+    break;
+  case FloatSize::Double:
+    semantics = &llvm::APFloat::IEEEdouble(); // float# @ float64
+    break;
   }
 
   // Get the raw bits as APInt first
@@ -242,9 +240,8 @@ static void FormatOCamlCharacter(Stream &s, const char c) {
 
 // Format OCaml string with proper escaping and quotes
 // Based on DumpStringOCaml from the oxcaml-lldb fork's DumpDataExtractor.cpp
-void lldb_private::formatters::oxcaml::helpers::FormatOCamlString(Stream *stream,
-                                                                  const char *data,
-                                                                  uint64_t string_length) {
+void lldb_private::formatters::oxcaml::helpers::FormatOCamlString(
+    Stream *stream, const char *data, uint64_t string_length) {
   if (!stream)
     return;
 
@@ -258,9 +255,8 @@ void lldb_private::formatters::oxcaml::helpers::FormatOCamlString(Stream *stream
 // Read OCaml string data from process memory
 // Core implementation shared by FormatOxCamlString and ReadOCamlString
 std::optional<std::string>
-lldb_private::formatters::oxcaml::helpers::ReadOCamlStringData(lldb::addr_t data_addr,
-                                                                uint64_t wosize,
-                                                                lldb::ProcessSP process_sp) {
+lldb_private::formatters::oxcaml::helpers::ReadOCamlStringData(
+    lldb::addr_t data_addr, uint64_t wosize, lldb::ProcessSP process_sp) {
   Status error;
   Log *log = GetLog(OxCamlLog::Formatting);
 
@@ -285,11 +281,15 @@ lldb_private::formatters::oxcaml::helpers::ReadOCamlStringData(lldb::addr_t data
                                              string_length, error);
 
   if (error.Fail() || bytes_read < string_length) {
-    LLDB_LOG(log, "Failed to read string data at address 0x{0:x}, expected {1} bytes, got {2}: {3}",
+    LLDB_LOG(log,
+             "Failed to read string data at address 0x{0:x}, expected {1} "
+             "bytes, got {2}: {3}",
              data_addr, string_length, bytes_read, error.AsCString());
     return std::nullopt;
   }
 
-  // Return string (std::string handles null bytes correctly via length parameter)
-  return std::string(reinterpret_cast<const char*>(str_buffer.data()), string_length);
+  // Return string (std::string handles null bytes correctly via length
+  // parameter)
+  return std::string(reinterpret_cast<const char *>(str_buffer.data()),
+                     string_length);
 }

@@ -11,21 +11,15 @@
 using namespace lldb_private;
 
 static constexpr Log::Category g_categories[] = {
-    {{"types"},
-     {"log DWARF type parsing"},
-     OxCamlLog::TypeParsing},
+    {{"types"}, {"log DWARF type parsing"}, OxCamlLog::TypeParsing},
     {{"functions"},
      {"log function parsing and name resolution"},
      OxCamlLog::Functions},
     {{"formatting"},
      {"log value formatting and display operations"},
      OxCamlLog::Formatting},
-    {{"registry"},
-     {"log type registry operations"},
-     OxCamlLog::TypeRegistry},
-    {{"verbose"},
-     {"log verbose debugging information"},
-     OxCamlLog::Verbose},
+    {{"registry"}, {"log type registry operations"}, OxCamlLog::TypeRegistry},
+    {{"verbose"}, {"log verbose debugging information"}, OxCamlLog::Verbose},
     {{"user-visible-errors"},
      {"log user-visible error diagnostics"},
      OxCamlLog::UserVisibleErrors},
@@ -37,10 +31,6 @@ template <> Log::Channel &lldb_private::LogChannelFor<OxCamlLog>() {
   return g_channel;
 }
 
-void LogChannelOxCaml::Initialize() {
-  Log::Register("oxcaml", g_channel);
-}
+void LogChannelOxCaml::Initialize() { Log::Register("oxcaml", g_channel); }
 
-void LogChannelOxCaml::Terminate() {
-  Log::Unregister("oxcaml");
-}
+void LogChannelOxCaml::Terminate() { Log::Unregister("oxcaml"); }

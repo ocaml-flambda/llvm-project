@@ -9,9 +9,9 @@
 #ifndef liblldb_OxCamlFormatters_h_
 #define liblldb_OxCamlFormatters_h_
 
-#include "lldb/lldb-forward.h"
 #include "lldb/DataFormatters/TypeSummary.h"
 #include "lldb/Utility/Stream.h"
+#include "lldb/lldb-forward.h"
 
 namespace lldb_private {
 namespace formatters {

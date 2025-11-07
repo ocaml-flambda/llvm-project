@@ -10,16 +10,16 @@
 /// This file provides helper functions for formatting integers and floats
 /// using LLVM's arbitrary precision types (APInt, APFloat).
 ///
-/// These helpers are shared between unboxed value formatting and OCaml 
+/// These helpers are shared between unboxed value formatting and OCaml
 /// value decoding to ensure consistent number formatting across the
 /// OCaml LLDB plugin.
 
 #ifndef LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLFORMATHELPERS_H
 #define LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLFORMATHELPERS_H
 
-#include "lldb/lldb-private.h"
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Stream.h"
+#include "lldb/lldb-private.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include <optional>
@@ -30,12 +30,11 @@ namespace formatters {
 namespace oxcaml {
 namespace helpers {
 
-
 /// Float size specification for IEEE semantics selection
 enum class FloatSize : unsigned {
-  Half = 2,    ///< IEEE half precision (float16#)
-  Single = 4,  ///< IEEE single precision (float32#)
-  Double = 8   ///< IEEE double precision (float#)
+  Half = 2,   ///< IEEE half precision (float16#)
+  Single = 4, ///< IEEE single precision (float32#)
+  Double = 8  ///< IEEE double precision (float#)
 };
 
 /// Extract an arbitrary precision integer from a DataExtractor.
@@ -55,13 +54,12 @@ std::optional<llvm::APInt> ExtractAPInt(const DataExtractor &data,
 /// \param is_signed Whether to interpret as signed or unsigned
 /// \param prefix String to prepend (e.g., "#" for unboxed integers)
 /// \param suffix String to append (e.g., "l" for int32)
-void FormatAPInt(Stream *stream, const llvm::APInt &apint, 
-                 bool is_signed,
+void FormatAPInt(Stream *stream, const llvm::APInt &apint, bool is_signed,
                  const std::string &prefix = "",
                  const std::string &suffix = "");
 
 /// Format an arbitrary precision float to a stream with OCaml conventions.
-/// Handles OCaml-specific formatting like negative sign placement and 
+/// Handles OCaml-specific formatting like negative sign placement and
 /// trailing ".0" for integer-looking floats.
 /// \param stream Output stream to write to
 /// \param apfloat The APFloat value to format
@@ -92,12 +90,14 @@ std::optional<llvm::APFloat> ExtractAPFloat(const DataExtractor &data,
 /// \param stream Output stream to write to
 /// \param data Pointer to string data
 /// \param string_length Number of characters in string
-void FormatOCamlString(Stream *stream, const char *data, uint64_t string_length);
+void FormatOCamlString(Stream *stream, const char *data,
+                       uint64_t string_length);
 
 /// Read OCaml string data from process memory.
 /// Reads the string data from a String_tag OCaml block in memory.
 /// Handles padding byte extraction and string length calculation.
-/// Does NOT perform tag validation - caller must ensure address points to string data.
+/// Does NOT perform tag validation - caller must ensure address points to
+/// string data.
 /// \param data_addr Address of string data (NOT including header)
 /// \param wosize Word size from block header
 /// \param process_sp Process to read from

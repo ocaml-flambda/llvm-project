@@ -16,10 +16,10 @@
 #ifndef LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLVALUEFORMATTERS_H
 #define LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLVALUEFORMATTERS_H
 
-#include "lldb/lldb-private.h"
+#include "Plugins/TypeSystem/OxCaml/OxCamlTypes.h"
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Stream.h"
-#include "Plugins/TypeSystem/OxCaml/OxCamlTypes.h"
+#include "lldb/lldb-private.h"
 
 namespace lldb_private {
 namespace formatters {
@@ -31,7 +31,7 @@ namespace oxcaml {
 /// \param process_sp Process for memory access
 /// \param exe_ctx_ref ExecutionContext for address resolution
 /// \returns true if formatting succeeded, false otherwise
-bool FormatOxCamlValue(Stream &stream, DataExtractor& data,
+bool FormatOxCamlValue(Stream &stream, DataExtractor &data,
                        lldb::ProcessSP process_sp,
                        const ExecutionContextRef &exe_ctx_ref);
 
