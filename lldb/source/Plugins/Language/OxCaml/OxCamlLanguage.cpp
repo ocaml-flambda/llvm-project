@@ -87,8 +87,9 @@ void OxCamlLanguage::Terminate() {
 }
 
 lldb_private::Language *OxCamlLanguage::CreateInstance(lldb::LanguageType language) {
-  if (language == lldb::eLanguageTypeOCaml)
+  if (language == lldb::eLanguageTypeOCaml) {
     return new OxCamlLanguage();
+  }
   return nullptr;
 }
 

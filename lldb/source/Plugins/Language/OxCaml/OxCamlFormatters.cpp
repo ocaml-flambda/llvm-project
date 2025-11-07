@@ -75,9 +75,11 @@
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Reference.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
+#include "llvm/Support/FormatVariadic.h"
 #include <cassert>
 #include <cinttypes>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace lldb;
@@ -218,36 +220,47 @@ static uint64_t EstimatePointerAllocationSize(OxCamlType* type, DataExtractor& d
 static bool FormatFallback(Stream &stream, OxCamlType* type, DataExtractor& data, lldb::ProcessSP process_sp) {
   size_t byte_size = data.GetByteSize();
   if (byte_size == 0) {
-    stream.Printf("<no data>");
+  constexpr const char *marker = "<empty>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Zero-byte value encountered while formatting type '{0}' (DIE 0x{1:x})",
+        type->GetDisplayName(), type->GetDieId());
+    stream.PutCString(marker);
     return true;
   }
 
-  stream.Printf("<");
+  stream.PutCString("data(");
   for (size_t i = 0; i < byte_size; ++i) {
-    if (i > 0) stream.Printf(" ");
+    if (i > 0)
+      stream.PutCString(" ");
     lldb::offset_t offset = i;
     uint8_t byte = data.GetU8(&offset);
     stream.Printf("%02x", byte);
   }
-  stream.Printf(">");
+  stream.PutCString(")");
   return true;
 }
 
 static bool FormatPlaceholder(Stream &stream, OxCamlPlaceholderType* placeholder_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  Log *log = GetLog(OxCamlLog::Formatting);
-  LLDB_LOG(log, "WARNING: FormatPlaceholder called for DIE 0x{0:x16} - placeholder not resolved during parsing!",
-           placeholder_type->GetDieId());
+  constexpr const char *marker = "<error>";
+  OXCAML_EXPLAIN_ERROR_MARKER(
+      marker,
+      "Cannot format unresolved placeholder type '{0}' (DIE 0x{1:x16})",
+      placeholder_type->GetDisplayName(), placeholder_type->GetDieId());
 
-  stream.Printf("<resolving>");
+  stream.PutCString(marker);
   return true;
 }
 
 static bool FormatUnknown(Stream &stream, OxCamlUnknownType* unknown_type, DataExtractor& data, lldb::ProcessSP process_sp) {
-  Log *log = GetLog(OxCamlLog::Formatting);
-  LLDB_LOG(log, "FormatUnknown called for DIE 0x{0:x16}, DWARF tag 0x{1:x}",
-           unknown_type->GetDieId(), unknown_type->GetDwarfTag());
+  constexpr char marker[] = "<error>";
+  OXCAML_EXPLAIN_ERROR_MARKER(
+      marker,
+      "Unsupported DWARF tag 0x{0:x} for type '{1}' (DIE 0x{2:x16})",
+      unknown_type->GetDwarfTag(), unknown_type->GetDisplayName(),
+      unknown_type->GetDieId());
 
-  stream.Printf("<unknown DWARF tag 0x%x>", unknown_type->GetDwarfTag());
+  stream.PutCString(marker);
   return true;
 }
 
@@ -266,7 +279,12 @@ static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_typ
   OxCamlUnboxedBaseType::BaseKind kind = unboxed_type->GetBaseKind();
 
   if (byte_size == 0) {
-    stream.PutCString("<0 byte base type>");
+    constexpr const char *marker = "<0-byte base type>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Unboxed base type '{0}' (DIE 0x{1:x}) reports zero byte size",
+        unboxed_type->GetDisplayName(), unboxed_type->GetDieId());
+    stream.PutCString(marker);
     return true;
   }
 
@@ -289,7 +307,15 @@ static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_typ
     case OxCamlUnboxedBaseType::Float: {
       std::optional<helpers::FloatSize> float_size = ByteSizeToFloatSize(byte_size);
       if (!float_size) {
-        stream.Printf("<%" PRIu64 "-byte float>", byte_size);
+        // Keep the formatted marker alive while logging/printing; taking c_str()
+        // on a temporary would leave us with a dangling pointer.
+        std::string marker_storage = llvm::formatv("<{0}-byte float>", byte_size).str();
+        const char *marker = marker_storage.c_str();
+        OXCAML_EXPLAIN_ERROR_MARKER(
+            marker,
+            "Float value width {0} bytes for type '{1}' (DIE 0x{2:x}) is unsupported",
+            byte_size, unboxed_type->GetDisplayName(), unboxed_type->GetDieId());
+        stream.PutCString(marker);
         return true;
       }
       std::optional<llvm::APFloat> apfloat = helpers::ExtractAPFloat(data, &offset, *float_size);
@@ -300,7 +326,6 @@ static bool FormatUnboxedBase(Stream &stream, OxCamlUnboxedBaseType* unboxed_typ
     }
   }
 
-  llvm_unreachable("Unknown unboxed base type kind");
 }
 
 static bool FormatEnum(Stream &stream, OxCamlEnumType* enum_type, DataExtractor& data, lldb::ProcessSP process_sp) {
@@ -329,13 +354,23 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
   uint64_t ptr_value = data.GetU64(&offset);
 
   if (helpers::value::IsImmediate(ptr_value)) {
-    stream.Printf("<invalid pointer: 0x%" PRIx64 ">", ptr_value);
+    constexpr const char *pointer_marker = "<pointer>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        pointer_marker,
+        "Pointer value 0x{0:x} is an OCaml immediate; cannot dereference as '{1}' (DIE 0x{2:x})",
+        ptr_value, ptr_type->GetDisplayName(), ptr_type->GetDieId());
+    stream.PutCString(pointer_marker);
     return true;
   }
 
   OxCamlType* pointed_to = ptr_type->GetPointedToType();
   if (!pointed_to || !process_sp) {
-    stream.Printf("<0x%" PRIx64 ">", ptr_value);
+    constexpr const char *pointer_marker = "<pointer>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        pointer_marker,
+        "Pointer 0x{0:x} lacks a resolved target type or process context while formatting '{1}' (DIE 0x{2:x})",
+        ptr_value, ptr_type->GetDisplayName(), ptr_type->GetDieId());
+    stream.PutCString(pointer_marker);
     return true;
   }
 
@@ -347,7 +382,12 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
 
   uint64_t size = pointed_to->GetByteSize();
   if (size == 0) {
-    stream.Printf("<0x%" PRIx64 ">", ptr_value);
+    constexpr const char *pointer_marker = "<pointer>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        pointer_marker,
+        "Resolved target type '{0}' (DIE 0x{1:x}) reports byte size 0; cannot dereference pointer 0x{2:x}",
+        pointed_to->GetDisplayName(), pointed_to->GetDieId(), ptr_value);
+    stream.PutCString(pointer_marker);
     return true;
   }
 
@@ -401,7 +441,12 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType* ptr_type,
   size_t bytes_read = process_sp->ReadMemory(adjusted_address, buffer.data(), actual_size, error);
 
   if (bytes_read != actual_size || !error.Success()) {
-    stream.Printf("<0x%" PRIx64 ">", ptr_value);
+    constexpr const char *pointer_marker = "<pointer>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        pointer_marker,
+        "Failed to read {0} bytes from address 0x{1:x} for pointer 0x{2:x} to '{3}' (DIE 0x{4:x})",
+        actual_size, adjusted_address, ptr_value, pointed_to->GetDisplayName(), pointed_to->GetDieId());
+    stream.PutCString(pointer_marker);
     return true;
   }
 
@@ -545,14 +590,24 @@ static bool FormatException(Stream &stream, DataExtractor& data, lldb::ProcessSP
   uint64_t exception_value = data.GetU64(&offset);
 
   if (exception_value == 0 || (exception_value & 1) == 1) {
-    stream.Printf("<exception>");
+    constexpr const char *marker = "<exception>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Exception value 0x{0:x} is a {1}; cannot display OCaml exception",
+        exception_value, ((exception_value == 0) ? "null pointer" : "immediate OCaml value"));
+    stream.PutCString(marker);
     return false;
   }
 
   auto info_opt = ExtractExceptionInfo(exception_value, process_sp);
 
   if (!info_opt) {
-    stream.Printf("<exception>");
+    constexpr const char *marker = "<exception>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Failed to extract OCaml exception payload at 0x{0:x}",
+        exception_value);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -583,16 +638,23 @@ static bool FormatException(Stream &stream, DataExtractor& data, lldb::ProcessSP
 static bool FormatMember(Stream &stream, const OxCamlMember& member, DataExtractor& data, lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref) {
   if (member.IsBitField()) {
     lldb::offset_t offset = member.data_member_location;
-    uint64_t full_value = data.GetU64(&offset);
 
-    if (full_value == UINT64_MAX) {
-      stream.Printf("<invalid>");
+    if (offset + sizeof(uint64_t) > data.GetByteSize()) {
+      constexpr const char *marker = "<member>";
+      OXCAML_EXPLAIN_ERROR_MARKER(
+          marker,
+          "Not enough data ({0} bytes) to read bit-field '{1}' starting at offset {2}",
+          data.GetByteSize(), member.name.value_or("<unnamed>"), (unsigned)offset);
+      stream.PutCString(marker);
       return false;
     }
+    uint64_t full_value = data.GetU64(&offset);
 
     uint64_t bit_mask = (1ULL << member.bit_size.value()) - 1;
     uint64_t extracted = (full_value >> member.bit_offset.value()) & bit_mask;
 
+    // CR sspies: This assumes the entire bit-field fits within the 8 bytes read above.
+    // Bit-fields that span multiple words will require a different extraction path.
     DataExtractor bit_data(&extracted, sizeof(extracted),
                            data.GetByteOrder(),
                            data.GetAddressByteSize());
@@ -648,13 +710,23 @@ static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& var
   const auto& discriminator = variant_part.GetDiscriminator();
   auto* enum_type = dynamic_cast<OxCamlEnumType*>(discriminator.GetType());
   if (!enum_type) {
-    stream.Printf("<Invalid Variant>");
+    constexpr const char *marker = "<variant>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Variant discriminator type '{0}' is not an OCaml enum",
+        discriminator.GetType()->GetDisplayName());
+    stream.PutCString(marker);
     return false;
   }
 
   auto name_opt = enum_type->GetEnumeratorName(static_cast<int64_t>(discr_value));
   if (!name_opt.has_value()) {
-    stream.Printf("<Invalid Variant>");
+    constexpr const char *marker = "<variant>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Variant discriminator value 0x{0:x} has no matching enumerator",
+        discr_value);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -712,7 +784,13 @@ static bool FormatVariantPartOxCaml(Stream &stream, const OxCamlVariantPart& var
       if (members[i].name.has_value()) {
         stream.Printf("%s = ", members[i].name.value().c_str());
       } else {
-        stream.Printf("<unavailable> = ");
+        constexpr const char *marker = "<unavailable>";
+        OXCAML_EXPLAIN_ERROR_MARKER(
+            marker,
+            "Variant member index {0} lacks a DW_AT_name; using placeholder",
+            i);
+        stream.PutCString(marker);
+        stream.PutCString(" = ");
       }
     }
 
@@ -764,7 +842,12 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
   uint64_t array_ptr = data.GetU64(&offset);
 
   if (offset == 0) {
-    stream.Printf("<could not read array pointer>");
+    constexpr const char *marker = "<array>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Failed to read OCaml array pointer from value data ({0} bytes available)",
+        data.GetByteSize());
+    stream.PutCString(marker);
     return false;
   }
 
@@ -772,8 +855,15 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
 
   // Check for null or immediate values (not actual pointers)
   if (array_ptr == 0 || helpers::value::IsImmediate(array_ptr)) {
-    // CR sspies: Log an error here.
-    stream.Printf("<0x%" PRIx64 ">", array_ptr);
+    std::string marker_storage = llvm::formatv("<array@0x{0:x}>", array_ptr).str();
+    const char *marker = marker_storage.c_str();
+    const char *reason =
+        array_ptr == 0 ? "null pointer" : "immediate OCaml value";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Array pointer 0x{0:x} is a {1}; skipping dereference",
+        array_ptr, reason);
+    stream.PutCString(marker);
     return true;
   }
 
@@ -784,7 +874,13 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
 
   if (error.Fail()) {
     LLDB_LOG(log, "FormatArray: Failed to read array header at 0x{0:x}", header_addr);
-    stream.Printf("<0x%" PRIx64 ">", array_ptr);
+    std::string marker_storage = llvm::formatv("<array@0x{0:x}>", array_ptr).str();
+    const char *marker = marker_storage.c_str();
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Failed to read OCaml array header at 0x{0:x} for pointer 0x{1:x}: {2}",
+        header_addr, array_ptr, error.AsCString());
+    stream.PutCString(marker);
     return true;
   }
 
@@ -811,7 +907,13 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
           element_address, constants::DOUBLE_SIZE, 0, error);
 
       if (error.Fail()) {
-        stream.Printf("<error>");
+        constexpr const char *marker = "<float>";
+        OXCAML_EXPLAIN_ERROR_MARKER(
+            marker,
+            "Failed to read float array element {0} at 0x{1:x}",
+            i, element_address);
+        stream.PutCString(marker);
+        error.Clear();
         continue;
       }
 
@@ -837,7 +939,13 @@ static bool FormatArray(Stream &stream, OxCamlArrayType* array_type,
       size_t bytes_read = process_sp->ReadMemory(element_address, buffer.data(), stride, error);
 
       if (bytes_read != stride || error.Fail()) {
-        stream.Printf("<error>");
+        constexpr const char *marker = "<element>";
+        OXCAML_EXPLAIN_ERROR_MARKER(
+            marker,
+            "Failed to read array element {0} at 0x{1:x}; requested {2} bytes, read {3}",
+            i, element_address, stride, bytes_read);
+        stream.PutCString(marker);
+        error.Clear();
         continue;
       }
 
@@ -953,7 +1061,12 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
   valobj.GetData(data, error);
 
   if (!error.Success()) {
-    stream.Printf("<unavailable>");
+    constexpr const char *marker = "<unavailable>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "ValueObject data extraction failed: {0}",
+        error.AsCString());
+    stream.PutCString(marker);
     return true;
   }
 

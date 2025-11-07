@@ -26,6 +26,9 @@ static constexpr Log::Category g_categories[] = {
     {{"verbose"},
      {"log verbose debugging information"},
      OxCamlLog::Verbose},
+    {{"user-visible-errors"},
+     {"log user-visible error diagnostics"},
+     OxCamlLog::UserVisibleErrors},
 };
 
 static Log::Channel g_channel(g_categories, OxCamlLog::TypeParsing);

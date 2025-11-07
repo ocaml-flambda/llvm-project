@@ -30,8 +30,10 @@
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/Utility/StreamString.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
+#include <string>
 #include <map>
 
 using namespace lldb;
@@ -138,11 +140,14 @@ static bool FormatOxCamlValueInternal(Stream &stream, uint64_t value,
     // Check depth limit before processing blocks (central depth check)
     if (depth <= 0) {
       Status error;
+      uint64_t header_address = header::GetHeaderAddress(value);
       uint64_t header = process_sp->ReadUnsignedIntegerFromMemory(
-          header::GetHeaderAddress(value),
+          header_address,
           constants::WORD_SIZE, 0, error);
       if (error.Fail()) {
-        stream.Printf("<max depth reached>");
+        constexpr const char *marker = "<block>";
+        OXCAML_EXPLAIN_ERROR_MARKER(marker, "Header unreadable at 0x{0:x}", header_address);
+        stream.PutCString(marker);
         return true;
       }
       uint8_t tag = header::ExtractTag(header);
@@ -159,7 +164,7 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
                                                          const ExecutionContextRef &exe_ctx_ref) {
   if (!process_sp) {
     Log *log = GetLog(OxCamlLog::Formatting);
-    LLDB_LOG(log, "FATAL: FormatOxCamlValue called without valid process - this is a critical system error");
+    LLDB_LOG(log, "FATAL: FormatOxCamlValue called without valid process - this is an implementation error");
     llvm::report_fatal_error("FormatOxCamlValue called without valid process - OCaml values require memory access");
   }
 
@@ -167,7 +172,12 @@ bool lldb_private::formatters::oxcaml::FormatOxCamlValue(Stream &stream,
   uint64_t value = data.GetU64(&offset);
 
   if (offset == 0) {
-    stream.Printf("<could not read OCaml value>");
+    constexpr const char *marker = "<value>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Failed to read OCaml value bytes (size {0})",
+        data.GetByteSize());
+    stream.PutCString(marker);
     return false;
   }
 
@@ -199,7 +209,9 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
                                 const ExecutionContextRef &exe_ctx_ref,
                                 uint32_t depth) {
   if (value == 0) {
-    stream.Printf("<null>");
+    constexpr const char *marker = "<null>";
+    OXCAML_EXPLAIN_ERROR_MARKER(marker, "Encountered unexpected null OCaml block pointer");
+    stream.PutCString(marker);
     return true;
   }
 
@@ -210,10 +222,12 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
       header_addr, constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
-    Log *log = GetLog(OxCamlLog::Formatting);
-    LLDB_LOG(log, "WARNING: Cannot read OCaml block header at 0x{0:x} - memory may be invalid or corrupted",
-             header_addr);
-    stream.Printf("<error reading block header>");
+    constexpr const char *marker = "<block>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Failed to read OCaml block header at 0x{0:x}: {1}",
+        header_addr, error.AsCString());
+    stream.PutCString(marker);
     return false;
   }
 
@@ -282,7 +296,15 @@ static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value, uint8_t tag
       Log *log = GetLog(OxCamlLog::Formatting);
       LLDB_LOG(log, "ERROR: Failed to read field {0} at address 0x{1:x}: {2}",
                i, read_address, error.AsCString());
-      stream.Printf("<unreadable at 0x%llx>", (unsigned long long)read_address);
+      std::string marker_storage =
+          llvm::formatv("<field@0x{0:x}>", read_address).str();
+      const char *marker = marker_storage.c_str();
+      OXCAML_EXPLAIN_ERROR_MARKER(
+          marker,
+          "Failed to read OCaml block field {0} at 0x{1:x}: {2}",
+          i, read_address, error.AsCString());
+      stream.PutCString(marker);
+      error.Clear();
       continue;
     }
 
@@ -306,18 +328,34 @@ static bool FormatOxCamlLazy(Stream &stream, uint64_t value, uint64_t wosize,
                              DataExtractor& data, lldb::ProcessSP process_sp,
                              const ExecutionContextRef &exe_ctx_ref,
                              uint32_t depth) {
+  if (wosize == 0) {
+    constexpr const char *marker = "<lazy>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Lazy block 0x{0:x}: empty payload (wosize=0)",
+        value);
+    stream.PutCString(marker);
+    return true;
+  }
+
   Status error;
 
   lldb::addr_t computation_ptr = process_sp->ReadPointerFromMemory(value, error);
   if (error.Fail()) {
-    stream.Printf("<lazy, computation ptr unreadable>");
+    constexpr const char *marker = "<lazy>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Lazy block 0x{0:x}: computation pointer unreadable",
+        value);
+    stream.PutCString(marker);
     return true;
   }
 
   // Check if the lazy value is forced (has a valid pointer)
   // Unforced lazy values typically have special marker values
   if (computation_ptr == 0) {
-    stream.Printf("<lazy, unforced>");
+    constexpr const char *marker = "<lazy>";
+    stream.PutCString(marker);
     return true;
   }
 
@@ -342,33 +380,58 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
                                 uint32_t depth) {
   Status error;
   const char* closure_type = is_infix ? "infix closure" : "closure";
+  const char *closure_marker = is_infix ? "<infix closure>" : "<closure>";
 
   uint64_t closinfo = process_sp->ReadUnsignedIntegerFromMemory(
       value + helpers::constants::WORD_SIZE,
       helpers::constants::WORD_SIZE, 0, error);
   if (error.Fail()) {
-    stream.Printf("<%s, code ptr unreadable>", closure_type);
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        closure_marker,
+        "{0} 0x{1:x}: closinfo unreadable",
+        closure_type, value);
+    stream.PutCString(closure_marker);
     return true;
   }
 
   uint64_t code_ptr_offset = helpers::closure::GetCodePtrOffset(closinfo);
+  if (code_ptr_offset >= wosize) {
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        closure_marker,
+        "{0} 0x{1:x}: code pointer offset {2} out of range (wosize={3})",
+        closure_type, value, code_ptr_offset, wosize);
+    stream.PutCString(closure_marker);
+    return true;
+  }
 
   lldb::addr_t code_ptr = process_sp->ReadPointerFromMemory(
       value + code_ptr_offset * helpers::constants::WORD_SIZE, error);
   if (error.Fail()) {
-    stream.Printf("<%s, code ptr unreadable>", closure_type);
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        closure_marker,
+        "{0} 0x{1:x}: code pointer unreadable",
+        closure_type, value);
+    stream.PutCString(closure_marker);
     return true;
   }
 
   lldb::TargetSP target_sp = exe_ctx_ref.GetTargetSP();
   if (!target_sp) {
-    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        closure_marker,
+        "{0} 0x{1:x}: cannot resolve code pointer 0x{2:x} (no target)",
+        closure_type, value, code_ptr);
+    stream.PutCString(closure_marker);
     return true;
   }
 
   Address addr;
   if (!addr.SetLoadAddress(code_ptr, target_sp.get())) {
-    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        closure_marker,
+        "{0} 0x{1:x}: code pointer 0x{2:x} not mapped in target",
+        closure_type, value, code_ptr);
+    stream.PutCString(closure_marker);
     return true;
   }
 
@@ -378,7 +441,13 @@ static bool FormatOxCamlClosure(Stream &stream, uint64_t value, uint64_t wosize,
 
   const char *resolved = addr_stream.GetData();
   if (!resolved || resolved[0] == '\0')
-    stream.Printf("<%s, code ptr %p>", closure_type, (void*)code_ptr);
+    {
+      OXCAML_EXPLAIN_ERROR_MARKER(
+          closure_marker,
+          "{0} 0x{1:x}: code pointer 0x{2:x} has no symbol description",
+          closure_type, value, code_ptr);
+      stream.PutCString(closure_marker);
+    }
   else
     stream.Printf("%s", resolved);
   return true;
@@ -388,6 +457,7 @@ static bool FormatOxCamlObject(Stream &stream, uint64_t value, uint64_t wosize,
                                DataExtractor& data, lldb::ProcessSP process_sp,
                                const ExecutionContextRef &exe_ctx_ref,
                                uint32_t depth) {
+  // CR sspies: Consider changing this to a non-angle-bracket form for clarity.
   stream.Printf("<object|%" PRIu64 " words>@%p", wosize, (void*)value);
   return true;
 }
@@ -397,15 +467,23 @@ static bool FormatOxCamlForward(Stream &stream, uint64_t value, uint64_t wosize,
                                 const ExecutionContextRef &exe_ctx_ref,
                                 uint32_t depth) {
   Status error;
-
+  constexpr const char *marker = "<forward>";
   lldb::addr_t forward_ptr = process_sp->ReadPointerFromMemory(value, error);
   if (error.Fail()) {
-    stream.Printf("<forward, ptr unreadable>");
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Forward pointer 0x{0:x}: target pointer unreadable",
+        value);
+    stream.PutCString(marker);
     return true;
   }
 
   if (forward_ptr == 0) {
-    stream.Printf("<forward, null ptr>");
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Forward pointer 0x{0:x}: target pointer is null",
+        value);
+    stream.PutCString(marker);
     return true;
   }
 
@@ -424,6 +502,7 @@ static bool FormatOxCamlAbstract(Stream &stream, uint64_t value, uint64_t wosize
                                  DataExtractor& data, lldb::ProcessSP process_sp,
                                  const ExecutionContextRef &exe_ctx_ref,
                                  uint32_t depth) {
+  // CR sspies: Consider changing this to a non-angle-bracket form for clarity.
   stream.Printf("<abstract|%" PRIu64 " words>@%p", wosize, (void*)value);
   return true;
 }
@@ -434,7 +513,12 @@ static bool FormatOxCamlString(Stream &stream, uint64_t value, uint64_t wosize,
                                uint32_t depth) {
   auto string_opt = helpers::ReadOCamlStringData(value, wosize, process_sp);
   if (!string_opt) {
-    stream.Printf("<unreadable string>");
+    constexpr const char *marker = "<string>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "String at 0x{0:x}: data unreadable",
+        value);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -452,7 +536,12 @@ static bool FormatOxCamlDouble(Stream &stream, uint64_t value, uint64_t wosize,
       value, constants::DOUBLE_SIZE, 0, error);
 
   if (error.Fail()) {
-    stream.Printf("<could not read float data>");
+    constexpr const char *marker = "<float>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Float at 0x{0:x}: data unreadable",
+        value);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -473,15 +562,21 @@ static bool FormatOxCamlDoubleArray(Stream &stream, uint64_t value, uint64_t wos
   stream.Printf("[| ");
 
   for (uint64_t index = 0; index < wosize; index++) {
-    uint64_t element_address = value + (index * helpers::constants::WORD_SIZE);
+    uint64_t element_address = value + (index * helpers::constants::DOUBLE_SIZE);
     uint64_t float_bits = process_sp->ReadUnsignedIntegerFromMemory(
-        element_address, helpers::constants::WORD_SIZE, 0, error);
+        element_address, helpers::constants::DOUBLE_SIZE, 0, error);
 
     if (error.Fail()) {
-      stream.Printf("<could not read float array element %" PRIu64 ">", index);
+      constexpr const char *marker = "<float>";
+      OXCAML_EXPLAIN_ERROR_MARKER(
+          marker,
+          "Float array element {0} at 0x{1:x}: data unreadable",
+          index, element_address);
+      stream.PutCString(marker);
       had_error = true;
+      error.Clear();
     } else {
-      llvm::APInt apint(8 * helpers::constants::WORD_SIZE, float_bits);
+      llvm::APInt apint(8 * helpers::constants::DOUBLE_SIZE, float_bits);
       llvm::APFloat apfloat(llvm::APFloat::IEEEdouble(), apint);
 
       // CR sspies: Consider adding "#" prefix for float array elements since they are internally unboxed
@@ -508,7 +603,12 @@ static bool FormatInt32Custom(Stream &stream, const std::string &identifier,
       data_ptr, helpers::constants::INT32_SIZE, 0, error);
 
   if (error.Fail()) {
-    stream.Printf("<custom \"%s\" (could not read data field for int32)>", identifier.c_str());
+    constexpr const char *marker = "<int32>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block '{0}' at 0x{1:x}: int32 payload unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -526,7 +626,12 @@ static bool FormatInt64Custom(Stream &stream, const std::string &identifier,
       data_ptr, helpers::constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
-    stream.Printf("<custom \"%s\" (could not read data field for int64)>", identifier.c_str());
+    constexpr const char *marker = "<int64>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block '{0}' at 0x{1:x}: int64 payload unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -544,7 +649,12 @@ static bool FormatNativeIntCustom(Stream &stream, const std::string &identifier,
       data_ptr, helpers::constants::WORD_SIZE, 0, error);
 
   if (error.Fail()) {
-    stream.Printf("<custom \"%s\" (could not read data field for nativeint)>", identifier.c_str());
+    constexpr const char *marker = "<nativeint>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block '{0}' at 0x{1:x}: nativeint payload unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -558,9 +668,24 @@ static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
                                 lldb::ProcessSP process_sp) {
   Status error;
 
+  if (wosize < 2) {
+    constexpr const char *marker = "<bigarray>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Bigarray custom block '{0}' at 0x{1:x}: payload too small (wosize={2})",
+        identifier, data_ptr, wosize);
+    stream.PutCString(marker);
+    return false;
+  }
+
   lldb::addr_t bigarray_data_ptr = process_sp->ReadPointerFromMemory(data_ptr, error);
   if (error.Fail()) {
-    stream.Printf("<bigarray (could not read data pointer)>");
+    constexpr const char *marker = "<bigarray>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Bigarray custom block '{0}' at 0x{1:x}: data pointer unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -568,10 +693,16 @@ static bool FormatBigarrayCustom(Stream &stream, const std::string &identifier,
       data_ptr + helpers::constants::WORD_SIZE,
       helpers::constants::WORD_SIZE, 0, error);
   if (error.Fail()) {
-    stream.Printf("<bigarray (could not read dimensions)>");
+    constexpr const char *marker = "<bigarray>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Bigarray custom block '{0}' at 0x{1:x}: dimension count unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
+  // CR sspies: Consider changing this to a non-angle-bracket form for clarity.
   stream.Printf("<bigarray%" PRIu64 "|data=%p>", num_dims, (void*)bigarray_data_ptr);
   return true;
 }
@@ -585,7 +716,12 @@ static bool FormatFloat32Custom(Stream &stream, const std::string &identifier,
       data_ptr, helpers::constants::FLOAT32_SIZE, 0, error);
 
   if (error.Fail()) {
-    stream.Printf("<could not read float32>");
+    constexpr const char *marker = "<float32>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Float32 custom block '{0}' at 0x{1:x}: payload unreadable",
+        identifier, data_ptr);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -611,21 +747,46 @@ static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
                                uint32_t depth) {
   Status error;
 
+  if (wosize < 1) {
+    constexpr const char *marker = "<custom>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block at 0x{0:x}: payload too small (wosize={1})",
+        value, wosize);
+    stream.PutCString(marker);
+    return false;
+  }
+
   lldb::addr_t custom_ops_ptr = process_sp->ReadPointerFromMemory(value, error);
   if (error.Fail()) {
-    stream.Printf("<could not read struct custom_operations pointer from custom block>");
+    constexpr const char *marker = "<custom>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block at 0x{0:x}: custom_operations pointer unreadable",
+        value);
+    stream.PutCString(marker);
     return false;
   }
 
   lldb::addr_t identifier_ptr = process_sp->ReadPointerFromMemory(custom_ops_ptr, error);
   if (error.Fail()) {
-    stream.Printf("<could not read identifier pointer from struct custom_operations>");
+    constexpr const char *marker = "<custom>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block at 0x{0:x}: identifier pointer unreadable",
+        value);
+    stream.PutCString(marker);
     return false;
   }
 
   std::string identifier_str;
   if (!process_sp->ReadCStringFromMemory(identifier_ptr, identifier_str, error) || error.Fail()) {
-    stream.Printf("<could not read identifier string from custom block>");
+    constexpr const char *marker = "<custom>";
+    OXCAML_EXPLAIN_ERROR_MARKER(
+        marker,
+        "Custom block at 0x{0:x}: identifier string unreadable",
+        value);
+    stream.PutCString(marker);
     return false;
   }
 
@@ -634,6 +795,7 @@ static bool FormatOxCamlCustom(Stream &stream, uint64_t value, uint64_t wosize,
     uint64_t data_ptr = value + helpers::constants::WORD_SIZE;
     return formatter_it->second(stream, identifier_str, data_ptr, wosize, process_sp);
   } else {
+    // CR sspies: Consider changing this to a non-angle-bracket form for clarity.
     stream.Printf("<custom|\"%s\">", identifier_str.c_str());
     return true;
   }
