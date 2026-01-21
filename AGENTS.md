@@ -1,0 +1,267 @@
+# AGENTS.md
+
+This file provides guidance for AI coding agents when working with code in this repository.
+
+## Related Documentation
+
+- **OxCaml Plugin Details**: See @lldb/source/Plugins/Language/OxCaml/AGENTS.md for in-depth plugin architecture, implementation details, and DWARF structure documentation.
+- **TypeSystem Implementation**: See @lldb/source/Plugins/TypeSystem/OxCaml/AGENTS.md for TypeSystem-specific guidance and implementation notes.
+
+## Project Overview
+
+This is a fork of the LLVM project focused on adding LLDB support for the OxCaml language. The primary goal is to create a comprehensive LLDB plugin that enables debugging of OxCaml programs with native understanding of OxCaml types, values, and runtime structures.
+
+## Build System
+
+This project uses CMake with Ninja as the build generator.
+
+### Initial Configuration
+
+Configure the build with CMake from the repository root:
+
+```bash
+cmake -S llvm -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_INSTALL_PREFIX=_install \
+  -DLLVM_ENABLE_PROJECTS="clang;lldb" \
+  -DLLVM_TARGETS_TO_BUILD="host" \
+  -DLLVM_ENABLE_ASSERTIONS=ON
+```
+
+For release builds, use `-DCMAKE_BUILD_TYPE=Release` instead.
+
+### Building
+
+Build the entire project:
+```bash
+ninja -C build
+```
+
+Build only LLDB:
+```bash
+ninja -C build lldb
+```
+
+Build specific LLDB components:
+```bash
+ninja -C build lldb-server
+ninja -C build liblldb
+```
+
+### Installation
+
+Install to the `_install` directory:
+```bash
+ninja -C build install
+```
+
+## Testing
+
+### Running LLDB Tests
+
+Run all LLDB tests:
+```bash
+ninja -C build check-lldb
+```
+
+Run LLDB unit tests:
+```bash
+ninja -C build LLDBUnitTests
+```
+
+Run specific test suites:
+```bash
+# API tests
+cd build && python ../lldb/test/API/dotest.py
+
+# Shell tests
+ninja -C build check-lldb-shell
+```
+
+### Running Individual Tests
+
+Run a specific test file:
+```bash
+cd build && python ../lldb/test/API/dotest.py -p TestBreakpoint.py
+```
+
+## OCaml Value Types
+
+The OxCaml compiler emits three categories of types in DWARF:
+
+1. **Base `ocaml_value` type** - Generic tagged pointer (immediate values or heap pointers), runtime discrimination only
+2. **Typed `ocaml_value` variants** - Still use tagged pointers at runtime, but DWARF provides type information (typedefs, enums, structures, arrays, pointers, etc.)
+3. **Unboxed Primitives** - Direct native representation without tagging (float#, int32#, int64#, etc.)
+
+For detailed information about OCaml value representation, DWARF encoding, and plugin implications, see:
+**@lldb/source/Plugins/Language/OxCaml/AGENTS.md** (sections: "OCaml Value Representation", "Type System Design")
+
+## LLDB Plugin Architecture
+
+### Language Plugin Structure
+
+LLDB language plugins are located in `lldb/source/Plugins/Language/`. Each language has its own subdirectory with:
+
+- `<Language>Language.cpp/h` - Main language plugin implementation
+- `CMakeLists.txt` - Build configuration
+- Additional support files for formatters, type systems, etc.
+
+Key existing language plugins for reference:
+- `CPlusPlus/` - C++ language support
+- `ObjC/` - Objective-C language support
+- `ClangCommon/` - Common utilities for Clang-based languages
+
+### TypeSystem Integration
+
+LLDB uses TypeSystem plugins in `lldb/source/Plugins/TypeSystem/` to understand language-specific type information. The OxCaml plugin will need integration with the Clang TypeSystem or a custom TypeSystem implementation.
+
+### Key Integration Points
+
+1. **Language Recognition** - Register OxCaml file extensions and language identification
+2. **Value Formatting** - Custom formatters for OxCaml types (variants, records, lists, etc.)
+3. **Expression Evaluation** - Support for evaluating OxCaml expressions in debugger
+4. **Frame Variable Display** - Pretty-printing of OxCaml variables
+5. **Type Synthesis** - Understanding OxCaml's boxed/unboxed value representation
+
+## Development Workflow
+
+### Incremental Building
+
+For faster iteration during plugin development:
+
+```bash
+# Build only the language plugins
+ninja -C build LLDBLanguagePlugins
+
+# Build and install just LLDB
+ninja -C build lldb && ninja -C build install-lldb
+```
+
+### Testing the Plugin
+
+Launch LLDB with the new plugin:
+```bash
+./build/bin/lldb
+# or from install
+./_install/bin/lldb
+```
+
+Test with OxCaml binaries:
+```bash
+lldb ./path/to/oxcaml_program
+(lldb) target create ./path/to/oxcaml_program
+(lldb) breakpoint set --name main
+(lldb) run
+```
+
+### Debugging LLDB Itself
+
+Debug LLDB while developing the plugin:
+```bash
+lldb ./build/bin/lldb
+(lldb) run ./path/to/test_program
+```
+
+## Code Structure
+
+### Plugin Registration
+
+Language plugins are registered in `lldb/source/Plugins/Plugins.def.in`. The OxCaml plugin will need an entry here.
+
+### Key Source Locations
+
+- `lldb/include/lldb/lldb-enumerations.h` - Language type enumeration
+- `lldb/source/Target/Language.cpp` - Language registry and factory
+- `lldb/source/Plugins/Language/` - Language plugin implementations
+- `lldb/test/API/lang/` - Language-specific tests
+
+### OxCaml-Specific Considerations
+
+The OxCaml plugin will need to handle:
+- OCaml's tagged pointer representation
+- Variant type discrimination
+- Block/immediate value distinction
+- Custom data structure traversal (lists, arrays, records)
+- Module and functor debugging support
+- Exception handling and stack unwinding
+
+
+## Build Artifacts
+
+- `build/` - Ninja build files and intermediate objects
+- `_install/` - Installation target (portable across machines)
+- `build/bin/` - Built executables (lldb, clang, etc.)
+- `build/lib/` - Built libraries
+
+## Common Issues
+
+### Build Issues
+- Ensure sufficient disk space (LLVM builds are large)
+- Use `ninja -j<N>` to limit parallel jobs if memory constrained
+
+### Plugin Development
+- **Quick rebuild**: `ninja -C build lldb` is sufficient for most changes
+- Check plugin loading with LLDB's `plugin list` command
+- Use LLDB's logging for debugging: `log enable lldb types` or `log enable lldb expression`
+- Always add functions to compile unit with `comp_unit.AddFunction(func_sp)` after creation
+- Ensure functions have valid address ranges - return nullptr if ranges are empty
+- **Variable display issues**: Check raw data with DataExtractor before investigating ValueObject
+- **TypeSystem configuration**: Ensure IsScalarType, IsIntegerType return true for basic types
+
+### OxCaml Plugin Logging
+
+The OxCaml plugin provides comprehensive logging through the "oxcaml" log channel with the following categories:
+
+- **`types`** - DWARF type parsing
+- **`functions`** - Function parsing and name resolution
+- **`formatting`** - Value formatting and display operations
+- **`registry`** - Type registry operations (add/lookup)
+- **`verbose`** - Verbose debugging information
+
+**Usage:**
+```bash
+# Enable all OxCaml logging
+(lldb) log enable oxcaml all
+
+# Enable specific categories
+(lldb) log enable oxcaml types functions registry
+
+# Enable with verbose details (shows cache hits, etc.)
+(lldb) log enable -v oxcaml registry
+
+# Log to file
+(lldb) log enable -f /tmp/oxcaml.log oxcaml all
+
+# Disable logging
+(lldb) log disable oxcaml
+```
+
+## Current OxCaml Plugin Status
+
+The plugin provides comprehensive OCaml debugging support including:
+
+- **Breakpoints**: Function (`break Module.func`) and line-based (`break -f file.ml -l 10`)
+- **Value Formatting**: All OCaml types (records, tuples, variants, arrays, strings, floats, custom blocks)
+- **Type System**: Complete DWARF parsing for all OCaml type constructs
+- **DWARF Support**: Variant discrimination, custom attributes, intelligent memory management
+
+**Known Limitation**: Expression evaluation not yet implemented
+
+For the complete feature list with examples, see:
+**@lldb/source/Plugins/Language/OxCaml/AGENTS.md** (section: "Working Features")
+
+## Testing Quick Start
+```bash
+# Build LLDB
+ninja -C build lldb
+
+# Test with function breakpoints (recommended)
+./build/bin/lldb your_ocaml_program -o "break Module.function" -o "run" -o "frame variable" -o "quit"
+
+# Test with line-based breakpoints
+./build/bin/lldb your_ocaml_program -o "break -f file.ml -l 10" -o "run" -o "frame variable" -o "quit"
+
+# Note: Don't break on 'main' - OCaml's main is typically just initialization
+# Break on your actual functions instead
+```
+- Run lldb commands from the top-level directory.

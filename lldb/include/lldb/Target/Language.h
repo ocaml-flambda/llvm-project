@@ -320,6 +320,10 @@ public:
   /// that the name actually belongs to this language.
   virtual bool SymbolNameFitsToLanguage(Mangled name) const { return false; }
 
+  /// Returns true if types should be shown with function arguments in frame display
+  /// Default is false to maintain existing behavior for all languages
+  virtual bool ShouldShowTypesInFunctionArguments() const { return false; }
+
   /// An individual data formatter may apply to several types and cross language
   /// boundaries. Each of those languages may want to customize the display of
   /// values of said types by appending proper prefix/suffix information in
