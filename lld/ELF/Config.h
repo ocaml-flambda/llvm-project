@@ -241,6 +241,7 @@ struct Config {
   bool dependentLibraries;
   bool disableVerify;
   bool ehFrameHdr;
+  bool ehFrameHdr64 = false;
   bool emitLLVM;
   bool emitRelocs;
   bool enableNewDtags;

@@ -586,6 +586,35 @@ SmallVector<EhFrameSection::FdeData, 0> EhFrameSection::getFdeData() const {
   return ret;
 }
 
+// Returns data for .eh_frame_hdr with 64-bit entries. Similar to getFdeData()
+// but without the 32-bit overflow check.
+SmallVector<EhFrameSection::FdeData64, 0> EhFrameSection::getFdeData64() const {
+  uint8_t *buf = Out::bufferStart + getParent()->offset + outSecOff;
+  SmallVector<FdeData64, 0> ret;
+
+  uint64_t va = getPartition().ehFrameHdr->getVA();
+  for (CieRecord *rec : cieRecords) {
+    uint8_t enc = getFdeEncoding(rec->cie);
+    for (EhSectionPiece *fde : rec->fdes) {
+      uint64_t pc = getFdePc(buf, fde->outputOff, enc);
+      uint64_t fdeVA = getParent()->addr + fde->outputOff;
+      ret.push_back({pc - va, fdeVA - va});
+    }
+  }
+
+  // Sort the FDE list by their PC and uniqueify.
+  auto less = [](const FdeData64 &a, const FdeData64 &b) {
+    return a.pcRel < b.pcRel;
+  };
+  llvm::stable_sort(ret, less);
+  auto eq = [](const FdeData64 &a, const FdeData64 &b) {
+    return a.pcRel == b.pcRel;
+  };
+  ret.erase(std::unique(ret.begin(), ret.end(), eq), ret.end());
+
+  return ret;
+}
+
 static uint64_t readFdeAddr(uint8_t *buf, int size) {
   switch (size) {
   case DW_EH_PE_udata2:
@@ -3632,28 +3661,53 @@ void EhFrameHeader::writeTo(uint8_t *buf) {
 // It is sorted by PC.
 void EhFrameHeader::write() {
   uint8_t *buf = Out::bufferStart + getParent()->offset + outSecOff;
-  using FdeData = EhFrameSection::FdeData;
-  SmallVector<FdeData, 0> fdes = getPartition().ehFrame->getFdeData();
 
-  buf[0] = 1;
-  buf[1] = DW_EH_PE_pcrel | DW_EH_PE_sdata4;
-  buf[2] = DW_EH_PE_udata4;
-  buf[3] = DW_EH_PE_datarel | DW_EH_PE_sdata4;
-  write32(buf + 4,
-          getPartition().ehFrame->getParent()->addr - this->getVA() - 4);
-  write32(buf + 8, fdes.size());
-  buf += 12;
+  if (!config->ehFrameHdr64) {
+    using FdeData = EhFrameSection::FdeData;
+    SmallVector<FdeData, 0> fdes = getPartition().ehFrame->getFdeData();
 
-  for (FdeData &fde : fdes) {
-    write32(buf, fde.pcRel);
-    write32(buf + 4, fde.fdeVARel);
-    buf += 8;
+    buf[0] = 1;
+    buf[1] = DW_EH_PE_pcrel | DW_EH_PE_sdata4;
+    buf[2] = DW_EH_PE_udata4;
+    buf[3] = DW_EH_PE_datarel | DW_EH_PE_sdata4;
+    write32(buf + 4,
+            getPartition().ehFrame->getParent()->addr - this->getVA() - 4);
+    write32(buf + 8, fdes.size());
+    buf += 12; // 4-byte header + 4-byte eh_frame_ptr + 4-byte fde_count
+
+    for (FdeData &fde : fdes) {
+      write32(buf, fde.pcRel);
+      write32(buf + 4, fde.fdeVARel);
+      buf += 8; // 4-byte pc + 4-byte fde_va
+    }
+  } else {
+    using FdeData64 = EhFrameSection::FdeData64;
+    SmallVector<FdeData64, 0> fdes = getPartition().ehFrame->getFdeData64();
+
+    buf[0] = 1;
+    buf[1] = DW_EH_PE_pcrel | DW_EH_PE_sdata8;
+    buf[2] = DW_EH_PE_udata8;
+    buf[3] = DW_EH_PE_datarel | DW_EH_PE_sdata8;
+    write64(buf + 4,
+            getPartition().ehFrame->getParent()->addr - this->getVA() - 4);
+    write64(buf + 12, fdes.size());
+    buf += 20; // 4-byte header + 8-byte eh_frame_ptr + 8-byte fde_count
+
+    for (FdeData64 &fde : fdes) {
+      write64(buf, fde.pcRel);
+      write64(buf + 8, fde.fdeVARel);
+      buf += 16; // 8-byte pc + 8-byte fde_va
+    }
   }
 }
 
 size_t EhFrameHeader::getSize() const {
-  // .eh_frame_hdr has a 12 bytes header followed by an array of FDEs.
-  return 12 + getPartition().ehFrame->numFdes * 8;
+  size_t numFdes = getPartition().ehFrame->numFdes;
+  // 32-bit: 12-byte header + 8 bytes per entry
+  // 64-bit: 20-byte header + 16 bytes per entry
+  if (config->ehFrameHdr64)
+    return 20 + numFdes * 16;
+  return 12 + numFdes * 8;
 }
 
 bool EhFrameHeader::isNeeded() const {
