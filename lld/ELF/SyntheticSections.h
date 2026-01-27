@@ -68,7 +68,13 @@ public:
     uint32_t fdeVARel;
   };
 
+  struct FdeData64 {
+    uint64_t pcRel;
+    uint64_t fdeVARel;
+  };
+
   SmallVector<FdeData, 0> getFdeData() const;
+  SmallVector<FdeData64, 0> getFdeData64() const;
   ArrayRef<CieRecord *> getCieRecords() const { return cieRecords; }
   template <class ELFT>
   void iterateFDEWithLSDA(llvm::function_ref<void(InputSection &)> fn);

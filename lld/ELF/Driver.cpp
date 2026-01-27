@@ -1281,6 +1281,8 @@ static void readConfigs(opt::InputArgList &args) {
   config->dynamicLinker = getDynamicLinker(args);
   config->ehFrameHdr =
       args.hasFlag(OPT_eh_frame_hdr, OPT_no_eh_frame_hdr, false);
+  config->ehFrameHdr64 =
+      args.hasFlag(OPT_eh_frame_hdr_64, OPT_no_eh_frame_hdr_64, false);
   config->emitLLVM = args.hasArg(OPT_lto_emit_llvm);
   config->emitRelocs = args.hasArg(OPT_emit_relocs);
   config->enableNewDtags =

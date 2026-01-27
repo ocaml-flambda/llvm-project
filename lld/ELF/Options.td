@@ -193,6 +193,10 @@ defm eh_frame_hdr: B<"eh-frame-hdr",
     "Request creation of .eh_frame_hdr section and PT_GNU_EH_FRAME segment header",
     "Do not create .eh_frame_hdr section">;
 
+defm eh_frame_hdr_64: BB<"eh-frame-hdr-64",
+    "Use 64-bit entries in .eh_frame_hdr",
+    "Use 32-bit entries in .eh_frame_hdr (default)">;
+
 def emit_relocs: F<"emit-relocs">, HelpText<"Generate relocations in output">;
 
 def enable_new_dtags: F<"enable-new-dtags">,
