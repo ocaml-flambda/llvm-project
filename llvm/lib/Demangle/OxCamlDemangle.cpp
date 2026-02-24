@@ -58,9 +58,9 @@ static unsigned lowerhex(char c) {
   }
 }
 
-// Decode unicode-escaped identifier (format: u<len><coded>_<raw>)
+// Decode escaped identifier (format: u<len><coded>_<raw>)
 // Returns true on success, false on error
-static bool DecodeUnicodeEscaped(StringView& Mangled, OutputBuffer& Demangled) {
+static bool DecodeEscaped(StringView& Mangled, OutputBuffer& Demangled) {
   unsigned len = ConsumeUnsignedDecimal(Mangled);
   if(len == ERROR || len <= 0 || len > Mangled.size())
     return false;
@@ -96,13 +96,13 @@ static bool DecodeUnicodeEscaped(StringView& Mangled, OutputBuffer& Demangled) {
   return true;
 }
 
-// Decode identifier (either plain or unicode-escaped)
+// Decode identifier (either plain or escaped)
 // Handles: <len><text> or u<len><coded>_<raw>
 // Returns true on success, false on error
 static bool DecodeIdentifier(StringView& Mangled, OutputBuffer& Demangled) {
   if(Mangled.consumeFront('u')) {
-    // Unicode-escaped identifier
-    return DecodeUnicodeEscaped(Mangled, Demangled);
+    // Escaped identifier
+    return DecodeEscaped(Mangled, Demangled);
   } else {
     // Plain identifier with length prefix
     unsigned len = ConsumeUnsignedDecimal(Mangled);
@@ -115,9 +115,11 @@ static bool DecodeIdentifier(StringView& Mangled, OutputBuffer& Demangled) {
 }
 
 // Decode anonymous location (format: filename_line_col)
-// Anonymous functions/modules are encoded as: fn(filename:line:col)
+// Anonymous functions, modules and partial functions are encoded as:
+//   type(filename:line:col)
+// where <type> can be fn, mod or partial
 // Returns true on success, false on error
-static bool DecodeAnonymousLocation(StringView& Mangled, OutputBuffer& Demangled) {
+static bool DecodeAnonymousLocation(StringView& Mangled, OutputBuffer& Demangled, char typ) {
   // Allocate temporary buffer based on remaining mangled string size
   // The decoded identifier will be at most the size of the remaining mangled string
   size_t buffer_size = Mangled.size();
@@ -153,9 +155,22 @@ static bool DecodeAnonymousLocation(StringView& Mangled, OutputBuffer& Demangled
     }
   }
 
-  // Output in format fn(filename:line:col)
+  // Output in format type(filename:line:col)
   if(underscore_count >= 2) {
-    Demangled << "fn(";
+    switch(typ) {
+      case 'S':
+        Demangled << "mod";
+        break;
+      case 'L':
+        Demangled << "fn";
+        break;
+      case 'P':
+        Demangled << "partial";
+        break;
+      default:
+        assert(0);
+    }
+    Demangled << '(';
     for(size_t j = 0; j < first_underscore; j++)
       Demangled << temp_buf[j];
     Demangled << ':';
@@ -175,9 +190,21 @@ static bool DecodeAnonymousLocation(StringView& Mangled, OutputBuffer& Demangled
   return true;
 }
 
+static void TrimStamp(OutputBuffer& Demangled) {
+  size_t pos, end;
+  char *buf = Demangled.getBuffer();
+  pos = end = Demangled.getCurrentPosition() - 1;
+
+  /* Trim the end only if it matches _[0-9]+ */
+  while(pos > 0 && buf[pos] >= '0' && buf[pos] <= '9')
+    pos--;
+  if(pos > 0 && buf[pos] == '_' && pos < end)
+    Demangled.setCurrentPosition(pos);
+}
+
 char *llvm::oxcamlDemangle(const char *MangledName) {
   StringView Mangled(MangledName);
-  if(!Mangled.consumeFront("_O"))
+  if(!Mangled.consumeFront("_Caml") && !Mangled.consumeFront("__Caml"))
     return nullptr;
 
   // Allocate the buffer at a reasonable size, as OutputBuffer allocates 992
@@ -203,7 +230,10 @@ char *llvm::oxcamlDemangle(const char *MangledName) {
 
       // Handle each path_item type
       switch(Mangled[0]) {
+          case 'U':  // Compilation Unit
           case 'M':  // Module
+          case 'O':  // class (O for object)
+          case 'F':  // Function
               if(!Demangled.empty())
                   Demangled << '.';
               Mangled = Mangled.dropFront(1);
@@ -211,45 +241,30 @@ char *llvm::oxcamlDemangle(const char *MangledName) {
                   ENDONERROR();
               break;
 
-          case 'F':  // NamedFunction
+          case 'S':  // anonymous Struct
+          case 'L':  // anonymous function (L for lambda)
+          case 'P':  // Partial application
               if(!Demangled.empty())
                   Demangled << '.';
               Mangled = Mangled.dropFront(1);
-              if(!DecodeIdentifier(Mangled, Demangled))
+              if(!DecodeAnonymousLocation(Mangled, Demangled, Mangled[0]))
                   ENDONERROR();
               break;
 
-          case 'L':  // AnonymousFunction
+
+          case 'I':  // Inlining
               if(!Demangled.empty())
                   Demangled << '.';
               Mangled = Mangled.dropFront(1);
-              if(!DecodeAnonymousLocation(Mangled, Demangled))
-                  ENDONERROR();
-              break;
-
-          case 'S':  // AnonymousModule
-              if(!Demangled.empty())
-                  Demangled << '.';
-              Mangled = Mangled.dropFront(1);
-              if(!DecodeAnonymousLocation(Mangled, Demangled))
-                  ENDONERROR();
-              break;
-
-          case 'P':  // PartialFunction (no dot separator)
-              Mangled = Mangled.dropFront(1);
-              Demangled << "(partially_applied)";
+              Demangled << "<inlining>";
               break;
 
           default:
-              // No prefix means Module (legacy compatibility)
-              if(!Demangled.empty())
-                  Demangled << '.';
-              if(!DecodeIdentifier(Mangled, Demangled))
-                  ENDONERROR();
-              break;
+              ENDONERROR();
       }
   }
 
+  TrimStamp(Demangled);
   Demangled << '\0';
 
   return Demangled.getBuffer();
