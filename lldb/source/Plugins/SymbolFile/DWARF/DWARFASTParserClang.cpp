@@ -2428,17 +2428,8 @@ DWARFASTParserClang::ParseFunctionFromDWARF(CompileUnit &comp_unit,
       // demangled name using the decl context. We skip if the function is
       // "main" as its name is never mangled.
       func_name.SetValue(ConstructDemangledNameFromDWARF(die), false);
-    } else {
-      // Check if the name itself is mangled (e.g., OxCaml symbols starting with _O)
-      // even when DW_AT_linkage_name is not present in DWARF
-      bool is_mangled = name && Mangled::GetManglingScheme(name) != Mangled::eManglingSchemeNone;
-      if (Log *log = GetLog(LLDBLog::Symbols)) {
-        LLDB_LOGF(log, "DWARFASTParserClang::ParseFunctionFromDWARF: name='%s', is_mangled=%d, scheme=%d",
-                  name ? name : "<null>", is_mangled,
-                  name ? (int)Mangled::GetManglingScheme(name) : -1);
-      }
-      func_name.SetValue(ConstString(name), is_mangled);
-    }
+    } else
+      func_name.SetValue(ConstString(name));
 
     FunctionSP func_sp;
     std::unique_ptr<Declaration> decl_up;
