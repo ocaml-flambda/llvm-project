@@ -19,8 +19,9 @@ static bool isItaniumEncoding(const char *S) {
   return std::strncmp(S, "_Z", 2) == 0 || std::strncmp(S, "___Z", 4) == 0;
 }
 
-static bool isOxCamlEncoding(const std::string &S) {
-    return S.size() >= 2 && S[0] == '_' && S[1] == 'O'; }
+static bool isOxCamlEncoding(const char *S) {
+  return std::strncmp(S, "_Caml", 5) == 0 || std::strncmp(S, "__Caml", 6) == 0;
+}
 
 static bool isRustEncoding(const char *S) { return S[0] == '_' && S[1] == 'R'; }
 
