@@ -13,8 +13,6 @@
 #include "Config.h"
 #include "InputFiles.h"
 #include "LinkerScript.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
 #include "MapFile.h"
 #include "OutputSections.h"
 #include "Relocations.h"
