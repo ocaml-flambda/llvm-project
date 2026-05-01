@@ -365,17 +365,21 @@ Function *DWARFASTParserOxCaml::ParseFunctionFromDWARF(
            "ParseFunctionFromDWARF: DIE 0x{0:x16} name=\"{1}\" mangled=\"{2}\"",
            die.GetID(), name ? name : "<null>", mangled ? mangled : "<null>");
 
-  // Create the function name. For OCaml, the linkage name is already
-  // human-readable (e.g., "Module.function") and the regular name is the
-  // assembly-level symbol (e.g., "camlModule__function_1_2_code")
+  // For OCaml, DW_AT_name is the source-level name (e.g., "Module.function")
+  // and DW_AT_linkage_name is the mangled assembly symbol (e.g.,
+  // "camlModule__function_1_2_code"). Mangled::SetValue would auto-detect via
+  // GetManglingScheme(), which doesn't recognize OCaml mangling, so we set
+  // both fields explicitly.
+  // TODO(oxcaml): once lldb has an OCaml demangler registered with
+  // Mangled::GetManglingScheme(), revert this to a single SetValue(mangled)
+  // call so demangling happens lazily through the standard path.
   Mangled func_name;
-  if (mangled && strlen(mangled) > 0) {
-    func_name.SetValue(ConstString(mangled));
-  } else if (name && strlen(name) > 0) {
-    func_name.SetValue(ConstString(name));
-  } else {
+  if (name && strlen(name) > 0)
+    func_name.SetDemangledName(ConstString(name));
+  if (mangled && strlen(mangled) > 0)
+    func_name.SetMangledName(ConstString(mangled));
+  if (!func_name)
     return nullptr; // Must have a name
-  }
 
   const user_id_t func_user_id = die.GetID();
 
