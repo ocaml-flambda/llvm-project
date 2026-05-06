@@ -309,6 +309,14 @@ public:
                               const Declaration *decl_ptr,
                               const Declaration *call_decl_ptr);
 
+  /// Overload that takes a pre-built Mangled. Useful for languages whose
+  /// mangling scheme is not recognised by Mangled::GetManglingScheme(): the
+  /// caller can populate both the demangled and mangled slots explicitly
+  /// instead of relying on prefix-based auto-detection.
+  void SetInlinedFunctionInfo(ConstString name, const Mangled &mangled,
+                              const Declaration *decl_ptr,
+                              const Declaration *call_decl_ptr);
+
   /// Set accessor for the variable list.
   ///
   /// Called by the SymbolFile plug-ins after they have parsed the variable
