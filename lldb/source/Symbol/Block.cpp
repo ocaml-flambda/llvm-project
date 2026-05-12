@@ -389,6 +389,13 @@ void Block::SetInlinedFunctionInfo(const char *name, const char *mangled,
                                                         call_decl_ptr);
 }
 
+void Block::SetInlinedFunctionInfo(ConstString name, const Mangled &mangled,
+                                   const Declaration *decl_ptr,
+                                   const Declaration *call_decl_ptr) {
+  m_inlineInfoSP = std::make_shared<InlineFunctionInfo>(name, mangled, decl_ptr,
+                                                        call_decl_ptr);
+}
+
 VariableListSP Block::GetBlockVariableList(bool can_create) {
   if (!m_parsed_block_variables) {
     if (m_variable_list_sp.get() == nullptr && can_create) {
