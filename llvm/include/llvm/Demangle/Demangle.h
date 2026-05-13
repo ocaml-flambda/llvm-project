@@ -58,6 +58,9 @@ char *microsoftDemangle(std::string_view mangled_name, size_t *n_read,
 std::optional<size_t>
 getArm64ECInsertionPointInMangledName(std::string_view MangledName);
 
+// Demangles an OxCaml mangled symbol
+char *oxcamlDemangle(std::string_view MangledName);
+
 // Demangles a Rust v0 mangled symbol.
 char *rustDemangle(std::string_view MangledName);
 

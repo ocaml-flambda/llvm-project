@@ -47,6 +47,9 @@ Mangled::ManglingScheme Mangled::GetManglingScheme(llvm::StringRef const name) {
   if (name.starts_with("?"))
     return Mangled::eManglingSchemeMSVC;
 
+  if (name.starts_with("_Caml"))
+    return Mangled::eManglingSchemeOxCaml;
+
   if (name.starts_with("_R"))
     return Mangled::eManglingSchemeRustV0;
 
@@ -197,6 +200,20 @@ GetItaniumDemangledStr(const char *M) {
   return {demangled_cstr, std::move(info)};
 }
 
+static char *GetOxCamlDemangledStr(llvm::StringRef M) {
+  char *demangled_cstr = llvm::oxcamlDemangle(M);
+
+  if (Log *log = GetLog(LLDBLog::Demangle)) {
+    if (demangled_cstr && demangled_cstr[0])
+      LLDB_LOG(log, "demangled oxcaml: {0} -> \"{1}\"", M, demangled_cstr);
+    else
+      LLDB_LOG(log, "demangled oxcaml: {0} -> error: failed to demangle",
+               static_cast<std::string_view>(M));
+  }
+
+  return demangled_cstr;
+}
+
 static char *GetRustV0DemangledStr(llvm::StringRef M) {
   char *demangled_cstr = llvm::rustDemangle(M);
 
@@ -274,6 +291,7 @@ bool Mangled::GetRichManglingInfo(RichManglingContext &context,
     }
   }
 
+  case eManglingSchemeOxCaml:
   case eManglingSchemeRustV0:
   case eManglingSchemeD:
   case eManglingSchemeSwift:
@@ -324,6 +342,9 @@ ConstString Mangled::GetDemangledNameImpl(bool force) const {
     m_demangled_info.emplace(std::move(demangled.second));
     break;
   }
+  case eManglingSchemeOxCaml:
+    demangled_name = GetOxCamlDemangledStr(m_mangled);
+    break;
   case eManglingSchemeRustV0:
     demangled_name = GetRustV0DemangledStr(m_mangled);
     break;

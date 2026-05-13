@@ -1396,6 +1396,21 @@ size_t SymbolFileDWARF::ParseBlocksRecursive(CompileUnit &comp_unit,
         } else {
           block->SetInlinedFunctionInfo(name, mangled_name, decl_up.get(),
                                         call_up.get());
+
+        /* FIXME(oxcaml) Should it be this instead?
+          // If mangled_name is NULL but name is mangled (e.g., OxCaml symbols),
+          // swap them so the Mangled class can handle demangling correctly
+          const char *use_name = name;
+          const char *use_mangled = mangled_name;
+          if (mangled_name == nullptr && name != nullptr &&
+              Mangled::GetManglingScheme(name) != Mangled::eManglingSchemeNone) {
+            use_mangled = name;
+            use_name = nullptr;
+          }
+
+          block->SetInlinedFunctionInfo(use_name, use_mangled, decl_up.get(),
+                                        call_up.get());
+        */
         }
       }
 

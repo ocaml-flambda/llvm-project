@@ -43,6 +43,10 @@ static bool isItaniumEncoding(std::string_view S) {
   return Pos > 0 && Pos <= 4 && S[Pos] == 'Z';
 }
 
+static bool isOxCamlEncoding(std::string_view S) {
+  return starts_with(S, "_Caml");
+}
+
 static bool isRustEncoding(std::string_view S) { return starts_with(S, "_R"); }
 
 static bool isDLangEncoding(std::string_view S) { return starts_with(S, "_D"); }
@@ -64,6 +68,8 @@ bool llvm::nonMicrosoftDemangle(std::string_view MangledName,
     Demangled = rustDemangle(MangledName);
   else if (isDLangEncoding(MangledName))
     Demangled = dlangDemangle(MangledName);
+  else if (isOxCamlEncoding(MangledName))
+    Demangled = oxcamlDemangle(MangledName);
 
   if (!Demangled)
     return false;
