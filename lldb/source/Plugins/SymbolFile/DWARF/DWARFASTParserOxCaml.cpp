@@ -8,16 +8,22 @@
 
 #include "DWARFASTParserOxCaml.h"
 
+#include "DWARFAttribute.h"
 #include "DWARFDIE.h"
 #include "DWARFDebugInfoEntry.h"
 #include "DWARFDefines.h"
+#include "DWARFFormValue.h"
+#include "DWARFUnit.h"
 #include "SymbolFileDWARF.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 
+#include "lldb/Expression/DWARFExpression.h"
+#include "lldb/Expression/DWARFExpressionList.h"
 #include "lldb/Symbol/Type.h"
 
 #include "../../Language/OxCaml/LogChannelOxCaml.h"
 #include "../../Language/OxCaml/OxCamlAssert.h"
+#include "Plugins/TypeSystem/OxCaml/OxCamlDynamicLayoutValue.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Symbol/CompileUnit.h"
@@ -29,17 +35,55 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::plugin::dwarf;
 
-// Custom OCaml DWARF attribute DW_AT_ocaml_offset_record_from_pointer
-// This attribute indicates the offset to apply when dereferencing pointers to
-// this type
-static constexpr uint32_t DW_AT_ocaml_offset_record_from_pointer = 0x3106;
-// CR sspies: Technically, this requires an extension of the DWARF
-// standard. If we want to upstream this, we should think about whether the
-// attribute should be on the structure or on the pointer itself (indicating a
-// base offset). For now, we declare it as an ad-hoc attribute here.
-
 // Default size for OCaml values when size attribute is missing
 static constexpr uint64_t DEFAULT_OCAML_VALUE_SIZE = 8;
+
+namespace {
+
+// Locate a single attribute on a DIE and return its form value. Returns
+// std::nullopt if the attribute is absent or the form value cannot be
+// extracted.
+std::optional<DWARFFormValue>
+GetFormValueForAttribute(const DWARFDIE &die, llvm::dwarf::Attribute attr) {
+  DWARFAttributes attrs = die.GetAttributes();
+  for (uint32_t i = 0; i < attrs.Size(); ++i) {
+    if (attrs.AttributeAtIndex(i) != attr)
+      continue;
+    DWARFFormValue form_value;
+    if (!attrs.ExtractFormValueAtIndex(i, form_value))
+      return std::nullopt;
+    return form_value;
+  }
+  return std::nullopt;
+}
+
+// Parse a layout attribute that may be a constant or a DW_FORM_exprloc.
+// The (kind, initial_stack) pair is fixed per attribute by the compiler
+// contract; callers pass the pair that matches the attribute.
+std::optional<OxCamlDynamicLayoutValue> ParseConstantOrExpression(
+    const DWARFDIE &die, llvm::dwarf::Attribute attr,
+    OxCamlLayoutValueKind kind,
+    OxCamlDynamicLayoutValue::InitialStackLayout initial_stack) {
+  auto form_value = GetFormValueForAttribute(die, attr);
+  if (!form_value.has_value())
+    return std::nullopt;
+
+  if (form_value->BlockData() == nullptr)
+    return OxCamlDynamicLayoutValue::MakeConstant(form_value->Unsigned(), kind);
+
+  const DWARFDataExtractor &debug_info_data = die.GetData();
+  uint32_t block_length = form_value->Unsigned();
+  uint32_t block_offset =
+      form_value->BlockData() - debug_info_data.GetDataStart();
+  DataExtractor expr_data(debug_info_data, block_offset, block_length);
+  DWARFExpression expr(expr_data);
+
+  DWARFExpressionList list(die.GetModule(), std::move(expr), die.GetCU());
+  return OxCamlDynamicLayoutValue::MakeExpression(std::move(list), kind,
+                                                  initial_stack);
+}
+
+} // namespace
 
 DWARFASTParserOxCaml::DWARFASTParserOxCaml(TypeSystemOxCaml &oxcaml_typesystem)
     : DWARFASTParser(Kind::DWARFASTParserOxCaml),
@@ -512,31 +556,37 @@ DWARFASTParserOxCaml::ParseStructureType(const SymbolContext &sc,
 
   LLDB_LOG(log, "ParseStructureType: DIE 0x{0:x16}", die_id);
 
-  std::optional<uint64_t> byte_size_opt =
-      die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_size);
-  if (!byte_size_opt.has_value() || byte_size_opt.value() == 0) {
+  auto size_opt = ParseConstantOrExpression(
+      die, llvm::dwarf::DW_AT_byte_size, OxCamlLayoutValueKind::ScalarBytes,
+      OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
+  if (!size_opt.has_value()) {
+    size_opt = ParseConstantOrExpression(
+        die, llvm::dwarf::DW_AT_bit_size, OxCamlLayoutValueKind::ScalarBits,
+        OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
+  }
+  if (!size_opt.has_value()) {
     LLDB_LOG(log,
-             "ParseStructureType: Missing or zero byte_size for DIE 0x{0:x16}",
+             "ParseStructureType: Missing byte_size and bit_size for DIE "
+             "0x{0:x16}",
              die_id);
     return nullptr;
   }
-  uint64_t byte_size = byte_size_opt.value();
+  OxCamlDynamicLayoutValue size = std::move(*size_opt);
+
+  uint64_t static_size_fallback;
+  if (size.IsConstant()) {
+    if (size.GetConstant() == 0) {
+      LLDB_LOG(log, "ParseStructureType: Zero size for DIE 0x{0:x16}", die_id);
+      return nullptr;
+    }
+    static_size_fallback = size.GetKind() == OxCamlLayoutValueKind::ScalarBits
+                               ? (size.GetConstant() + 7) / 8
+                               : size.GetConstant();
+  } else {
+    static_size_fallback = formatters::oxcaml::helpers::constants::WORD_SIZE;
+  }
 
   std::optional<std::string> name = ExtractTypeName(die);
-
-  auto ocaml_attr = static_cast<llvm::dwarf::Attribute>(
-      DW_AT_ocaml_offset_record_from_pointer);
-  std::optional<uint64_t> attr_value_opt =
-      die.GetAttributeValueAsOptionalUnsigned(ocaml_attr);
-
-  int64_t base_offset = 0;
-  if (attr_value_opt.has_value()) {
-    base_offset = static_cast<int64_t>(attr_value_opt.value());
-    LLDB_LOG(
-        log,
-        "ParseStructureType: Found DW_AT_ocaml_offset_record_from_pointer: {0}",
-        base_offset);
-  }
 
   std::vector<OxCamlMember> members;
   std::vector<OxCamlVariantPart> variant_parts;
@@ -546,11 +596,14 @@ DWARFASTParserOxCaml::ParseStructureType(const SymbolContext &sc,
     case llvm::dwarf::DW_TAG_member: {
       auto member = ParseMember(sc, child_die);
       if (member.has_value()) {
-        members.push_back(std::move(*member));
+        const char *location_kind =
+            member->location.IsConstant() ? "constant" : "expression";
         LLDB_LOG(
-            log, "ParseStructureType: Added member {0} at offset {1}, type {2}",
-            member->name.value_or("<unnamed>"), member->data_member_location,
+            log,
+            "ParseStructureType: Added member {0} ({1} location), type {2}",
+            member->name.value_or("<unnamed>"), location_kind,
             member->GetType()->GetDisplayName());
+        members.push_back(std::move(*member));
       } else {
         LLDB_LOG(log, "ParseStructureType: Failed to parse member, skipping");
       }
@@ -576,12 +629,12 @@ DWARFASTParserOxCaml::ParseStructureType(const SymbolContext &sc,
 
   LLDB_LOG(log,
            "ParseStructureType: Creating OxCamlStructureType with {0} members, "
-           "{1} variant parts, size {2}",
-           members.size(), variant_parts.size(), byte_size);
+           "{1} variant parts, static-size-fallback {2}",
+           members.size(), variant_parts.size(), static_size_fallback);
 
   return std::make_unique<OxCamlStructureType>(
-      die_id, std::move(name), byte_size, std::move(members),
-      std::move(variant_parts), base_offset);
+      die_id, std::move(name), std::move(size), static_size_fallback,
+      std::move(members), std::move(variant_parts));
 }
 
 std::optional<OxCamlMember>
@@ -613,22 +666,24 @@ DWARFASTParserOxCaml::ParseMember(const SymbolContext &sc,
             member_type_die.GetID());
   Reference<OxCamlType> *member_type_ref = member_type_opt.value();
 
-  std::optional<uint64_t> member_offset_opt =
-      member_die.GetAttributeValueAsOptionalUnsigned(
-          llvm::dwarf::DW_AT_data_member_location);
-  if (!member_offset_opt.has_value()) {
+  auto location_opt = ParseConstantOrExpression(
+      member_die, llvm::dwarf::DW_AT_data_member_location,
+      OxCamlLayoutValueKind::Location,
+      OxCamlDynamicLayoutValue::InitialStackLayout::ObjectAddress);
+  if (!location_opt.has_value()) {
     LLDB_LOG(log, "ParseMember: Missing data_member_location for DIE 0x{0:x16}",
              member_die.GetID());
     return std::nullopt;
   }
-  uint64_t member_offset = member_offset_opt.value();
 
-  std::optional<uint64_t> bit_offset =
-      member_die.GetAttributeValueAsOptionalUnsigned(
-          llvm::dwarf::DW_AT_data_bit_offset);
-  std::optional<uint64_t> bit_size =
-      member_die.GetAttributeValueAsOptionalUnsigned(
-          llvm::dwarf::DW_AT_bit_size);
+  auto bit_offset = ParseConstantOrExpression(
+      member_die, llvm::dwarf::DW_AT_data_bit_offset,
+      OxCamlLayoutValueKind::ScalarBits,
+      OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
+  auto bit_size = ParseConstantOrExpression(
+      member_die, llvm::dwarf::DW_AT_bit_size,
+      OxCamlLayoutValueKind::ScalarBits,
+      OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
 
   std::optional<uint64_t> artificial_opt =
       member_die.GetAttributeValueAsOptionalUnsigned(
@@ -636,22 +691,20 @@ DWARFASTParserOxCaml::ParseMember(const SymbolContext &sc,
   bool is_artificial =
       artificial_opt.has_value() && artificial_opt.value() != 0;
 
-  LLDB_LOG(log, "ParseMember: Created member {0} at offset {1}, type {2}{3}",
-           member_name.value_or("<unnamed>"), member_offset,
+  LLDB_LOG(log, "ParseMember: Created member {0} ({1}), type {2}{3}",
+           member_name.value_or("<unnamed>"),
+           location_opt->IsConstant() ? "constant location" : "expr location",
            member_type_ref->get()->GetDisplayName(),
            is_artificial ? " (artificial)" : "");
 
   if (bit_offset.has_value() || bit_size.has_value()) {
-    LLDB_LOG(log, "ParseMember: Bit field detected - offset: {0}, size: {1}",
-             bit_offset.value_or(0), bit_size.value_or(0));
+    LLDB_LOG(log, "ParseMember: Bit field detected for DIE 0x{0:x16}",
+             member_die.GetID());
   }
 
-  return OxCamlMember{std::move(member_name),
-                      member_type_ref,
-                      member_offset,
-                      bit_offset,
-                      bit_size,
-                      is_artificial};
+  return OxCamlMember{std::move(member_name),   member_type_ref,
+                      std::move(*location_opt), std::move(bit_offset),
+                      std::move(bit_size),      is_artificial};
 }
 
 std::optional<OxCamlVariantPart>
@@ -678,8 +731,9 @@ DWARFASTParserOxCaml::ParseVariantPart(const SymbolContext &sc,
     return std::nullopt;
   }
 
-  LLDB_LOG(log, "ParseVariantPart: Discriminator at offset {0}, type: {1}",
-           discriminator_member->data_member_location,
+  LLDB_LOG(log, "ParseVariantPart: Discriminator ({0} location), type: {1}",
+           discriminator_member->location.IsConstant() ? "constant"
+                                                       : "expression",
            discriminator_member->GetType()->GetDisplayName());
 
   std::vector<OxCamlVariantPart::Variant> variants;
@@ -755,40 +809,37 @@ DWARFASTParserOxCaml::ParseArrayType(const SymbolContext &sc,
             element_type_die.GetID());
   Reference<OxCamlType> *element_type_ref = element_type_opt.value();
 
-  std::optional<uint64_t> byte_stride_opt =
-      die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_byte_stride);
-  uint64_t byte_stride;
-  if (byte_stride_opt.has_value()) {
-    byte_stride = byte_stride_opt.value();
-  } else {
-    byte_stride = element_type_ref->get()->GetByteSize();
-    LLDB_LOG(log,
-             "ParseArrayType: No explicit byte_stride, using element size: {0}",
-             byte_stride);
-  }
+  auto byte_stride_opt = ParseConstantOrExpression(
+      die, llvm::dwarf::DW_AT_byte_stride, OxCamlLayoutValueKind::ScalarBytes,
+      OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
+  OxCamlDynamicLayoutValue byte_stride =
+      byte_stride_opt.has_value() ? std::move(*byte_stride_opt)
+                                  : OxCamlDynamicLayoutValue::MakeConstant(
+                                        element_type_ref->get()->GetByteSize(),
+                                        OxCamlLayoutValueKind::ScalarBytes);
 
-  std::optional<uint64_t> count;
+  std::optional<OxCamlDynamicLayoutValue> count;
   for (DWARFDIE child_die : die.children()) {
     if (child_die.Tag() == llvm::dwarf::DW_TAG_subrange_type) {
-      auto subrange_count_opt = child_die.GetAttributeValueAsOptionalUnsigned(
-          llvm::dwarf::DW_AT_count);
-      if (subrange_count_opt.has_value()) {
-        count = subrange_count_opt.value();
-        LLDB_LOG(log, "ParseArrayType: Found subrange count: {0}",
-                 count.value());
-      }
+      count = ParseConstantOrExpression(
+          child_die, llvm::dwarf::DW_AT_count,
+          OxCamlLayoutValueKind::ScalarElements,
+          OxCamlDynamicLayoutValue::InitialStackLayout::Empty);
       break;
     }
   }
 
   LLDB_LOG(log,
            "ParseArrayType: Creating OxCamlArrayType with element type {0}, "
-           "stride {1}, count {2}",
-           element_type_ref->get()->GetDisplayName(), byte_stride,
-           count.has_value() ? std::to_string(count.value()) : "unknown");
+           "{1} stride, {2} count",
+           element_type_ref->get()->GetDisplayName(),
+           byte_stride.IsConstant() ? "constant" : "expression",
+           count.has_value() ? (count->IsConstant() ? "constant" : "expression")
+                             : "unknown");
 
-  return std::make_unique<OxCamlArrayType>(
-      die_id, std::move(name), element_type_ref, count, byte_stride);
+  return std::make_unique<OxCamlArrayType>(die_id, std::move(name),
+                                           element_type_ref, std::move(count),
+                                           std::move(byte_stride));
 }
 
 std::unique_ptr<OxCamlType>

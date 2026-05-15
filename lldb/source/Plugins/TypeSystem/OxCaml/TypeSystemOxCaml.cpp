@@ -338,8 +338,15 @@ void TypeSystemOxCaml::Dump(llvm::raw_ostream &output, llvm::StringRef filter) {
       auto *at = static_cast<OxCamlArrayType *>(actual_type);
       output << " (array of " << at->GetElementType()->GetDisplayName();
       if (at->GetCount().has_value())
-        output << ", count=" << at->GetCount().value();
-      output << ", stride=" << at->GetStride() << " bytes)";
+        output << ", count="
+               << (at->GetCount()->IsConstant()
+                       ? std::to_string(at->GetCount()->GetConstant())
+                       : std::string("<dynamic>"));
+      output << ", stride="
+             << (at->GetStride().IsConstant()
+                     ? std::to_string(at->GetStride().GetConstant())
+                     : std::string("<dynamic>"))
+             << " bytes)";
     } break;
     case OxCamlType::Placeholder:
       output << " (placeholder - parsing in progress)";

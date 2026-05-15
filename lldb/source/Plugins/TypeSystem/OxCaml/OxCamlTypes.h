@@ -10,6 +10,7 @@
 #define LLDB_SOURCE_PLUGINS_TYPESYSTEM_OXCAML_OXCAMLTYPES_H
 
 #include "../../Language/OxCaml/OxCamlHelpers.h"
+#include "OxCamlDynamicLayoutValue.h"
 #include "lldb/Utility/Reference.h"
 #include "lldb/lldb-private.h"
 #include <cstdint>
@@ -48,8 +49,6 @@ public:
   }
 
   virtual uint64_t GetByteSize() const = 0;
-
-  virtual int64_t GetPointerAdjustmentOffset() const { return 0; }
 
   virtual std::string GetDefaultDisplayName() const = 0;
 
@@ -188,20 +187,27 @@ protected:
 
 class OxCamlArrayType : public OxCamlType {
   Reference<OxCamlType> *m_element_type_ref;
-  std::optional<uint64_t> m_count;
-  uint64_t m_stride;
+  /// DW_AT_count, in elements. The storage is optional because DWARF permits
+  /// unbounded arrays, but OxCaml compiler-emitted array DIEs must have a
+  /// subrange count expression that reads the runtime block wosize.
+  std::optional<OxCamlDynamicLayoutValue> m_count;
+  /// DW_AT_byte_stride, in bytes. OxCaml compiler output emits this explicitly.
+  OxCamlDynamicLayoutValue m_stride;
 
 public:
   OxCamlArrayType(lldb::user_id_t die_id, std::optional<std::string> name,
                   Reference<OxCamlType> *element_type_ref,
-                  std::optional<uint64_t> count, uint64_t stride)
+                  std::optional<OxCamlDynamicLayoutValue> count,
+                  OxCamlDynamicLayoutValue stride)
       : OxCamlType(Array, die_id, std::move(name)),
-        m_element_type_ref(element_type_ref), m_count(count), m_stride(stride) {
-  }
+        m_element_type_ref(element_type_ref), m_count(std::move(count)),
+        m_stride(std::move(stride)) {}
 
   OxCamlType *GetElementType() const;
-  std::optional<uint64_t> GetCount() const { return m_count; }
-  uint64_t GetStride() const { return m_stride; }
+  const std::optional<OxCamlDynamicLayoutValue> &GetCount() const {
+    return m_count;
+  }
+  const OxCamlDynamicLayoutValue &GetStride() const { return m_stride; }
   uint64_t GetByteSize() const override {
     return formatters::oxcaml::helpers::constants::WORD_SIZE;
   }
@@ -213,9 +219,14 @@ protected:
 struct OxCamlMember {
   std::optional<std::string> name;
   Reference<OxCamlType> *type_ref;
-  uint64_t data_member_location;
-  std::optional<uint64_t> bit_offset;
-  std::optional<uint64_t> bit_size;
+  /// Object-address-relative location of this member. Constants are byte
+  /// offsets from the raw OCaml object pointer; exprlocs evaluate to a load
+  /// address using the pre-pushed pointer convention.
+  OxCamlDynamicLayoutValue location;
+  /// Optional bit-field offset and size. Both are scalar quantities in bits
+  /// (constants or empty-stack exprlocs).
+  std::optional<OxCamlDynamicLayoutValue> bit_offset;
+  std::optional<OxCamlDynamicLayoutValue> bit_size;
   bool is_artificial = false;
 
   bool IsBitField() const {
@@ -250,34 +261,33 @@ public:
 
 class OxCamlStructureType : public OxCamlType {
 private:
-  uint64_t m_byte_size;
+  /// Dynamic size (ScalarBytes or ScalarBits, constant or expression). The
+  /// unit is recorded by [m_size.GetKind()]; callers that need bytes must
+  /// convert. [m_static_size_fallback] (always in bytes) is used by LLDB
+  /// APIs that need a static size without an execution context.
+  OxCamlDynamicLayoutValue m_size;
+  uint64_t m_static_size_fallback;
   std::vector<OxCamlMember> m_members;
   std::vector<OxCamlVariantPart> m_variant_parts;
 
-  // Custom base offset from DW_AT_ocaml_offset_record_from_pointer. This is
-  // specific to the DWARF encoding used by the OxCaml compiler. It supports an
-  // ad-hoc attribute (see DW_AT_ocaml_offset_record_from_pointer in
-  // DWARFASTParserOxCaml.cpp) that specifies a byte offset to apply when
-  // dealing with a pointer to a structure. This allows one to factor in the
-  // header field of a block when the actual pointer points to the first entry
-  // in the block.
-  int64_t m_base_offset;
-
 public:
   OxCamlStructureType(lldb::user_id_t die_id, std::optional<std::string> name,
-                      uint64_t byte_size, std::vector<OxCamlMember> members,
-                      std::vector<OxCamlVariantPart> variant_parts = {},
-                      int64_t base_offset = 0)
-      : OxCamlType(Structure, die_id, std::move(name)), m_byte_size(byte_size),
+                      OxCamlDynamicLayoutValue size,
+                      uint64_t static_size_fallback,
+                      std::vector<OxCamlMember> members,
+                      std::vector<OxCamlVariantPart> variant_parts = {})
+      : OxCamlType(Structure, die_id, std::move(name)),
+        m_size(std::move(size)),
+        m_static_size_fallback(static_size_fallback),
         m_members(std::move(members)),
-        m_variant_parts(std::move(variant_parts)), m_base_offset(base_offset) {}
+        m_variant_parts(std::move(variant_parts)) {}
 
-  uint64_t GetByteSize() const override { return m_byte_size; }
+  uint64_t GetByteSize() const override { return m_static_size_fallback; }
+  const OxCamlDynamicLayoutValue &GetDynamicSize() const { return m_size; }
   const std::vector<OxCamlMember> &GetMembers() const { return m_members; }
   const std::vector<OxCamlVariantPart> &GetVariantParts() const {
     return m_variant_parts;
   }
-  int64_t GetPointerAdjustmentOffset() const override { return m_base_offset; }
 
   bool IsOCamlVariant() const;
   bool IsTuple() const;

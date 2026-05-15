@@ -60,6 +60,7 @@
 #include "lldb/Utility/Reference.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/ValueObject/ValueObject.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
 #include <algorithm>
@@ -86,49 +87,43 @@ static uint64_t MakeLowBitMask(uint64_t bit_size) {
   return (1ULL << bit_size) - 1ULL;
 }
 
-
 static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
-                        lldb::ProcessSP process_sp,
-                        const ExecutionContextRef &exe_ctx_ref);
+                        const OxCamlFormatContext &context,
+                        std::optional<lldb::addr_t> object_address);
 static bool FormatUnboxedBase(Stream &stream,
                               OxCamlUnboxedBaseType *unboxed_type,
-                              DataExtractor &data, lldb::ProcessSP process_sp);
+                              DataExtractor &data);
 static bool FormatFallback(Stream &stream, OxCamlType *type,
-                           DataExtractor &data, lldb::ProcessSP process_sp);
+                           DataExtractor &data);
 static bool FormatEnum(Stream &stream, OxCamlEnumType *enum_type,
-                       DataExtractor &data, lldb::ProcessSP process_sp);
+                       DataExtractor &data);
 static bool FormatPointer(Stream &stream, OxCamlPointerType *ptr_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp,
-                          const ExecutionContextRef &exe_ctx_ref);
+                          DataExtractor &data,
+                          const OxCamlFormatContext &context);
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType *typedef_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp,
-                          const ExecutionContextRef &exe_ctx_ref);
+                          DataExtractor &data,
+                          const OxCamlFormatContext &context,
+                          std::optional<lldb::addr_t> object_address);
 static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
-                            DataExtractor &data, lldb::ProcessSP process_sp,
-                            const ExecutionContextRef &exe_ctx_ref);
+                            DataExtractor &data,
+                            const OxCamlFormatContext &context,
+                            std::optional<lldb::addr_t> object_address);
 static bool FormatPlaceholder(Stream &stream,
                               OxCamlPlaceholderType *placeholder_type,
-                              DataExtractor &data, lldb::ProcessSP process_sp);
+                              DataExtractor &data);
 static bool FormatUnknown(Stream &stream, OxCamlUnknownType *unknown_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp);
+                          DataExtractor &data);
 static bool FormatArray(Stream &stream, OxCamlArrayType *array_type,
-                        DataExtractor &data, lldb::ProcessSP process_sp,
-                        const ExecutionContextRef &exe_ctx_ref);
+                        DataExtractor &data, const OxCamlFormatContext &context,
+                        std::optional<lldb::addr_t> object_address);
+static bool TryFormatRuntimeFloatArray(Stream &stream, lldb::addr_t array_ptr,
+                                       lldb::ProcessSP process_sp);
 
-// Forward declarations for variant functions called from
-// FormatPointer/FormatStructure
-static uint64_t
-CalculateMinimumSizeForDiscriminators(OxCamlStructureType *struct_type);
-static uint64_t EstimatePointerAllocationSize(OxCamlType *type,
-                                              DataExtractor &data);
-static uint64_t ComputeActualPointerSize(OxCamlType *pointed_to,
-                                         lldb::addr_t adjusted_address,
-                                         const DataExtractor &data,
-                                         lldb::ProcessSP process_sp);
 static bool FormatVariantPart(Stream &stream,
                               const OxCamlVariantPart &variant_part,
-                              DataExtractor &data, lldb::ProcessSP process_sp,
-                              const ExecutionContextRef &exe_ctx_ref,
+                              DataExtractor &data,
+                              const OxCamlFormatContext &context,
+                              std::optional<lldb::addr_t> object_address,
                               bool is_ocaml_variant);
 
 // ============================================================================
@@ -173,9 +168,14 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
          "(ptr={0:P})",
          process_sp.get());
 
-  const ExecutionContextRef &exe_ctx_ref = valobj.GetExecutionContextRef();
+  OxCamlFormatContext context{process_sp, valobj.GetExecutionContextRef(),
+                              data.GetByteOrder(), data.GetAddressByteSize()};
 
-  return FormatValue(stream, type, data, process_sp, exe_ctx_ref);
+  // No object address at entry: [data] holds the OCaml value itself
+  // (typically a register-resident tagged pointer). FormatPointer sets the
+  // object address for any pointed-to objects it dereferences.
+  return FormatValue(stream, type, data, context,
+                     /*object_address=*/std::nullopt);
 }
 
 // ============================================================================
@@ -183,7 +183,7 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
 // ============================================================================
 
 static bool FormatFallback(Stream &stream, OxCamlType *type,
-                           DataExtractor &data, lldb::ProcessSP process_sp) {
+                           DataExtractor &data) {
   size_t byte_size = data.GetByteSize();
   if (byte_size == 0) {
     if (type) {
@@ -217,7 +217,7 @@ static bool FormatFallback(Stream &stream, OxCamlType *type,
 
 static bool FormatPlaceholder(Stream &stream,
                               OxCamlPlaceholderType *placeholder_type,
-                              DataExtractor &data, lldb::ProcessSP process_sp) {
+                              DataExtractor &data) {
   OXCAML_EMIT_MARKER(
       stream, "<placeholder>",
       "Cannot format unresolved placeholder type '{0}' (DIE 0x{1:x16})",
@@ -226,7 +226,7 @@ static bool FormatPlaceholder(Stream &stream,
 }
 
 static bool FormatUnknown(Stream &stream, OxCamlUnknownType *unknown_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp) {
+                          DataExtractor &data) {
   OXCAML_EMIT_MARKER(
       stream, "<unknown>",
       "Unsupported DWARF tag 0x{0:x} for type '{1}' (DIE 0x{2:x16})",
@@ -237,7 +237,7 @@ static bool FormatUnknown(Stream &stream, OxCamlUnknownType *unknown_type,
 
 static bool FormatUnboxedBase(Stream &stream,
                               OxCamlUnboxedBaseType *unboxed_type,
-                              DataExtractor &data, lldb::ProcessSP process_sp) {
+                              DataExtractor &data) {
   uint64_t byte_size = unboxed_type->GetByteSize();
   ENSURE(byte_size != 0, stream, "<0-byte base type>",
          "Unboxed base type '{0}' (DIE 0x{1:x}) reports zero byte size",
@@ -299,7 +299,7 @@ static bool FormatUnboxedBase(Stream &stream,
 }
 
 static bool FormatEnum(Stream &stream, OxCamlEnumType *enum_type,
-                       DataExtractor &data, lldb::ProcessSP process_sp) {
+                       DataExtractor &data) {
   uint64_t byte_size = enum_type->GetByteSize();
   OX_ASSERT(byte_size > 0 && byte_size <= helpers::constants::WORD_SIZE,
             "OCaml enum type '{0}' (DIE 0x{1:x}) has size {2} bytes, must be "
@@ -325,9 +325,80 @@ static bool FormatEnum(Stream &stream, OxCamlEnumType *enum_type,
   return true;
 }
 
+// Resolve the byte size of [type] at format time. For structures, evaluates
+// the dynamic DW_AT_byte_size/DW_AT_bit_size against [object_address] (which
+// must be the type's own object address). For arrays, compiler-emitted OxCaml
+// DWARF wraps the DW_TAG_array_type in a reference type and equips the array
+// with DW_AT_count and DW_AT_byte_stride. The count expression reads the OCaml
+// block header wosize; generic runtime array discovery belongs to the
+// ocaml_value formatter, not this typed-array path. For everything else,
+// returns the static byte size.
+static llvm::Expected<uint64_t>
+ResolveTypeByteSize(OxCamlType *type,
+                    std::optional<lldb::addr_t> object_address,
+                    const OxCamlFormatContext &context) {
+  OxCamlType *underlying = type;
+  while (underlying && underlying->GetKind() == OxCamlType::Typedef)
+    underlying =
+        static_cast<OxCamlTypedefType *>(underlying)->GetUnderlyingType();
+  if (!underlying)
+    return type->GetByteSize();
+
+  if (underlying->GetKind() == OxCamlType::Structure) {
+    auto *struct_type = static_cast<OxCamlStructureType *>(underlying);
+    auto result =
+        struct_type->GetDynamicSize().Evaluate(context, object_address);
+    if (!result)
+      return result.takeError();
+    OX_ASSERT(
+        result->GetKind() == OxCamlLayoutValueKind::ScalarBytes ||
+            result->GetKind() == OxCamlLayoutValueKind::ScalarBits,
+        "Dynamic size for structure type '{0}' (DIE 0x{1:x}) evaluated to "
+        "layout kind {2}; expected ScalarBytes or ScalarBits",
+        struct_type->GetDisplayName(), struct_type->GetDieId(),
+        static_cast<int>(result->GetKind()));
+    if (result->GetKind() == OxCamlLayoutValueKind::ScalarBits)
+      return (result->GetScalar() + 7) / 8;
+    return result->GetScalar();
+  }
+
+  if (underlying->GetKind() == OxCamlType::Array) {
+    auto *array_type = static_cast<OxCamlArrayType *>(underlying);
+    auto stride_result =
+        array_type->GetStride().Evaluate(context, object_address);
+    if (!stride_result)
+      return stride_result.takeError();
+    OX_ASSERT(stride_result->GetKind() == OxCamlLayoutValueKind::ScalarBytes,
+              "DW_AT_byte_stride for array '{0}' (DIE 0x{1:x}) evaluated to "
+              "layout kind {2}; expected ScalarBytes",
+              array_type->GetDisplayName(), array_type->GetDieId(),
+              static_cast<int>(stride_result->GetKind()));
+    uint64_t stride = stride_result->GetScalar();
+
+    const auto &count = array_type->GetCount();
+    if (!count.has_value())
+      return llvm::createStringError(
+          "Array type '%s' (DIE 0x%" PRIx64
+          ") has no DW_AT_count; compiler-emitted OxCaml arrays must include "
+          "a subrange count expression",
+          array_type->GetDisplayName().c_str(), array_type->GetDieId());
+    auto count_result = count->Evaluate(context, object_address);
+    if (!count_result)
+      return count_result.takeError();
+    OX_ASSERT(count_result->GetKind() == OxCamlLayoutValueKind::ScalarElements,
+              "DW_AT_count for array '{0}' (DIE 0x{1:x}) evaluated to layout "
+              "kind {2}; expected ScalarElements",
+              array_type->GetDisplayName(), array_type->GetDieId(),
+              static_cast<int>(count_result->GetKind()));
+    return count_result->GetScalar() * stride;
+  }
+
+  return type->GetByteSize();
+}
+
 static bool FormatPointer(Stream &stream, OxCamlPointerType *ptr_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp,
-                          const ExecutionContextRef &exe_ctx_ref) {
+                          DataExtractor &data,
+                          const OxCamlFormatContext &context) {
   uint64_t ptr_size = ptr_type->GetByteSize();
   ENSURE(ptr_size == helpers::constants::WORD_SIZE, stream, "<pointer>",
          "OCaml pointer type '{0}' (DIE 0x{1:x}) has size {2} bytes, "
@@ -354,62 +425,65 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType *ptr_type,
          "Pointer 0x{0:x} to '{1}' (DIE 0x{2:x}) lacks a resolved target type",
          ptr_value, ptr_type->GetDisplayName(), ptr_type->GetDieId());
 
-  // Special case: Arrays are variable-sized and need the raw pointer value
-  // Don't dereference - just pass the data (containing pointer) to FormatArray
-  if (pointed_to->GetKind() == OxCamlType::Array) {
-    return FormatArray(stream, static_cast<OxCamlArrayType *>(pointed_to), data,
-                       process_sp, exe_ctx_ref);
+  lldb::addr_t object_address = ptr_value;
+
+  llvm::Expected<uint64_t> actual_size_expected =
+      ResolveTypeByteSize(pointed_to, object_address, context);
+  if (!actual_size_expected) {
+    OXCAML_EMIT_MARKER(
+        stream, "<pointer>",
+        "Failed to evaluate dynamic byte size for pointer 0x{0:x} to "
+        "'{1}' (DIE 0x{2:x}): {3}",
+        ptr_value, pointed_to->GetDisplayName(), pointed_to->GetDieId(),
+        llvm::toString(actual_size_expected.takeError()));
+    return true;
   }
+  uint64_t actual_size = *actual_size_expected;
+  OxCamlType *underlying_pointed_to = pointed_to;
+  while (underlying_pointed_to &&
+         underlying_pointed_to->GetKind() == OxCamlType::Typedef)
+    underlying_pointed_to =
+        static_cast<OxCamlTypedefType *>(underlying_pointed_to)
+            ->GetUnderlyingType();
+  bool is_array_target = underlying_pointed_to &&
+                         underlying_pointed_to->GetKind() == OxCamlType::Array;
 
-  uint64_t size = pointed_to->GetByteSize();
-  ENSURE(size != 0, stream, "<pointer>",
-         "Resolved target type '{0}' (DIE 0x{1:x}) reports byte size 0; "
-         "cannot dereference pointer 0x{2:x}",
-         pointed_to->GetDisplayName(), pointed_to->GetDieId(), ptr_value);
-
-  // potentially offset the pointer for OCaml blocks
-  int64_t base_offset = pointed_to->GetPointerAdjustmentOffset();
-  uint64_t adjusted_address = ptr_value + base_offset;
-
-  uint64_t actual_size =
-      ComputeActualPointerSize(pointed_to, adjusted_address, data, process_sp);
-
-  if (base_offset != 0) {
-    Log *log = GetLog(OxCamlLog::Formatting);
-    LLDB_LOG(log,
-             "FormatPointer: Applying base offset {0} to pointer 0x{1:x}, "
-             "adjusted address: 0x{2:x}, reading {3} bytes",
-             base_offset, ptr_value, adjusted_address, actual_size);
-  }
-
+  // Empty OCaml arrays are real heap blocks with zero-byte payloads. Keep the
+  // zero-size guard for other pointer targets, but let arrays flow through to
+  // FormatArray with an empty DataExtractor and the object address.
   ENSURE(
-      actual_size != 0, stream, "<pointer>",
+      actual_size != 0 || is_array_target, stream, "<pointer>",
       "Resolved target type '{0}' (DIE 0x{1:x}) computed dereference size 0; "
       "cannot dereference pointer 0x{2:x}",
       pointed_to->GetDisplayName(), pointed_to->GetDieId(), ptr_value);
 
   std::vector<uint8_t> buffer(actual_size);
-  Status error;
-  size_t bytes_read = process_sp->ReadMemory(adjusted_address, buffer.data(),
-                                             actual_size, error);
+  DataExtractor pointed_data;
+  pointed_data.SetByteOrder(data.GetByteOrder());
+  pointed_data.SetAddressByteSize(data.GetAddressByteSize());
+  if (actual_size > 0) {
+    Status error;
+    size_t bytes_read = context.process_sp->ReadMemory(
+        object_address, buffer.data(), actual_size, error);
 
-  ENSURE(bytes_read == actual_size && error.Success(), stream, "<pointer>",
-         "Failed to read {0} bytes from address 0x{1:x} for pointer 0x{2:x} "
-         "to '{3}' (DIE 0x{4:x})",
-         actual_size, adjusted_address, ptr_value, pointed_to->GetDisplayName(),
-         pointed_to->GetDieId());
+    ENSURE(bytes_read == actual_size && error.Success(), stream, "<pointer>",
+           "Failed to read {0} bytes from address 0x{1:x} for pointer 0x{2:x} "
+           "to '{3}' (DIE 0x{4:x})",
+           actual_size, object_address, ptr_value, pointed_to->GetDisplayName(),
+           pointed_to->GetDieId());
 
-  DataExtractor pointed_data(buffer.data(), actual_size, data.GetByteOrder(),
-                             data.GetAddressByteSize());
+    pointed_data.SetData(buffer.data(), actual_size, data.GetByteOrder());
+  }
 
-  return FormatValue(stream, pointed_to, pointed_data, process_sp, exe_ctx_ref);
+  return FormatValue(stream, pointed_to, pointed_data, context, object_address);
 }
 
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType *typedef_type,
-                          DataExtractor &data, lldb::ProcessSP process_sp,
-                          const ExecutionContextRef &exe_ctx_ref) {
-  return FormatValue(stream, typedef_type->GetUnderlyingType(), data,
-                     process_sp, exe_ctx_ref);
+                          DataExtractor &data,
+                          const OxCamlFormatContext &context,
+                          std::optional<lldb::addr_t> object_address) {
+  return FormatValue(stream, typedef_type->GetUnderlyingType(), data, context,
+                     object_address);
 }
 
 // Format an OCaml exception value
@@ -550,8 +624,7 @@ ExtractExceptionInfo(lldb::addr_t exception_addr, lldb::ProcessSP process_sp) {
 
 // Format an OCaml exception value
 static bool FormatException(Stream &stream, DataExtractor &data,
-                            lldb::ProcessSP process_sp,
-                            const ExecutionContextRef &exe_ctx_ref) {
+                            const OxCamlFormatContext &context) {
   lldb::offset_t offset = 0;
   uint64_t exception_value = data.GetU64(&offset);
 
@@ -565,7 +638,7 @@ static bool FormatException(Stream &stream, DataExtractor &data,
          exception_value,
          (exception_value == 0) ? "null pointer" : "immediate OCaml value");
 
-  auto info_opt = ExtractExceptionInfo(exception_value, process_sp);
+  auto info_opt = ExtractExceptionInfo(exception_value, context.process_sp);
 
   ENSURE(info_opt.has_value(), stream, "<exception>",
          "Failed to extract OCaml exception payload at 0x{0:x}",
@@ -583,8 +656,9 @@ static bool FormatException(Stream &stream, DataExtractor &data,
       }
 
       DataExtractor arg_data(&info_opt->arguments[i], constants::WORD_SIZE,
-                             process_sp->GetByteOrder(), constants::WORD_SIZE);
-      oxcaml::FormatOxCamlValue(stream, arg_data, process_sp, exe_ctx_ref);
+                             context.byte_order, constants::WORD_SIZE);
+      oxcaml::FormatOxCamlValue(stream, arg_data, context.process_sp,
+                                context.exe_ctx_ref);
     }
 
     if (use_parens) {
@@ -595,161 +669,296 @@ static bool FormatException(Stream &stream, DataExtractor &data,
   return true;
 }
 
-static bool FormatArray(Stream &stream, OxCamlArrayType *array_type,
-                        DataExtractor &data, lldb::ProcessSP process_sp,
-                        const ExecutionContextRef &exe_ctx_ref) {
-  ENSURE(data.GetByteSize() >= helpers::constants::WORD_SIZE, stream, "<array>",
-         "Data size {0} < expected word size {1}", data.GetByteSize(),
-         helpers::constants::WORD_SIZE);
-
-  lldb::offset_t offset = 0;
-  uint64_t array_ptr = data.GetU64(&offset);
-
-  ENSURE(offset != 0, stream, "<array>",
-         "Failed to read OCaml array pointer from value data ({0} bytes "
-         "available)",
-         data.GetByteSize());
-
-  // Check for null or immediate values (not actual pointers)
-  ENSURE(array_ptr != 0 && !helpers::value::IsImmediate(array_ptr), stream,
-         llvm::formatv("<array@0x{0:x}>", array_ptr).str(),
-         "Array pointer 0x{0:x} is a {1}; skipping dereference", array_ptr,
-         array_ptr == 0 ? "null pointer" : "immediate OCaml value");
-
+// Polymorphic array values such as ['a array] may have an ocaml_value element
+// type in DWARF but actually carry unboxed doubles at runtime. The OCaml block
+// tag (Double_array_tag) is authoritative, so check it here before formatting
+// elements from DWARF. Returns true (with output emitted) if the runtime tag
+// proves this is a float array; returns false without emitting anything
+// otherwise.
+static bool TryFormatRuntimeFloatArray(Stream &stream, lldb::addr_t array_ptr,
+                                       lldb::ProcessSP process_sp) {
   auto header_opt = helpers::ReadBlockHeader(array_ptr, process_sp);
-  ENSURE(header_opt.has_value(), stream,
-         llvm::formatv("<array@0x{0:x}>", array_ptr).str(),
-         "Failed to read OCaml array header for pointer 0x{0:x}", array_ptr);
+  if (!header_opt.has_value())
+    return false;
 
-  uint64_t header = *header_opt;
   uint8_t tag;
   uint64_t wosize;
   uint8_t reserved;
-  helpers::header::ParseHeader(header, tag, wosize, reserved);
+  helpers::header::ParseHeader(*header_opt, tag, wosize, reserved);
+  if (tag != helpers::constants::DOUBLE_ARRAY_TAG)
+    return false;
 
-  // OCaml float arrays (tag 254) store unboxed 8-byte IEEE 754 doubles
-  // wosize is the number of doubles (1 word = 1 double on 64-bit platforms)
-  if (tag == constants::DOUBLE_ARRAY_TAG) {
-    return oxcaml::FormatOxCamlDoubleArray(stream, array_ptr, wosize,
-                                           process_sp);
+  return oxcaml::FormatOxCamlDoubleArray(stream, array_ptr, wosize, process_sp);
+}
+
+static bool FormatArray(Stream &stream, OxCamlArrayType *array_type,
+                        DataExtractor &data, const OxCamlFormatContext &context,
+                        std::optional<lldb::addr_t> object_address) {
+  if (object_address.has_value() &&
+      TryFormatRuntimeFloatArray(stream, *object_address, context.process_sp))
+    return true;
+
+  llvm::Expected<OxCamlLayoutResult> stride_result =
+      array_type->GetStride().Evaluate(context, object_address);
+  if (!stride_result) {
+    OXCAML_EMIT_MARKER(
+        stream, "<array>",
+        "Failed to evaluate byte_stride for array '{0}' (DIE 0x{1:x}): {2}",
+        array_type->GetDisplayName(), array_type->GetDieId(),
+        llvm::toString(stride_result.takeError()));
+    return true;
   }
+  uint64_t stride = stride_result->GetScalar();
+  ENSURE(stride != 0, stream, "<array>",
+         "Array type '{0}' (DIE 0x{1:x}) has stride 0; cannot format elements",
+         array_type->GetDisplayName(), array_type->GetDieId());
 
-  // Regular arrays: calculate number of elements from wosize and stride
-  // wosize is number of words, total bytes = wosize * WORD_SIZE
+  // OxCaml compiler-emitted array DIEs always carry DW_AT_count on their
+  // subrange. Values without typed-array DWARF are handled by generic
+  // ocaml_value formatting instead.
+  ENSURE(array_type->GetCount().has_value(), stream, "<array>",
+         "Array type '{0}' (DIE 0x{1:x}) has no DW_AT_count; "
+         "compiler-emitted OxCaml arrays must include a subrange count "
+         "expression",
+         array_type->GetDisplayName(), array_type->GetDieId());
+  llvm::Expected<OxCamlLayoutResult> count_result =
+      array_type->GetCount()->Evaluate(context, object_address);
+  if (!count_result) {
+    OXCAML_EMIT_MARKER(
+        stream, "<array>",
+        "Failed to evaluate DW_AT_count for array '{0}' (DIE 0x{1:x}): {2}",
+        array_type->GetDisplayName(), array_type->GetDieId(),
+        llvm::toString(count_result.takeError()));
+    return true;
+  }
+  uint64_t num_elements = count_result->GetScalar();
+
+  uint64_t payload_size = num_elements * stride;
+  ENSURE(data.GetByteSize() >= payload_size, stream, "<array>",
+         "Array '{0}' (DIE 0x{1:x}) payload buffer holds {2} bytes, needs "
+         "{3} ({4} elements x {5}-byte stride)",
+         array_type->GetDisplayName(), array_type->GetDieId(),
+         data.GetByteSize(), payload_size, num_elements, stride);
+
   OxCamlType *element_type = array_type->GetElementType();
-  uint64_t stride = array_type->GetStride();
-  ENSURE(stride != 0, stream, llvm::formatv("<array@0x{0:x}>", array_ptr).str(),
-         "Array type '{0}' (DIE 0x{1:x}) has stride 0; cannot format array at "
-         "0x{2:x}",
-         array_type->GetDisplayName(), array_type->GetDieId(), array_ptr);
-
-  uint64_t total_bytes = wosize * helpers::constants::WORD_SIZE;
-  uint64_t num_elements = total_bytes / stride;
-  Status error;
-
   stream.Printf("[| ");
-
   for (uint64_t i = 0; i < num_elements; i++) {
     if (i > 0)
       stream.Printf("; ");
 
-    uint64_t element_address = array_ptr + (i * stride);
-
-    std::vector<uint8_t> buffer(stride);
-    size_t bytes_read =
-        process_sp->ReadMemory(element_address, buffer.data(), stride, error);
-
-    if (bytes_read != stride || error.Fail()) {
-      OXCAML_EMIT_MARKER(stream, "<element>",
-                         "Failed to read array element {0} at 0x{1:x}; "
-                         "requested {2} bytes, read {3}",
-                         i, element_address, stride, bytes_read);
-      error.Clear();
-      continue;
-    }
-
-    DataExtractor element_data(buffer.data(), stride, data.GetByteOrder(),
-                               data.GetAddressByteSize());
-    FormatValue(stream, element_type, element_data, process_sp, exe_ctx_ref);
+    DataExtractor element_data(data, i * stride, stride);
+    std::optional<lldb::addr_t> element_address;
+    if (object_address.has_value())
+      element_address = *object_address + i * stride;
+    FormatValue(stream, element_type, element_data, context, element_address);
   }
-
   stream.Printf(" |]");
   return true;
 }
 
-static bool FormatMember(Stream &stream, const OxCamlMember &member,
-                         DataExtractor &data, lldb::ProcessSP process_sp,
-                         const ExecutionContextRef &exe_ctx_ref) {
-  if (member.IsBitField()) {
-    uint64_t bit_offset = member.bit_offset.value();
-    uint64_t bit_size = member.bit_size.value();
-    lldb::offset_t byte_offset = member.data_member_location;
+// A member's location resolved against the parent's object address and the
+// parent's in-buffer data: either an offset within [data] (for constant
+// object-relative locations) or a process load address (for exprloc results).
+// The member object address is the OCaml object address of the member itself,
+// suitable for evaluating expressions on the member's type.
+struct ResolvedMemberLocation {
+  enum class Source { BufferOffset, LoadAddress };
+  Source source;
+  uint64_t buffer_offset = 0;
+  lldb::addr_t load_address = LLDB_INVALID_ADDRESS;
+  std::optional<lldb::addr_t> member_object_address;
+};
 
-    // Check if bit-field spans multiple words (not currently supported)
-    // Multi-word bit-fields would require reading multiple 64-bit words and
-    // combining bits across word boundaries
+static std::optional<ResolvedMemberLocation>
+ResolveMemberLocation(Stream &stream, const OxCamlMember &member,
+                      DataExtractor &data, const OxCamlFormatContext &context,
+                      std::optional<lldb::addr_t> parent_object_address) {
+  (void)data;
+  llvm::Expected<OxCamlLayoutResult> result =
+      member.location.Evaluate(context, parent_object_address);
+  if (!result) {
+    OXCAML_EMIT_MARKER(
+        stream, "<member>", "Failed to evaluate location for member '{0}': {1}",
+        member.name.value_or("<unnamed>"), llvm::toString(result.takeError()));
+    return std::nullopt;
+  }
+
+  ResolvedMemberLocation resolved;
+  if (result->GetLocationStorage() ==
+      OxCamlLayoutResult::LocationStorage::ObjectRelativeByteOffset) {
+    resolved.source = ResolvedMemberLocation::Source::BufferOffset;
+    resolved.buffer_offset = result->GetObjectRelativeByteOffset();
+    if (parent_object_address.has_value())
+      resolved.member_object_address =
+          *parent_object_address + resolved.buffer_offset;
+  } else {
+    resolved.source = ResolvedMemberLocation::Source::LoadAddress;
+    resolved.load_address = result->GetLoadAddress();
+    resolved.member_object_address = resolved.load_address;
+  }
+  return resolved;
+}
+
+// Read [byte_size] bytes for a member or discriminator into [out_buffer]
+// according to a resolved location.
+static bool
+ReadResolvedMemberBytes(Stream &stream, const OxCamlMember &member,
+                        uint64_t byte_size,
+                        const ResolvedMemberLocation &resolved,
+                        DataExtractor &data, const OxCamlFormatContext &context,
+                        llvm::SmallVectorImpl<uint8_t> &out_buffer) {
+  out_buffer.resize(byte_size);
+  if (resolved.source == ResolvedMemberLocation::Source::BufferOffset) {
+    uint64_t offset = resolved.buffer_offset;
+    if (offset + byte_size > data.GetByteSize()) {
+      OXCAML_EMIT_MARKER(
+          stream, "<member>",
+          "Member '{0}' at object-relative offset {1} (+{2} bytes) extends "
+          "past available data ({3} bytes)",
+          member.name.value_or("<unnamed>"), offset, byte_size,
+          data.GetByteSize());
+      return false;
+    }
+    if (data.CopyData(offset, byte_size, out_buffer.data()) != byte_size) {
+      OXCAML_EMIT_MARKER(
+          stream, "<member>",
+          "Member '{0}': failed to copy {1} bytes from offset {2}",
+          member.name.value_or("<unnamed>"), byte_size, offset);
+      return false;
+    }
+    return true;
+  }
+
+  Status error;
+  size_t bytes_read = context.process_sp->ReadMemory(
+      resolved.load_address, out_buffer.data(), byte_size, error);
+  if (bytes_read != byte_size || error.Fail()) {
+    OXCAML_EMIT_MARKER(
+        stream, "<member>",
+        "Member '{0}': failed to read {1} bytes from 0x{2:x}: {3}",
+        member.name.value_or("<unnamed>"), byte_size, resolved.load_address,
+        error.AsCString());
+    return false;
+  }
+  return true;
+}
+
+static bool FormatMember(Stream &stream, const OxCamlMember &member,
+                         DataExtractor &data,
+                         const OxCamlFormatContext &context,
+                         std::optional<lldb::addr_t> object_address) {
+  auto resolved =
+      ResolveMemberLocation(stream, member, data, context, object_address);
+  if (!resolved.has_value())
+    return true;
+
+  if (member.IsBitField()) {
+    llvm::Expected<OxCamlLayoutResult> bit_offset_result =
+        member.bit_offset->Evaluate(context, object_address);
+    if (!bit_offset_result) {
+      OXCAML_EMIT_MARKER(stream, "<bit-field>",
+                         "Failed to evaluate bit offset for member '{0}': {1}",
+                         member.name.value_or("<unnamed>"),
+                         llvm::toString(bit_offset_result.takeError()));
+      return true;
+    }
+    llvm::Expected<OxCamlLayoutResult> bit_size_result =
+        member.bit_size->Evaluate(context, object_address);
+    if (!bit_size_result) {
+      OXCAML_EMIT_MARKER(stream, "<bit-field>",
+                         "Failed to evaluate bit size for member '{0}': {1}",
+                         member.name.value_or("<unnamed>"),
+                         llvm::toString(bit_size_result.takeError()));
+      return true;
+    }
+    uint64_t bit_offset = bit_offset_result->GetScalar();
+    uint64_t bit_size = bit_size_result->GetScalar();
+
     ENSURE(bit_offset + bit_size <= 64, stream, "<bit-field>",
            "Bit-field '{0}' spans multiple words (offset={1}, size={2}); "
            "multi-word bit-fields not yet supported",
            member.name.value_or("<unnamed>"), bit_offset, bit_size);
 
-    ENSURE(byte_offset + sizeof(uint64_t) <= data.GetByteSize(), stream,
-           "<member>",
-           "Not enough data ({0} bytes) to read bit-field '{1}' starting at "
-           "offset {2}",
-           data.GetByteSize(), member.name.value_or("<unnamed>"),
-           static_cast<unsigned>(byte_offset));
+    llvm::SmallVector<uint8_t, 8> word;
+    if (!ReadResolvedMemberBytes(stream, member, sizeof(uint64_t), *resolved,
+                                 data, context, word))
+      return true;
 
-    uint64_t full_value = data.GetU64(&byte_offset);
+    DataExtractor word_data(word.data(), word.size(), data.GetByteOrder(),
+                            data.GetAddressByteSize());
+    lldb::offset_t off = 0;
+    uint64_t full_value = word_data.GetU64(&off);
     uint64_t bit_mask = MakeLowBitMask(bit_size);
     uint64_t extracted = (full_value >> bit_offset) & bit_mask;
 
+    // The extracted bit-field value is a fresh scalar with no header; nested
+    // expressions cannot reference an object address through it.
     DataExtractor bit_data(&extracted, sizeof(extracted), data.GetByteOrder(),
                            data.GetAddressByteSize());
-
-    return FormatValue(stream, member.GetType(), bit_data, process_sp,
-                       exe_ctx_ref);
+    return FormatValue(stream, member.GetType(), bit_data, context,
+                       /*object_address=*/std::nullopt);
   }
 
-  DataExtractor member_data(data, member.data_member_location,
-                            member.GetType()->GetByteSize());
-  return FormatValue(stream, member.GetType(), member_data, process_sp,
-                     exe_ctx_ref);
+  // Resolve the member type's dynamic byte size using the member's own
+  // object address, so nested structures with exprloc-valued sizes read the
+  // right amount of memory.
+  llvm::Expected<uint64_t> member_byte_size_expected = ResolveTypeByteSize(
+      member.GetType(), resolved->member_object_address, context);
+  if (!member_byte_size_expected) {
+    OXCAML_EMIT_MARKER(
+        stream, "<member>",
+        "Failed to evaluate byte size for member '{0}' (type '{1}'): {2}",
+        member.name.value_or("<unnamed>"), member.GetType()->GetDisplayName(),
+        llvm::toString(member_byte_size_expected.takeError()));
+    return true;
+  }
+  uint64_t member_byte_size = *member_byte_size_expected;
+
+  llvm::SmallVector<uint8_t, 32> buffer;
+  if (!ReadResolvedMemberBytes(stream, member, member_byte_size, *resolved,
+                               data, context, buffer))
+    return true;
+
+  DataExtractor member_data(buffer.data(), member_byte_size,
+                            data.GetByteOrder(), data.GetAddressByteSize());
+  return FormatValue(stream, member.GetType(), member_data, context,
+                     resolved->member_object_address);
+}
+
+// Returns true if both members have constant data_member_location 0.
+static bool AreBothMembersAtConstantOffsetZero(const OxCamlMember &a,
+                                               const OxCamlMember &b) {
+  return a.location.IsConstant() && a.location.GetConstant() == 0 &&
+         b.location.IsConstant() && b.location.GetConstant() == 0;
 }
 
 static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
-                            DataExtractor &data, lldb::ProcessSP process_sp,
-                            const ExecutionContextRef &exe_ctx_ref) {
+                            DataExtractor &data,
+                            const OxCamlFormatContext &context,
+                            std::optional<lldb::addr_t> object_address) {
   const auto &members = struct_type->GetMembers();
   const auto &variant_parts = struct_type->GetVariantParts();
 
-  // Special case for OCaml variants: Structures with no direct members and
-  // exactly one variant part are formatted without braces (just the variant
-  // content directly). This represents the typical OCaml variant structure
-  // encoding.
+  // OCaml variant: a structure with no direct members and exactly one
+  // variant part is rendered as the variant content alone (no braces).
   if (members.empty() && variant_parts.size() == 1) {
-    return FormatVariantPart(stream, variant_parts[0], data, process_sp,
-                             exe_ctx_ref, true);
+    return FormatVariantPart(stream, variant_parts[0], data, context,
+                             object_address, true);
   }
 
-  // Special case for OCaml exceptions: Union-style structure with "exn" and
-  // "raw" members. Exceptions have both members at the same offset. We format
-  // only the "raw" member. This hardcodes the current format of the OxCaml
-  // compiler.
+  // OCaml exception: a union-style struct with "exn" and "raw" members both
+  // at offset 0. Format only via FormatException.
   if (members.size() == 2 && variant_parts.empty() &&
       members[0].name.has_value() && members[1].name.has_value() &&
-      members[0].data_member_location == 0 &&
-      members[1].data_member_location == 0) {
+      AreBothMembersAtConstantOffsetZero(members[0], members[1])) {
     const std::string &name0 = members[0].name.value();
     const std::string &name1 = members[1].name.value();
     if ((name0 == "exn" && name1 == "raw") ||
         (name0 == "raw" && name1 == "exn")) {
-      return FormatException(stream, data, process_sp, exe_ctx_ref);
+      return FormatException(stream, data, context);
     }
   }
 
-  // Regular case: structure with members and/or multiple variant parts
-  // Determine formatting based on type
   bool is_tuple = struct_type->IsTuple();
   const char *open_delim = is_tuple ? "(" : "{ ";
   const char *close_delim = is_tuple ? ")" : " }";
@@ -759,7 +968,6 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
 
   bool has_content = false;
 
-  // Format regular members first
   for (size_t i = 0; i < members.size(); ++i) {
     if (has_content)
       stream.Printf("%s", separator);
@@ -768,16 +976,15 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
       stream.Printf("%s = ", members[i].name.value().c_str());
     }
 
-    FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
+    FormatMember(stream, members[i], data, context, object_address);
     has_content = true;
   }
 
-  // Format variant parts
   for (size_t i = 0; i < variant_parts.size(); ++i) {
     if (has_content)
       stream.Printf("%s", separator);
 
-    FormatVariantPart(stream, variant_parts[i], data, process_sp, exe_ctx_ref,
+    FormatVariantPart(stream, variant_parts[i], data, context, object_address,
                       false);
     has_content = true;
   }
@@ -788,118 +995,100 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
 }
 
 static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
-                        lldb::ProcessSP process_sp,
-                        const ExecutionContextRef &exe_ctx_ref) {
+                        const OxCamlFormatContext &context,
+                        std::optional<lldb::addr_t> object_address) {
   if (!type) {
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(
         log,
         "FormatValue: No type information available, using fallback formatter");
-    return FormatFallback(stream, type, data, process_sp);
+    return FormatFallback(stream, type, data);
   }
 
   switch (type->GetKind()) {
   case OxCamlType::Value:
-    return oxcaml::FormatOxCamlValue(stream, data, process_sp, exe_ctx_ref);
+    return oxcaml::FormatOxCamlValue(stream, data, context.process_sp,
+                                     context.exe_ctx_ref);
   case OxCamlType::UnboxedBase:
     return FormatUnboxedBase(stream, static_cast<OxCamlUnboxedBaseType *>(type),
-                             data, process_sp);
+                             data);
   case OxCamlType::Enum:
-    return FormatEnum(stream, static_cast<OxCamlEnumType *>(type), data,
-                      process_sp);
+    return FormatEnum(stream, static_cast<OxCamlEnumType *>(type), data);
   case OxCamlType::Pointer:
     return FormatPointer(stream, static_cast<OxCamlPointerType *>(type), data,
-                         process_sp, exe_ctx_ref);
+                         context);
   case OxCamlType::Typedef:
     return FormatTypedef(stream, static_cast<OxCamlTypedefType *>(type), data,
-                         process_sp, exe_ctx_ref);
+                         context, object_address);
   case OxCamlType::Structure:
     return FormatStructure(stream, static_cast<OxCamlStructureType *>(type),
-                           data, process_sp, exe_ctx_ref);
+                           data, context, object_address);
   case OxCamlType::Array:
     return FormatArray(stream, static_cast<OxCamlArrayType *>(type), data,
-                       process_sp, exe_ctx_ref);
+                       context, object_address);
   case OxCamlType::Placeholder:
     return FormatPlaceholder(stream, static_cast<OxCamlPlaceholderType *>(type),
-                             data, process_sp);
+                             data);
   case OxCamlType::Unknown:
-    return FormatUnknown(stream, static_cast<OxCamlUnknownType *>(type), data,
-                         process_sp);
+    return FormatUnknown(stream, static_cast<OxCamlUnknownType *>(type), data);
   }
   return false;
 }
 
-// ============================================================================
-// Variant Formatting
-// ============================================================================
-//
-// ## Problem Overview
-//
-// OCaml variants present a formatting challenge: the actual memory size of a
-// variant value depends on which constructor is active at runtime. In the
-// current implementation of the OxCaml compiler and the LLDB plugin, the DWARF
-// information only provides static size information (the base structure size),
-// but each variant constructor may have a different payload size.
-//
-// ## Current Approach: Approximate Two-Pass Strategy
-//
-// Since the DWARF doesn't encode dynamic size calculations (which would require
-// DWARF expressions), we use an estimation approach:
-//
-// 1. **First Pass - Read Discriminators**:
-//    - Calculate the minimum memory needed to read all discriminators
-//    - Read enough memory to analyze which variant constructors are active
-//
-// 2. **Second Pass - Estimate Total Size**:
-//    - Based on active variants, calculate the maximum offset required
-//    - This includes: base structure members + active variant member payloads
-//    - Read the estimated total memory needed
-//
-// ## Key Functions:
-//
-// - `ReadDiscriminatorValue()` - Extracts discriminator value from data
-// - `CalculateMinimumSizeForDiscriminators()` - Computes memory needed for
-//   discriminator analysis
-// - `FindActiveVariantsInStructure()` - Determines which variants are active
-//   based on discriminator values
-// - `EstimatePointerAllocationSize()` - Estimates total allocation size by
-//   examining all active variant payloads
-// - `FormatVariantPart()` - Main dispatcher for variant formatting
-// - `FormatVariantPartOxCaml()` - OCaml-style variant formatting
-// - `FormatVariantPartGeneric()` - Generic variant formatting
-//
-// ## Limitations
-//
-// This approach provides an estimate rather than exact sizes:
-// - We calculate the maximum offset across all members in the active variant
-// - Member type sizes may themselves be estimates (e.g., nested structures)
-// - The actual memory layout might be more compact than our calculation
-// suggests
-//
-// A more precise solution would require the OCaml compiler to emit DWARF
-// expressions that dynamically calculate exact sizes based on runtime values.
-//
-// ============================================================================
-
 static std::optional<uint64_t>
-ReadDiscriminatorValue(const OxCamlVariantPart &variant_part,
-                       DataExtractor &data) {
+ReadDiscriminatorValue(Stream &stream, const OxCamlVariantPart &variant_part,
+                       DataExtractor &data, const OxCamlFormatContext &context,
+                       std::optional<lldb::addr_t> object_address) {
   const auto &discriminator = variant_part.GetDiscriminator();
-  lldb::offset_t discr_offset = discriminator.data_member_location;
-
   uint64_t discriminator_byte_size = discriminator.GetType()->GetByteSize();
-
-  std::optional<llvm::APInt> apint =
-      helpers::ExtractAPInt(data, &discr_offset, discriminator_byte_size);
-  if (!apint.has_value() || apint->getBitWidth() > 64) {
+  // The discriminator value is later returned as a uint64_t, so wider
+  // discriminators cannot fit and we refuse to read them here.
+  if (discriminator_byte_size == 0 ||
+      discriminator_byte_size > sizeof(uint64_t))
     return std::nullopt;
-  }
+
+  auto resolved = ResolveMemberLocation(stream, discriminator, data, context,
+                                        object_address);
+  if (!resolved.has_value())
+    return std::nullopt;
+
+  llvm::SmallVector<uint8_t, 8> buffer;
+  if (!ReadResolvedMemberBytes(stream, discriminator, discriminator_byte_size,
+                               *resolved, data, context, buffer))
+    return std::nullopt;
+
+  DataExtractor discr_data(buffer.data(), buffer.size(), data.GetByteOrder(),
+                           data.GetAddressByteSize());
+  lldb::offset_t cursor = 0;
+  std::optional<llvm::APInt> apint =
+      helpers::ExtractAPInt(discr_data, &cursor, discriminator_byte_size);
+  if (!apint.has_value() || apint->getBitWidth() > 64)
+    return std::nullopt;
 
   uint64_t value = apint->getZExtValue();
 
   if (discriminator.IsBitField()) {
-    uint64_t bit_offset = discriminator.bit_offset.value();
-    uint64_t bit_size = discriminator.bit_size.value();
+    Log *log = GetLog(OxCamlLog::Formatting);
+    auto bit_offset_result =
+        discriminator.bit_offset->Evaluate(context, object_address);
+    if (!bit_offset_result) {
+      LLDB_LOG_ERROR(log, bit_offset_result.takeError(),
+                     "ReadDiscriminatorValue: bit_offset evaluation failed for "
+                     "discriminator '{1}': {0}",
+                     discriminator.name);
+      return std::nullopt;
+    }
+    auto bit_size_result =
+        discriminator.bit_size->Evaluate(context, object_address);
+    if (!bit_size_result) {
+      LLDB_LOG_ERROR(log, bit_size_result.takeError(),
+                     "ReadDiscriminatorValue: bit_size evaluation failed for "
+                     "discriminator '{1}': {0}",
+                     discriminator.name);
+      return std::nullopt;
+    }
+    uint64_t bit_offset = bit_offset_result->GetScalar();
+    uint64_t bit_size = bit_size_result->GetScalar();
     if (bit_offset + bit_size > 64)
       return std::nullopt;
     uint64_t discr_mask = MakeLowBitMask(bit_size);
@@ -907,127 +1096,6 @@ ReadDiscriminatorValue(const OxCamlVariantPart &variant_part,
   }
 
   return value;
-}
-
-static uint64_t
-CalculateMinimumSizeForDiscriminators(OxCamlStructureType *struct_type) {
-  uint64_t max_discriminator_end = 0;
-
-  const auto &variant_parts = struct_type->GetVariantParts();
-  for (const auto &variant_part : variant_parts) {
-    const auto &discr = variant_part.GetDiscriminator();
-    uint64_t discr_end =
-        discr.data_member_location + discr.GetType()->GetByteSize();
-    max_discriminator_end = std::max(max_discriminator_end, discr_end);
-  }
-
-  return max_discriminator_end;
-}
-
-static std::vector<const OxCamlVariantPart::Variant *>
-FindActiveVariantsInStructure(OxCamlStructureType *struct_type,
-                              DataExtractor &data) {
-  std::vector<const OxCamlVariantPart::Variant *> active_variants;
-  Log *log = GetLog(OxCamlLog::UserVisibleErrors);
-
-  const auto &variant_parts = struct_type->GetVariantParts();
-  for (const auto &variant_part : variant_parts) {
-    auto discr_value_opt = ReadDiscriminatorValue(variant_part, data);
-    if (!discr_value_opt.has_value()) {
-      LLDB_LOG(log,
-               "Failed to read discriminator value for variant part with "
-               "discriminator '{0}'",
-               variant_part.GetDiscriminator().name);
-      continue; // Skip variant part if discriminator cannot be read
-    }
-
-    auto active_variant = variant_part.GetActiveVariant(*discr_value_opt);
-    if (active_variant.has_value()) {
-      active_variants.push_back(*active_variant);
-    }
-  }
-
-  return active_variants;
-}
-
-static uint64_t EstimatePointerAllocationSize(OxCamlType *type,
-                                              DataExtractor &data) {
-  OX_ASSERT(type != nullptr,
-            "EstimatePointerAllocationSize called with null type (ptr={0:P})",
-            type);
-
-  while (type->GetKind() == OxCamlType::Typedef) {
-    type = static_cast<OxCamlTypedefType *>(type)->GetUnderlyingType();
-  }
-
-  // We assume all types except for structures return accurate sizes. Only
-  // structures can have variant parts.
-  if (type->GetKind() != OxCamlType::Structure) {
-    return type->GetByteSize();
-  }
-
-  auto *struct_type = static_cast<OxCamlStructureType *>(type);
-  uint64_t max_end_offset = type->GetByteSize();
-
-  const auto &members = struct_type->GetMembers();
-  for (const auto &member : members) {
-    // If the size that is returned here is not exact (e.g., as in the case of
-    // structures, then our estimate here is off). That's why it is not exact.
-    uint64_t member_end =
-        member.data_member_location + member.GetType()->GetByteSize();
-    max_end_offset = std::max(max_end_offset, member_end);
-  }
-
-  auto active_variants = FindActiveVariantsInStructure(struct_type, data);
-  for (const auto *variant : active_variants) {
-    for (const auto &member : variant->members) {
-      uint64_t member_end =
-          member.data_member_location + member.GetType()->GetByteSize();
-      max_end_offset = std::max(max_end_offset, member_end);
-    }
-  }
-
-  return max_end_offset;
-}
-
-static uint64_t ComputeActualPointerSize(OxCamlType *pointed_to,
-                                         lldb::addr_t adjusted_address,
-                                         const DataExtractor &data,
-                                         lldb::ProcessSP process_sp) {
-  uint64_t type_size = pointed_to->GetByteSize();
-
-  if (pointed_to->GetKind() != OxCamlType::Structure) {
-    return type_size;
-  }
-
-  auto *struct_type = static_cast<OxCamlStructureType *>(pointed_to);
-  const auto &variant_parts = struct_type->GetVariantParts();
-
-  if (variant_parts.empty()) {
-    return type_size;
-  }
-
-  uint64_t min_discriminator_size =
-      CalculateMinimumSizeForDiscriminators(struct_type);
-  uint64_t temp_read_size = std::max(min_discriminator_size, type_size);
-
-  // Two-pass approach for structures with variant parts:
-  // 1. Read enough data to analyze all discriminators
-  // 2. Calculate precise size based on active variants
-  Status error;
-  std::vector<uint8_t> temp_buffer(temp_read_size);
-  size_t bytes_read = process_sp->ReadMemory(
-      adjusted_address, temp_buffer.data(), temp_buffer.size(), error);
-
-  if (bytes_read >= min_discriminator_size) {
-    DataExtractor heap_data(temp_buffer.data(), bytes_read, data.GetByteOrder(),
-                            data.GetAddressByteSize());
-    uint64_t estimated_size =
-        EstimatePointerAllocationSize(pointed_to, heap_data);
-    return estimated_size;
-  }
-
-  return type_size;
 }
 
 enum VariantKind {
@@ -1038,10 +1106,13 @@ enum VariantKind {
 
 // Format variant part with generic square bracket format:
 // Name[mem1 = val1; ...; memN = valN]
-static bool FormatVariantPartGeneric(
-    Stream &stream, const OxCamlVariantPart &variant_part, DataExtractor &data,
-    lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref,
-    uint64_t discr_value, const std::vector<OxCamlMember> &members) {
+static bool FormatVariantPartGeneric(Stream &stream,
+                                     const OxCamlVariantPart &variant_part,
+                                     DataExtractor &data,
+                                     const OxCamlFormatContext &context,
+                                     std::optional<lldb::addr_t> object_address,
+                                     uint64_t discr_value,
+                                     const std::vector<OxCamlMember> &members) {
   std::string discr_name = "Unknown";
   const auto &discriminator = variant_part.GetDiscriminator();
   if (discriminator.GetType()->GetKind() == OxCamlType::Enum) {
@@ -1062,7 +1133,7 @@ static bool FormatVariantPartGeneric(
         stream.Printf("; ");
       if (members[i].name.has_value())
         stream.Printf("%s = ", members[i].name.value().c_str());
-      FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
+      FormatMember(stream, members[i], data, context, object_address);
     }
     stream.Printf("]");
   }
@@ -1070,10 +1141,13 @@ static bool FormatVariantPartGeneric(
   return true;
 }
 
-static bool FormatVariantPartOxCaml(
-    Stream &stream, const OxCamlVariantPart &variant_part, DataExtractor &data,
-    lldb::ProcessSP process_sp, const ExecutionContextRef &exe_ctx_ref,
-    uint64_t discr_value, const std::vector<OxCamlMember> &members) {
+static bool FormatVariantPartOxCaml(Stream &stream,
+                                    const OxCamlVariantPart &variant_part,
+                                    DataExtractor &data,
+                                    const OxCamlFormatContext &context,
+                                    std::optional<lldb::addr_t> object_address,
+                                    uint64_t discr_value,
+                                    const std::vector<OxCamlMember> &members) {
 
   const auto &discriminator = variant_part.GetDiscriminator();
   ENSURE(discriminator.GetType()->GetKind() == OxCamlType::Enum, stream,
@@ -1150,7 +1224,7 @@ static bool FormatVariantPartOxCaml(
       }
     }
 
-    FormatMember(stream, members[i], data, process_sp, exe_ctx_ref);
+    FormatMember(stream, members[i], data, context, object_address);
   }
 
   stream.Printf("%s", close_delim);
@@ -1158,18 +1232,17 @@ static bool FormatVariantPartOxCaml(
   return true;
 }
 
-// Main variant formatting dispatcher
-//
-// Special handling for artificial discriminators:
-// - Artificial discriminators (e.g., Pointer/Immediate) with exactly one member
-//   in the active variant are displayed transparently (member content only)
-// - All other cases dispatch to either OCaml or generic formatting
+// An artificial discriminator (e.g. Pointer/Immediate) with exactly one
+// member in the active variant is displayed transparently (member content
+// only, no discriminator name or brackets).
 static bool FormatVariantPart(Stream &stream,
                               const OxCamlVariantPart &variant_part,
-                              DataExtractor &data, lldb::ProcessSP process_sp,
-                              const ExecutionContextRef &exe_ctx_ref,
-                              bool is_ocaml_variant = false) {
-  auto discr_value_opt = ReadDiscriminatorValue(variant_part, data);
+                              DataExtractor &data,
+                              const OxCamlFormatContext &context,
+                              std::optional<lldb::addr_t> object_address,
+                              bool is_ocaml_variant) {
+  auto discr_value_opt = ReadDiscriminatorValue(stream, variant_part, data,
+                                                context, object_address);
   ENSURE(discr_value_opt.has_value(), stream, "<variant>",
          "Discriminator value unreadable (variant={0})",
          variant_part.GetDiscriminator().name);
@@ -1183,18 +1256,16 @@ static bool FormatVariantPart(Stream &stream,
 
   const auto &members = (*active_variant)->members;
 
-  // Special case: artificial discriminator with exactly one member
-  // Display the member content directly without discriminator name/brackets
   if (variant_part.HasArtificialDiscriminator() && members.size() == 1) {
-    FormatMember(stream, members[0], data, process_sp, exe_ctx_ref);
+    FormatMember(stream, members[0], data, context, object_address);
     return true;
   }
 
   if (is_ocaml_variant) {
-    return FormatVariantPartOxCaml(stream, variant_part, data, process_sp,
-                                   exe_ctx_ref, discr_value, members);
+    return FormatVariantPartOxCaml(stream, variant_part, data, context,
+                                   object_address, discr_value, members);
   } else {
-    return FormatVariantPartGeneric(stream, variant_part, data, process_sp,
-                                    exe_ctx_ref, discr_value, members);
+    return FormatVariantPartGeneric(stream, variant_part, data, context,
+                                    object_address, discr_value, members);
   }
 }
