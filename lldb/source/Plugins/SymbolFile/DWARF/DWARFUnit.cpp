@@ -727,6 +727,62 @@ DWARFUnit::GetDIEBitSizeAndSign(uint64_t relative_die_offset) const {
   return std::pair{bit_size, sign};
 }
 
+llvm::Expected<std::pair<DataExtractor, const DWARFExpression::Delegate *>>
+DWARFUnit::GetDIELocationExpression(uint64_t die_offset,
+                                    bool unit_relative) const {
+  // FIXME: the constness has annoying ripple effects.
+  DWARFUnit *self = const_cast<DWARFUnit *>(this);
+  DWARFDIE die;
+  if (unit_relative) {
+    // DW_OP_call2/DW_OP_call4: the offset is relative to the start of this
+    // unit.
+    die = self->GetDIE(GetOffset() + die_offset);
+  } else {
+    // DW_OP_call_ref: the offset is relative to the start of the .debug_info
+    // section and may reference a DIE in another unit.
+    die = self->GetSymbolFileDWARF().DebugInfo().GetDIE(
+        DIERef::Section::DebugInfo, die_offset);
+  }
+  if (!die)
+    return llvm::createStringError(
+        "cannot resolve DW_OP_call target DIE at offset 0x%" PRIx64,
+        die_offset);
+
+  DWARFFormValue form_value;
+  if (!die.GetDIE()->GetAttributeValue(die.GetCU(), DW_AT_location, form_value,
+                                       /*end_attr_offset_ptr=*/nullptr,
+                                       /*check_elaborating_dies=*/true))
+    // The DIE has no DW_AT_location attribute. Return an empty expression;
+    // per the DWARF specification the call operation then has no effect.
+    return std::pair{DataExtractor(),
+                     static_cast<const DWARFExpression::Delegate *>(this)};
+
+  if (!DWARFFormValue::IsBlockForm(form_value.Form()))
+    return llvm::createStringError(
+        "DW_OP_call target DIE at offset 0x%" PRIx64
+        " has a DW_AT_location that is not an expression block "
+        "(location lists are not supported)",
+        die_offset);
+
+  const uint8_t *block_data = form_value.BlockData();
+  uint64_t block_length = form_value.Unsigned();
+  if (!block_data || block_length == 0)
+    return std::pair{DataExtractor(),
+                     static_cast<const DWARFExpression::Delegate *>(this)};
+
+  // The attribute may have been found on an elaborating DIE
+  // (DW_AT_specification, DW_AT_abstract_origin or DW_AT_signature), so read
+  // the expression block from, and evaluate it against, the unit that
+  // actually contains it.
+  const DWARFUnit *expr_unit = form_value.GetUnit();
+  const DWARFDataExtractor &data = expr_unit->GetData();
+  uint64_t block_offset = block_data - data.GetDataStart();
+  DataExtractor expr_data(data, block_offset, block_length);
+  expr_data.SetAddressByteSize(expr_unit->GetAddressByteSize());
+  return std::pair{expr_data,
+                   static_cast<const DWARFExpression::Delegate *>(expr_unit)};
+}
+
 lldb::offset_t
 DWARFUnit::GetVendorDWARFOpcodeSize(const DataExtractor &data,
                                     const lldb::offset_t data_offset,

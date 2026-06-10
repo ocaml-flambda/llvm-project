@@ -160,8 +160,16 @@ GetOpcodeDataSize(const DataExtractor &data, const lldb::offset_t data_offset,
     break;
 
   case DW_OP_addr:
-  case DW_OP_call_ref: // 0x9a 1 address sized offset of DIE (DWARF3)
     return data.GetAddressByteSize();
+
+  // DW_OP_call_ref takes a single operand: the offset of a DIE in the
+  // .debug_info section. Its size is that of an offset in the DWARF format
+  // of the compile unit: 4 bytes for the 32-bit DWARF format, 8 bytes for
+  // the 64-bit DWARF format. Fall back to the address size if the compile
+  // unit is not available.
+  case DW_OP_call_ref: // 0x9a DWARF offset sized offset of DIE (DWARF3)
+    return dwarf_cu ? dwarf_cu->GetDWARFOffsetByteSize()
+                    : data.GetAddressByteSize();
 
   // Opcodes with no arguments
   case DW_OP_deref:                // 0x06
@@ -940,19 +948,27 @@ static Scalar DerefSizeExtractDataHelper(uint8_t *addr_bytes,
     return addr_data.GetAddress(&addr_data_offset);
 }
 
-llvm::Expected<Value> DWARFExpression::Evaluate(
+/// The maximum number of nested DW_OP_call2, DW_OP_call4 and DW_OP_call_ref
+/// operations that may be active at once. This guards against cyclic DIE
+/// references in (malformed) DWARF, which would otherwise recurse forever.
+static constexpr uint32_t g_max_dwarf_call_depth = 64;
+
+/// Evaluate the DWARF expression in \a opcodes against \a stack.
+///
+/// This implements the opcode interpreter loop of DWARFExpression::Evaluate,
+/// which provides and initializes the evaluation state and derives the
+/// result. It is split out so that DW_OP_call2, DW_OP_call4 and
+/// DW_OP_call_ref can evaluate the DW_AT_location expression of the
+/// referenced DIE against the caller's state, as if the called expression's
+/// opcodes appeared in place of the call operation.
+static llvm::Error EvaluateOpcodes(
     ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
     lldb::ModuleSP module_sp, const DataExtractor &opcodes,
     const DWARFExpression::Delegate *dwarf_cu,
-    const lldb::RegisterKind reg_kind, const Value *initial_value_ptr,
-    const Value *object_address_ptr) {
-
-  if (opcodes.GetByteSize() == 0)
-    return llvm::createStringError(
-        "no location, value may have been optimized out");
-
-  Stack stack;
-
+    const lldb::RegisterKind reg_kind, const Value *object_address_ptr,
+    DWARFExpression::Stack &stack,
+    LocationDescriptionKind &dwarf4_location_description_kind, Value &pieces,
+    uint64_t &op_piece_offset, const uint32_t call_depth) {
   Process *process = nullptr;
   StackFrame *frame = nullptr;
   Target *target = nullptr;
@@ -965,16 +981,9 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
   if (reg_ctx == nullptr && frame)
     reg_ctx = frame->GetRegisterContext().get();
 
-  if (initial_value_ptr)
-    stack.push_back(*initial_value_ptr);
-
   lldb::offset_t offset = 0;
   Value tmp;
   uint32_t reg_num;
-
-  /// Insertion point for evaluating multi-piece expression.
-  uint64_t op_piece_offset = 0;
-  Value pieces; // Used for DW_OP_piece
 
   Log *log = GetLog(LLDBLog::Expressions);
   // A generic type is "an integral type that has the size of an address and an
@@ -989,11 +998,6 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
                                            is_signed, /*implicitTrunc=*/true),
                                !is_signed));
   };
-
-  // The default kind is a memory location. This is updated by any
-  // operation that changes this, such as DW_OP_stack_value, and reset
-  // by composition operations like DW_OP_piece.
-  LocationDescriptionKind dwarf4_location_description_kind = Memory;
 
   while (opcodes.ValidOffset(offset)) {
     const lldb::offset_t op_offset = offset;
@@ -2099,16 +2103,21 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
       }
       break;
 
-    // OPCODE: DW_OP_call2
-    // OPERANDS:
-    //      uint16_t compile unit relative offset of a DIE
-    // DESCRIPTION: Performs subroutine calls during evaluation
-    // of a DWARF expression. The operand is the 2-byte unsigned offset of a
-    // debugging information entry in the current compilation unit.
+    // OPCODE: DW_OP_call2, DW_OP_call4, DW_OP_call_ref
+    // OPERANDS: 1
+    //      DW_OP_call2: uint16_t compile unit relative offset of a DIE
+    //      DW_OP_call4: uint32_t compile unit relative offset of a DIE
+    //      DW_OP_call_ref: offset of a DIE in the .debug_info section; the
+    //          operand is 4 bytes in the 32-bit DWARF format and 8 bytes in
+    //          the 64-bit DWARF format
+    // DESCRIPTION: Performs a DWARF procedure call during evaluation of a
+    // DWARF expression.
     //
-    // Operand interpretation is exactly like that for DW_FORM_ref2.
+    // Operand interpretation of DW_OP_call2, DW_OP_call4 and DW_OP_call_ref
+    // is exactly like that for DW_FORM_ref2, DW_FORM_ref4 and
+    // DW_FORM_ref_addr, respectively.
     //
-    // This operation transfers control of DWARF expression evaluation to the
+    // These operations transfer control of DWARF expression evaluation to the
     // DW_AT_location attribute of the referenced DIE. If there is no such
     // attribute, then there is no effect. Execution of the DWARF expression of
     // a DW_AT_location attribute may add to and/or remove from values on the
@@ -2118,28 +2127,56 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     // the stack by the called expression may be used as return values by prior
     // agreement between the calling and called expressions.
     case DW_OP_call2:
-      return llvm::createStringError("unimplemented opcode DW_OP_call2");
-    // OPCODE: DW_OP_call4
-    // OPERANDS: 1
-    //      uint32_t compile unit relative offset of a DIE
-    // DESCRIPTION: Performs a subroutine call during evaluation of a DWARF
-    // expression. For DW_OP_call4, the operand is a 4-byte unsigned offset of
-    // a debugging information entry in  the current compilation unit.
-    //
-    // Operand interpretation DW_OP_call4 is exactly like that for
-    // DW_FORM_ref4.
-    //
-    // This operation transfers control of DWARF expression evaluation to the
-    // DW_AT_location attribute of the referenced DIE. If there is no such
-    // attribute, then there is no effect. Execution of the DWARF expression of
-    // a DW_AT_location attribute may add to and/or remove from values on the
-    // stack. Execution returns to the point following the call when the end of
-    // the attribute is reached. Values on the stack at the time of the call
-    // may be used as parameters by the called expression and values left on
-    // the stack by the called expression may be used as return values by prior
-    // agreement between the calling and called expressions.
     case DW_OP_call4:
-      return llvm::createStringError("unimplemented opcode DW_OP_call4");
+    case DW_OP_call_ref: {
+      if (!dwarf_cu)
+        return llvm::createStringError(
+            "%s found without a compile unit being specified",
+            DW_OP_value_to_name(op));
+
+      uint64_t die_offset;
+      bool unit_relative = true;
+      if (op == DW_OP_call2)
+        die_offset = opcodes.GetU16(&offset);
+      else if (op == DW_OP_call4)
+        die_offset = opcodes.GetU32(&offset);
+      else {
+        // The DW_OP_call_ref operand is an offset in the .debug_info
+        // section, whose size depends on the DWARF format of the compile
+        // unit.
+        die_offset =
+            opcodes.GetMaxU64(&offset, dwarf_cu->GetDWARFOffsetByteSize());
+        unit_relative = false;
+      }
+
+      auto callee_or_err =
+          dwarf_cu->GetDIELocationExpression(die_offset, unit_relative);
+      if (!callee_or_err)
+        return callee_or_err.takeError();
+      const DataExtractor &callee_opcodes = callee_or_err->first;
+      const DWARFExpression::Delegate *callee_cu = callee_or_err->second;
+
+      // The referenced DIE has no DW_AT_location attribute; per the DWARF
+      // specification the call operation has no effect.
+      if (callee_opcodes.GetByteSize() == 0)
+        break;
+
+      if (call_depth >= g_max_dwarf_call_depth)
+        return llvm::createStringError(
+            "DWARF expression call depth exceeds %u, likely due to a cycle "
+            "of DW_OP_call references",
+            g_max_dwarf_call_depth);
+
+      // Evaluate the called expression against the current state, as if its
+      // opcodes appeared in place of the call operation. In particular it
+      // may consume and push values on the current stack.
+      if (llvm::Error err = EvaluateOpcodes(
+              exe_ctx, reg_ctx, module_sp, callee_opcodes, callee_cu, reg_kind,
+              object_address_ptr, stack, dwarf4_location_description_kind,
+              pieces, op_piece_offset, call_depth + 1))
+        return err;
+      break;
+    }
 
     // OPCODE: DW_OP_stack_value
     // OPERANDS: None
@@ -2310,6 +2347,42 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
           "Unhandled opcode {0} in DWARFExpression", LocationAtom(op)));
     }
   }
+
+  return llvm::Error::success();
+}
+
+llvm::Expected<Value> DWARFExpression::Evaluate(
+    ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
+    lldb::ModuleSP module_sp, const DataExtractor &opcodes,
+    const DWARFExpression::Delegate *dwarf_cu,
+    const lldb::RegisterKind reg_kind, const Value *initial_value_ptr,
+    const Value *object_address_ptr) {
+
+  if (opcodes.GetByteSize() == 0)
+    return llvm::createStringError(
+        "no location, value may have been optimized out");
+
+  Stack stack;
+
+  if (initial_value_ptr)
+    stack.push_back(*initial_value_ptr);
+
+  /// Insertion point for evaluating multi-piece expression.
+  uint64_t op_piece_offset = 0;
+  Value pieces; // Used for DW_OP_piece
+
+  // The default kind is a memory location. This is updated by any
+  // operation that changes this, such as DW_OP_stack_value, and reset
+  // by composition operations like DW_OP_piece.
+  LocationDescriptionKind dwarf4_location_description_kind = Memory;
+
+  if (llvm::Error err = EvaluateOpcodes(
+          exe_ctx, reg_ctx, module_sp, opcodes, dwarf_cu, reg_kind,
+          object_address_ptr, stack, dwarf4_location_description_kind, pieces,
+          op_piece_offset, /*call_depth=*/0))
+    return std::move(err);
+
+  Log *log = GetLog(LLDBLog::Expressions);
 
   if (stack.empty()) {
     // Nothing on the stack, check if we created a piece value from DW_OP_piece

@@ -160,6 +160,14 @@ public:
   llvm::Expected<std::pair<uint64_t, bool>>
   GetDIEBitSizeAndSign(uint64_t relative_die_offset) const override;
 
+  uint8_t GetDWARFOffsetByteSize() const override {
+    return GetFormParams().getDwarfOffsetByteSize();
+  }
+
+  llvm::Expected<std::pair<DataExtractor, const DWARFExpression::Delegate *>>
+  GetDIELocationExpression(uint64_t die_offset,
+                           bool unit_relative) const override;
+
   lldb::offset_t GetVendorDWARFOpcodeSize(const DataExtractor &data,
                                           const lldb::offset_t data_offset,
                                           const uint8_t op) const override;

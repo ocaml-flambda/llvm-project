@@ -19,6 +19,7 @@
 #include "llvm/DebugInfo/DWARF/DWARFLocationExpression.h"
 #include "llvm/Support/Error.h"
 #include <functional>
+#include <utility>
 
 namespace lldb_private {
 
@@ -45,8 +46,38 @@ public:
     virtual uint16_t GetVersion() const = 0;
     virtual dw_addr_t GetBaseAddress() const = 0;
     virtual uint8_t GetAddressByteSize() const = 0;
+
+    /// Return the size in bytes of an offset in the DWARF format of this
+    /// unit: 4 bytes for the 32-bit DWARF format, 8 bytes for the 64-bit
+    /// DWARF format. This is the size of the operand of DW_OP_call_ref.
+    virtual uint8_t GetDWARFOffsetByteSize() const = 0;
+
     virtual llvm::Expected<std::pair<uint64_t, bool>>
     GetDIEBitSizeAndSign(uint64_t relative_die_offset) const = 0;
+
+    /// Return the DW_AT_location expression of the DIE referenced by a
+    /// DW_OP_call2, DW_OP_call4 or DW_OP_call_ref operation, together with
+    /// the delegate of the unit that contains the expression (which may not
+    /// be this unit for DW_OP_call_ref).
+    ///
+    /// \param[in] die_offset
+    ///     The offset of the referenced DIE. If \a unit_relative is true,
+    ///     the offset is relative to the start of this unit
+    ///     (DW_OP_call2/DW_OP_call4), otherwise it is an offset in the
+    ///     .debug_info section (DW_OP_call_ref).
+    ///
+    /// \return
+    ///     The location expression data and the delegate to evaluate it
+    ///     with. An empty (zero length) DataExtractor is returned when the
+    ///     referenced DIE has no DW_AT_location attribute; per the DWARF
+    ///     specification the call operation then has no effect. An error is
+    ///     returned if the DIE cannot be resolved or its DW_AT_location is
+    ///     not an expression block (i.e. it is a location list, which is not
+    ///     currently supported here).
+    virtual llvm::Expected<std::pair<DataExtractor, const Delegate *>>
+    GetDIELocationExpression(uint64_t die_offset,
+                             bool unit_relative) const = 0;
+
     virtual dw_addr_t ReadAddressFromDebugAddrSection(uint32_t index) const = 0;
     virtual lldb::offset_t
     GetVendorDWARFOpcodeSize(const DataExtractor &data,

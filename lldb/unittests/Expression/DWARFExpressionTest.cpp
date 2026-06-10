@@ -343,6 +343,152 @@ DWARF:
       llvm::Failed());
 }
 
+TEST(DWARFExpression, DW_OP_call) {
+  // Two compile units. CU0 contains a variable DIE whose DW_AT_location
+  // pushes 0x2211. CU1, the unit the expressions below are evaluated in,
+  // contains:
+  //   - a variable DIE whose location pushes 0x47 (CU-relative 0x0e)
+  //   - a variable DIE without DW_AT_location (CU-relative 0x13)
+  //   - a variable DIE whose location calls itself (CU-relative 0x15)
+  //   - a variable DIE whose location adds 1 to the value on top of the
+  //     stack (CU-relative 0x1c)
+  // DW_OP_call2/DW_OP_call4 offsets are relative to the current unit (CU1),
+  // whereas the DW_OP_call_ref offset is relative to the start of
+  // .debug_info and here resolves to the DIE in CU0.
+  const char *yamldata = R"(
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_386
+DWARF:
+  debug_abbrev:
+    - Table:
+        - Code:            0x00000001
+          Tag:             DW_TAG_compile_unit
+          Children:        DW_CHILDREN_yes
+          Attributes:
+            - Attribute:       DW_AT_language
+              Form:            DW_FORM_data2
+        - Code:            0x00000002
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_location
+              Form:            DW_FORM_exprloc
+        - Code:            0x00000003
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_const_value
+              Form:            DW_FORM_data1
+  debug_info:
+    - Version:         4
+      AddrSize:        8
+      AbbrevTableID:   0
+      AbbrOffset:      0x0
+      Entries:
+        - AbbrCode:        0x00000001
+          Values:
+            - Value:           0x000000000000000C
+        # 0x0000000e: DW_AT_location = DW_OP_const2u(0x2211)
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x0a, 0x11, 0x22 ]
+        - AbbrCode:        0x00000000
+    - Version:         4
+      AddrSize:        8
+      AbbrevTableID:   0
+      AbbrOffset:      0x0
+      Entries:
+        - AbbrCode:        0x00000001
+          Values:
+            - Value:           0x000000000000000C
+        # CU-relative 0x0e: DW_AT_location = DW_OP_const2u(0x0047)
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x0a, 0x47, 0x00 ]
+        # CU-relative 0x13: no DW_AT_location.
+        - AbbrCode:        0x00000003
+          Values:
+            - Value:           0x0000000000000000
+        # CU-relative 0x15: DW_AT_location = DW_OP_call4(0x15), i.e. a DIE
+        # whose location expression calls itself.
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x99, 0x15, 0x00, 0x00, 0x00 ]
+        # CU-relative 0x1c: DW_AT_location = DW_OP_lit1, DW_OP_plus.
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x31, 0x22 ]
+        - AbbrCode:        0x00000000
+)";
+
+  // Offsets of the DIEs above, relative to the start of CU1.
+  uint8_t offs_const_0x47 = 0x0e;
+  uint8_t offs_no_location = 0x13;
+  uint8_t offs_self_call = 0x15;
+  uint8_t offs_add_one = 0x1c;
+  // Offset of CU0's constant DIE, relative to the start of .debug_info.
+  uint8_t offs_cu0_const_0x2211 = 0x0e;
+
+  DWARFExpressionTester t(yamldata, /*cu_index=*/1);
+  ASSERT_TRUE((bool)t.GetDwarfUnit());
+
+  bool is_signed = true;
+  bool not_signed = false;
+
+  // Values left on the stack by the called expression are visible to the
+  // calling expression.
+  EXPECT_THAT_EXPECTED(t.Eval({DW_OP_call2, offs_const_0x47, 0x00, //
+                               DW_OP_stack_value}),
+                       llvm::HasValue(GetScalar(64, 0x47, not_signed)));
+
+  EXPECT_THAT_EXPECTED(
+      t.Eval({DW_OP_call4, offs_const_0x47, 0x00, 0x00, 0x00, //
+              DW_OP_stack_value}),
+      llvm::HasValue(GetScalar(64, 0x47, not_signed)));
+
+  // DW_OP_call_ref resolves its offset in .debug_info, finding the DIE in
+  // CU0 (whereas the same unit-relative offset names the 0x47 DIE in CU1).
+  EXPECT_THAT_EXPECTED(
+      t.Eval({DW_OP_call_ref, offs_cu0_const_0x2211, 0x00, 0x00, 0x00, //
+              DW_OP_stack_value}),
+      llvm::HasValue(GetScalar(64, 0x2211, not_signed)));
+
+  // Calling a DIE that has no DW_AT_location attribute has no effect.
+  EXPECT_THAT_EXPECTED(t.Eval({DW_OP_lit4,                              //
+                               DW_OP_call4, offs_no_location, 0, 0, 0, //
+                               DW_OP_stack_value}),
+                       llvm::HasValue(GetScalar(32, 4, is_signed)));
+
+  // Values on the stack at the time of the call may be used as parameters
+  // by the called expression.
+  EXPECT_THAT_EXPECTED(t.Eval({DW_OP_lit4,                          //
+                               DW_OP_call4, offs_add_one, 0, 0, 0, //
+                               DW_OP_stack_value}),
+                       llvm::HasValue(GetScalar(64, 5, is_signed)));
+
+  //
+  // Errors.
+  //
+
+  // A self-referencing call must be diagnosed rather than recurse forever.
+  EXPECT_THAT_ERROR(
+      t.Eval({DW_OP_call4, offs_self_call, 0, 0, 0}).takeError(),
+      llvm::Failed());
+
+  // No DIE at the given offset (it points into the unit header).
+  EXPECT_THAT_ERROR(t.Eval({DW_OP_call4, 0x01, 0, 0, 0}).takeError(),
+                    llvm::Failed());
+
+  // No compile unit.
+  EXPECT_THAT_ERROR(
+      Evaluate({DW_OP_call4, offs_const_0x47, 0, 0, 0}).takeError(),
+      llvm::Failed());
+}
+
 TEST(DWARFExpression, DW_OP_stack_value) {
   EXPECT_THAT_EXPECTED(Evaluate({DW_OP_stack_value}), llvm::Failed());
 }
