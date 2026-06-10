@@ -19,9 +19,86 @@
 #include "llvm/DebugInfo/DWARF/DWARFLocationExpression.h"
 #include "llvm/Support/Error.h"
 #include <functional>
+#include <optional>
 #include <utility>
 
 namespace lldb_private {
+
+/// \class DWARFExpressionDelegate DWARFExpression.h
+/// "lldb/Expression/DWARFExpression.h" Interface through which the DWARF
+/// expression evaluator accesses the DWARF unit that contains the expression
+/// being evaluated. Implemented by the DWARF symbol file plugin's DWARFUnit.
+///
+/// This is a top-level class (rather than nested in DWARFExpression) so that
+/// it can be forward declared by code that may not include Expression
+/// headers, such as lldb_private::Value.
+class DWARFExpressionDelegate {
+public:
+  DWARFExpressionDelegate() = default;
+  virtual ~DWARFExpressionDelegate() = default;
+
+  virtual uint16_t GetVersion() const = 0;
+  virtual dw_addr_t GetBaseAddress() const = 0;
+  virtual uint8_t GetAddressByteSize() const = 0;
+
+  /// Return the size in bytes of an offset in the DWARF format of this
+  /// unit: 4 bytes for the 32-bit DWARF format, 8 bytes for the 64-bit
+  /// DWARF format. This is the size of the operand of DW_OP_call_ref and
+  /// of the DIE reference operand of DW_OP_implicit_pointer.
+  virtual uint8_t GetDWARFOffsetByteSize() const = 0;
+
+  virtual llvm::Expected<std::pair<uint64_t, bool>>
+  GetDIEBitSizeAndSign(uint64_t relative_die_offset) const = 0;
+
+  /// Return the DW_AT_location expression of the DIE referenced by a
+  /// DW_OP_call2, DW_OP_call4, DW_OP_call_ref or DW_OP_implicit_pointer
+  /// operation, together with the delegate of the unit that contains the
+  /// expression (which may not be this unit when the offset is not unit
+  /// relative).
+  ///
+  /// \param[in] die_offset
+  ///     The offset of the referenced DIE. If \a unit_relative is true,
+  ///     the offset is relative to the start of this unit
+  ///     (DW_OP_call2/DW_OP_call4), otherwise it is an offset in the
+  ///     .debug_info section (DW_OP_call_ref, DW_OP_implicit_pointer).
+  ///
+  /// \return
+  ///     The location expression data and the delegate to evaluate it
+  ///     with. An empty (zero length) DataExtractor is returned when the
+  ///     referenced DIE exists but has no DW_AT_location attribute; the
+  ///     caller decides what that means (for the DW_OP_call operations it
+  ///     means the call has no effect; for DW_OP_implicit_pointer it means
+  ///     the pointed-at value is unavailable). An error is returned if the
+  ///     DIE cannot be resolved or its DW_AT_location is not an expression
+  ///     block (i.e. it is a location list, which is not currently
+  ///     supported here).
+  virtual llvm::Expected<
+      std::pair<DataExtractor, const DWARFExpressionDelegate *>>
+  GetDIELocationExpression(uint64_t die_offset, bool unit_relative) const = 0;
+
+  /// Return the value of the DW_AT_const_value attribute of the DIE at
+  /// \a die_offset in the .debug_info section. This is used when
+  /// dereferencing a DW_OP_implicit_pointer whose referenced DIE describes
+  /// the pointed-at value with a constant rather than a location. Block and
+  /// string forms are returned as host byte buffers, integer forms as
+  /// scalars. Returns std::nullopt when the DIE exists but has no
+  /// DW_AT_const_value attribute, and an error when the DIE cannot be
+  /// resolved.
+  virtual llvm::Expected<std::optional<Value>>
+  GetDIEConstValue(uint64_t die_offset) const = 0;
+
+  virtual dw_addr_t ReadAddressFromDebugAddrSection(uint32_t index) const = 0;
+  virtual lldb::offset_t
+  GetVendorDWARFOpcodeSize(const DataExtractor &data,
+                           const lldb::offset_t data_offset,
+                           const uint8_t op) const = 0;
+  virtual bool ParseVendorDWARFOpcode(uint8_t op, const DataExtractor &opcodes,
+                                      lldb::offset_t &offset,
+                                      std::vector<Value> &stack) const = 0;
+
+  DWARFExpressionDelegate(const DWARFExpressionDelegate &) = delete;
+  DWARFExpressionDelegate &operator=(const DWARFExpressionDelegate &) = delete;
+};
 
 /// \class DWARFExpression DWARFExpression.h
 /// "lldb/Expression/DWARFExpression.h" Encapsulates a DWARF location
@@ -38,59 +115,9 @@ class DWARFExpression {
 public:
   using Stack = std::vector<Value>;
 
-  class Delegate {
-  public:
-    Delegate() = default;
-    virtual ~Delegate() = default;
-
-    virtual uint16_t GetVersion() const = 0;
-    virtual dw_addr_t GetBaseAddress() const = 0;
-    virtual uint8_t GetAddressByteSize() const = 0;
-
-    /// Return the size in bytes of an offset in the DWARF format of this
-    /// unit: 4 bytes for the 32-bit DWARF format, 8 bytes for the 64-bit
-    /// DWARF format. This is the size of the operand of DW_OP_call_ref.
-    virtual uint8_t GetDWARFOffsetByteSize() const = 0;
-
-    virtual llvm::Expected<std::pair<uint64_t, bool>>
-    GetDIEBitSizeAndSign(uint64_t relative_die_offset) const = 0;
-
-    /// Return the DW_AT_location expression of the DIE referenced by a
-    /// DW_OP_call2, DW_OP_call4 or DW_OP_call_ref operation, together with
-    /// the delegate of the unit that contains the expression (which may not
-    /// be this unit for DW_OP_call_ref).
-    ///
-    /// \param[in] die_offset
-    ///     The offset of the referenced DIE. If \a unit_relative is true,
-    ///     the offset is relative to the start of this unit
-    ///     (DW_OP_call2/DW_OP_call4), otherwise it is an offset in the
-    ///     .debug_info section (DW_OP_call_ref).
-    ///
-    /// \return
-    ///     The location expression data and the delegate to evaluate it
-    ///     with. An empty (zero length) DataExtractor is returned when the
-    ///     referenced DIE has no DW_AT_location attribute; per the DWARF
-    ///     specification the call operation then has no effect. An error is
-    ///     returned if the DIE cannot be resolved or its DW_AT_location is
-    ///     not an expression block (i.e. it is a location list, which is not
-    ///     currently supported here).
-    virtual llvm::Expected<std::pair<DataExtractor, const Delegate *>>
-    GetDIELocationExpression(uint64_t die_offset,
-                             bool unit_relative) const = 0;
-
-    virtual dw_addr_t ReadAddressFromDebugAddrSection(uint32_t index) const = 0;
-    virtual lldb::offset_t
-    GetVendorDWARFOpcodeSize(const DataExtractor &data,
-                             const lldb::offset_t data_offset,
-                             const uint8_t op) const = 0;
-    virtual bool ParseVendorDWARFOpcode(uint8_t op,
-                                        const DataExtractor &opcodes,
-                                        lldb::offset_t &offset,
-                                        Stack &stack) const = 0;
-
-    Delegate(const Delegate &) = delete;
-    Delegate &operator=(const Delegate &) = delete;
-  };
+  /// Compatibility alias; the delegate predates its hoisting to a top-level
+  /// class and is widely referred to as DWARFExpression::Delegate.
+  using Delegate = DWARFExpressionDelegate;
 
   DWARFExpression();
 
@@ -184,6 +211,30 @@ public:
            lldb::ModuleSP module_sp, const DataExtractor &opcodes,
            const Delegate *dwarf_cu, const lldb::RegisterKind reg_set,
            const Value *initial_value_ptr, const Value *object_address_ptr);
+
+  /// Materialize the value an implicit pointer points at.
+  ///
+  /// \a implicit_pointer must be a Value of type
+  /// Value::ValueType::ImplicitPointer, i.e. the result of evaluating a
+  /// DWARF expression that ends in DW_OP_implicit_pointer: a pointer that
+  /// does not exist in the process being debugged, but whose pointed-at
+  /// value is described by another DIE. This function evaluates the
+  /// DW_AT_location of that DIE in the given context and applies the
+  /// implicit pointer's byte offset, yielding the pointed-at value. The
+  /// result can be any kind of Value: a load address (the pointee does
+  /// exist in the process's memory), a host address or scalar (the pointee
+  /// only exists in the debugger), or another implicit pointer (the pointee
+  /// is itself an eliminated pointer); in the latter cases the value lives
+  /// in LLDB's own address space, never the process's.
+  ///
+  /// Note that failure is always reported as an error: a pointee that is
+  /// unavailable (e.g. the referenced DIE has no DW_AT_location) is never
+  /// conflated with a pointee that evaluates to the value zero.
+  static llvm::Expected<Value>
+  DereferenceImplicitPointer(const Value &implicit_pointer,
+                             ExecutionContext *exe_ctx,
+                             RegisterContext *reg_ctx,
+                             lldb::ModuleSP module_sp);
 
   bool GetExpressionData(DataExtractor &data) const {
     data = m_data;

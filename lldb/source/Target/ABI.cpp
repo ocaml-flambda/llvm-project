@@ -125,6 +125,7 @@ ValueObjectSP ABI::GetReturnValueObject(Thread &thread, CompilerType &ast_type,
       return {};
     case Value::ValueType::HostAddress:
     case Value::ValueType::FileAddress:
+    case Value::ValueType::ImplicitPointer:
       // we odon't do anything with these for now
       break;
     case Value::ValueType::Scalar:

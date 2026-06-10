@@ -489,6 +489,259 @@ DWARF:
       llvm::Failed());
 }
 
+TEST(DWARFExpression, DW_OP_implicit_pointer) {
+  // A compile unit containing (offsets are relative to the start of
+  // .debug_info, which coincides with unit-relative offsets here):
+  //   - 0x0e: variable A whose location is the scalar 0x2211
+  //           (DW_OP_const2u, DW_OP_stack_value)
+  //   - 0x14: variable B whose location is the four implicit bytes
+  //           aa bb cc dd (DW_OP_implicit_value)
+  //   - 0x1c: variable C without DW_AT_location or DW_AT_const_value
+  //   - 0x1e: variable D whose location is an implicit pointer to B
+  //   - 0x26: variable E whose location is the scalar 0
+  //           (DW_OP_lit0, DW_OP_stack_value)
+  //   - 0x2a: variable F whose value is the integer constant 42
+  //           (DW_AT_const_value)
+  //   - 0x2c: variable G whose value is the constant bytes 10 20
+  //           (DW_AT_const_value block)
+  const char *yamldata = R"(
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_386
+DWARF:
+  debug_abbrev:
+    - Table:
+        - Code:            0x00000001
+          Tag:             DW_TAG_compile_unit
+          Children:        DW_CHILDREN_yes
+          Attributes:
+            - Attribute:       DW_AT_language
+              Form:            DW_FORM_data2
+        - Code:            0x00000002
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_location
+              Form:            DW_FORM_exprloc
+        - Code:            0x00000003
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_const_value
+              Form:            DW_FORM_data1
+        - Code:            0x00000004
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_decl_file
+              Form:            DW_FORM_data1
+        - Code:            0x00000005
+          Tag:             DW_TAG_variable
+          Children:        DW_CHILDREN_no
+          Attributes:
+            - Attribute:       DW_AT_const_value
+              Form:            DW_FORM_block1
+  debug_info:
+    - Version:         4
+      AddrSize:        8
+      AbbrevTableID:   0
+      AbbrOffset:      0x0
+      Entries:
+        - AbbrCode:        0x00000001
+          Values:
+            - Value:           0x000000000000000C
+        # 0x0e: A: DW_AT_location = DW_OP_const2u(0x2211), DW_OP_stack_value
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x0a, 0x11, 0x22, 0x9f ]
+        # 0x14: B: DW_AT_location = DW_OP_implicit_value(aa bb cc dd)
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x9e, 0x04, 0xaa, 0xbb, 0xcc, 0xdd ]
+        # 0x1c: C: neither DW_AT_location nor DW_AT_const_value.
+        - AbbrCode:        0x00000004
+          Values:
+            - Value:           0x0000000000000000
+        # 0x1e: D: DW_AT_location = DW_OP_implicit_pointer(0x14, 0)
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0xa0, 0x14, 0x00, 0x00, 0x00, 0x00 ]
+        # 0x26: E: DW_AT_location = DW_OP_lit0, DW_OP_stack_value
+        - AbbrCode:        0x00000002
+          Values:
+            - BlockData:       [ 0x30, 0x9f ]
+        # 0x2a: F: DW_AT_const_value = 42
+        - AbbrCode:        0x00000003
+          Values:
+            - Value:           0x000000000000002A
+        # 0x2c: G: DW_AT_const_value = block(10 20)
+        - AbbrCode:        0x00000005
+          Values:
+            - BlockData:       [ 0x10, 0x20 ]
+        - AbbrCode:        0x00000000
+)";
+
+  DWARFExpressionTester t(yamldata, /*cu_index=*/0);
+  ASSERT_TRUE((bool)t.GetDwarfUnit());
+
+  auto evaluate = [&](llvm::ArrayRef<uint8_t> expr) -> llvm::Expected<Value> {
+    DataExtractor extractor(expr.data(), expr.size(), lldb::eByteOrderLittle,
+                            /*addr_size*/ 4);
+    return DWARFExpression::Evaluate(
+        /*exe_ctx*/ nullptr, /*reg_ctx*/ nullptr, t.GetModule(), extractor,
+        t.GetDwarfUnit(), lldb::eRegisterKindLLDB,
+        /*initial_value_ptr*/ nullptr, /*object_address_ptr*/ nullptr);
+  };
+  auto dereference = [&](const Value &v) -> llvm::Expected<Value> {
+    return DWARFExpression::DereferenceImplicitPointer(
+        v, /*exe_ctx*/ nullptr, /*reg_ctx*/ nullptr, t.GetModule());
+  };
+
+  uint8_t offs_scalar = 0x0e;       // A
+  uint8_t offs_bytes = 0x14;        // B
+  uint8_t offs_no_location = 0x1c;  // C
+  uint8_t offs_chained = 0x1e;      // D
+  uint8_t offs_zero = 0x26;         // E
+  uint8_t offs_const_scalar = 0x2a; // F
+  uint8_t offs_const_block = 0x2c;  // G
+
+  // Evaluating DW_OP_implicit_pointer yields an implicit-pointer value
+  // carrying the DIE reference and byte offset. The pointer itself has no
+  // numeric value: asking for one yields the caller's fail value, never
+  // something that could be mistaken for a real pointer.
+  llvm::Expected<Value> result =
+      evaluate({DW_OP_implicit_pointer, offs_scalar, 0, 0, 0, 2});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  ASSERT_EQ(result->GetValueType(), Value::ValueType::ImplicitPointer);
+  ASSERT_TRUE(result->GetImplicitPointer().has_value());
+  EXPECT_EQ(result->GetImplicitPointer()->die_offset, (uint64_t)offs_scalar);
+  EXPECT_EQ(result->GetImplicitPointer()->byte_offset, 2);
+  EXPECT_EQ(result->GetScalar().ULongLong(LLDB_INVALID_ADDRESS),
+            LLDB_INVALID_ADDRESS);
+
+  // The legacy GNU extension behaves identically.
+  result = evaluate({DW_OP_GNU_implicit_pointer, offs_scalar, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  EXPECT_EQ(result->GetValueType(), Value::ValueType::ImplicitPointer);
+
+  // Dereferencing materializes the pointed-at value: here a scalar.
+  result = evaluate({DW_OP_implicit_pointer, offs_scalar, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  llvm::Expected<Value> pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  EXPECT_EQ(pointee->GetValueType(), Value::ValueType::Scalar);
+  EXPECT_EQ(pointee->GetScalar().ULongLong(), 0x2211u);
+
+  // ...here a blob of bytes living in the debugger's memory, with the
+  // implicit pointer's byte offset applied.
+  result = evaluate({DW_OP_implicit_pointer, offs_bytes, 0, 0, 0, 1});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  ASSERT_EQ(pointee->GetValueType(), Value::ValueType::HostAddress);
+  ASSERT_EQ(pointee->GetBuffer().GetByteSize(), 3u);
+  EXPECT_EQ(pointee->GetBuffer().GetBytes()[0], 0xbb);
+  EXPECT_EQ(pointee->GetBuffer().GetBytes()[2], 0xdd);
+
+  // A chain of implicit pointers: D's own location is an implicit pointer,
+  // so dereferencing yields another implicit pointer, which in turn
+  // dereferences to B's bytes.
+  result = evaluate({DW_OP_implicit_pointer, offs_chained, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  ASSERT_EQ(pointee->GetValueType(), Value::ValueType::ImplicitPointer);
+  ASSERT_TRUE(pointee->GetImplicitPointer().has_value());
+  EXPECT_EQ(pointee->GetImplicitPointer()->die_offset, (uint64_t)offs_bytes);
+  pointee = dereference(*pointee);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  ASSERT_EQ(pointee->GetValueType(), Value::ValueType::HostAddress);
+  ASSERT_EQ(pointee->GetBuffer().GetByteSize(), 4u);
+  EXPECT_EQ(pointee->GetBuffer().GetBytes()[0], 0xaa);
+
+  // A pointee that legitimately evaluates to zero is a success...
+  result = evaluate({DW_OP_implicit_pointer, offs_zero, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  EXPECT_EQ(pointee->GetValueType(), Value::ValueType::Scalar);
+  EXPECT_EQ(pointee->GetScalar().ULongLong(/*fail_value=*/1), 0u);
+
+  // The pointed-at value may also be described by a DW_AT_const_value
+  // attribute instead of a DW_AT_location: an integer constant...
+  result = evaluate({DW_OP_implicit_pointer, offs_const_scalar, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  EXPECT_EQ(pointee->GetValueType(), Value::ValueType::Scalar);
+  EXPECT_EQ(pointee->GetScalar().ULongLong(), 42u);
+
+  // ...or a block of bytes, with the byte offset applied.
+  result = evaluate({DW_OP_implicit_pointer, offs_const_block, 0, 0, 0, 1});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  pointee = dereference(*result);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  ASSERT_EQ(pointee->GetValueType(), Value::ValueType::HostAddress);
+  ASSERT_EQ(pointee->GetBuffer().GetByteSize(), 1u);
+  EXPECT_EQ(pointee->GetBuffer().GetBytes()[0], 0x20);
+
+  // ...whereas an unavailable pointee (neither DW_AT_location nor
+  // DW_AT_const_value on the referenced DIE) is an error, never a zero
+  // value.
+  result = evaluate({DW_OP_implicit_pointer, offs_no_location, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  EXPECT_THAT_EXPECTED(dereference(*result), llvm::Failed());
+
+  // A DIE offset that does not resolve is likewise an error.
+  result = evaluate({DW_OP_implicit_pointer, 0x01, 0, 0, 0, 0});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  EXPECT_THAT_EXPECTED(dereference(*result), llvm::Failed());
+
+  // A byte offset cannot be applied to a scalar pointee.
+  result = evaluate({DW_OP_implicit_pointer, offs_scalar, 0, 0, 0, 2});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  EXPECT_THAT_EXPECTED(dereference(*result), llvm::Failed());
+
+  // A composite (DW_OP_piece) value with an implicit-pointer piece: the
+  // composite's buffer carries placeholder bytes for the piece, and the
+  // piece's actual value is recorded in the implicit-pointer table. This is
+  // how an optimized-out boxed value is described: each piece is one field
+  // of the block, and pointer-valued fields may be implicit pointers.
+  result = evaluate({DW_OP_lit1, DW_OP_stack_value, DW_OP_piece, 4,        //
+                     DW_OP_implicit_pointer, offs_bytes, 0, 0, 0, 0,       //
+                     DW_OP_piece, 8});
+  ASSERT_THAT_EXPECTED(result, llvm::Succeeded());
+  ASSERT_EQ(result->GetValueType(), Value::ValueType::HostAddress);
+  ASSERT_EQ(result->GetBuffer().GetByteSize(), 12u);
+  EXPECT_EQ(result->GetBuffer().GetBytes()[0], 1);
+  ASSERT_EQ(result->GetImplicitPointerPieces().size(), 1u);
+  // The second field's range is in the table; the first field's is not.
+  EXPECT_EQ(result->FindImplicitPointerPiece(0, 4), nullptr);
+  const Value::ImplicitPointerPiece *piece =
+      result->FindImplicitPointerPiece(4, 8);
+  ASSERT_NE(piece, nullptr);
+  EXPECT_EQ(piece->pointee.die_offset, (uint64_t)offs_bytes);
+  EXPECT_EQ(piece->pointee.byte_offset, 0);
+
+  // The recorded piece dereferences like any other implicit pointer.
+  Value piece_pointer;
+  piece_pointer.SetImplicitPointer(piece->pointee.delegate,
+                                   piece->pointee.die_offset,
+                                   piece->pointee.byte_offset);
+  pointee = dereference(piece_pointer);
+  ASSERT_THAT_EXPECTED(pointee, llvm::Succeeded());
+  ASSERT_EQ(pointee->GetValueType(), Value::ValueType::HostAddress);
+  ASSERT_EQ(pointee->GetBuffer().GetByteSize(), 4u);
+  EXPECT_EQ(pointee->GetBuffer().GetBytes()[0], 0xaa);
+
+  // Without a compile unit the operation cannot be evaluated.
+  EXPECT_THAT_EXPECTED(Evaluate({DW_OP_implicit_pointer, 0x0e, 0, 0, 0, 0}),
+                       llvm::Failed());
+}
+
 TEST(DWARFExpression, DW_OP_stack_value) {
   EXPECT_THAT_EXPECTED(Evaluate({DW_OP_stack_value}), llvm::Failed());
 }

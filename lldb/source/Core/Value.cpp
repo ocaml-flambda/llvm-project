@@ -55,7 +55,9 @@ Value::Value(const void *bytes, int len)
 Value::Value(const Value &v)
     : m_value(v.m_value), m_compiler_type(v.m_compiler_type),
       m_context(v.m_context), m_value_type(v.m_value_type),
-      m_context_type(v.m_context_type), m_data_buffer() {
+      m_context_type(v.m_context_type), m_data_buffer(),
+      m_implicit_pointer(v.m_implicit_pointer),
+      m_implicit_pointer_pieces(v.m_implicit_pointer_pieces) {
   const uintptr_t rhs_value =
       (uintptr_t)v.m_value.ULongLong(LLDB_INVALID_ADDRESS);
   if ((rhs_value != 0) &&
@@ -74,6 +76,8 @@ Value &Value::operator=(const Value &rhs) {
     m_context = rhs.m_context;
     m_value_type = rhs.m_value_type;
     m_context_type = rhs.m_context_type;
+    m_implicit_pointer = rhs.m_implicit_pointer;
+    m_implicit_pointer_pieces = rhs.m_implicit_pointer_pieces;
     const uintptr_t rhs_value =
         (uintptr_t)rhs.m_value.ULongLong(LLDB_INVALID_ADDRESS);
     if ((rhs_value != 0) &&
@@ -110,10 +114,24 @@ void Value::Dump(Stream *strm) {
 
 Value::ValueType Value::GetValueType() const { return m_value_type; }
 
+void Value::SetImplicitPointer(const DWARFExpressionDelegate *delegate,
+                               uint64_t die_offset, int64_t byte_offset) {
+  // Deliberately leave the scalar cleared: an implicit pointer has no
+  // numeric value, and consumers that ask for one without checking the value
+  // type should receive their fail value, not something that could be
+  // mistaken for a real pointer (such as zero).
+  m_value.Clear();
+  m_data_buffer.Clear();
+  m_implicit_pointer = ImplicitPointerInfo{delegate, die_offset, byte_offset};
+  m_implicit_pointer_pieces.clear();
+  m_value_type = ValueType::ImplicitPointer;
+}
+
 AddressType Value::GetValueAddressType() const {
   switch (m_value_type) {
   case ValueType::Invalid:
   case ValueType::Scalar:
+  case ValueType::ImplicitPointer:
     break;
   case ValueType::LoadAddress:
     return eAddressTypeLoad;
@@ -159,6 +177,9 @@ size_t Value::AppendDataToHostBuffer(const Value &rhs) {
   Status error;
   switch (rhs.GetValueType()) {
   case ValueType::Invalid:
+  case ValueType::ImplicitPointer:
+    // An implicit pointer has no byte representation; do not append
+    // anything (in particular, not zeros).
     return 0;
   case ValueType::Scalar: {
     const size_t scalar_size = rhs.m_value.GetByteSize();
@@ -300,6 +321,7 @@ lldb::Format Value::GetValueDefaultFormat() {
 bool Value::GetData(DataExtractor &data) {
   switch (m_value_type) {
   case ValueType::Invalid:
+  case ValueType::ImplicitPointer:
     return false;
   case ValueType::Scalar:
     if (m_value.GetData(data))
@@ -339,6 +361,13 @@ Status Value::GetValueAsData(ExecutionContext *exe_ctx, DataExtractor &data,
   switch (m_value_type) {
   case ValueType::Invalid:
     error = Status::FromErrorString("invalid value");
+    break;
+  case ValueType::ImplicitPointer:
+    // The pointer itself has no memory representation; only the value it
+    // points at can be materialized, via
+    // DWARFExpression::DereferenceImplicitPointer().
+    error = Status::FromErrorString(
+        "value is an implicit pointer whose numeric value is not available");
     break;
   case ValueType::Scalar: {
     data.SetByteOrder(endian::InlHostByteOrder());
@@ -593,6 +622,7 @@ Scalar &Value::ResolveValue(ExecutionContext *exe_ctx, Module *module) {
     switch (m_value_type) {
     case ValueType::Invalid:
     case ValueType::Scalar: // raw scalar value
+    case ValueType::ImplicitPointer: // no numeric value to resolve
       break;
 
     case ValueType::FileAddress:
@@ -641,6 +671,8 @@ void Value::Clear() {
   m_context = nullptr;
   m_context_type = ContextType::Invalid;
   m_data_buffer.Clear();
+  m_implicit_pointer.reset();
+  m_implicit_pointer_pieces.clear();
 }
 
 const char *Value::GetValueTypeAsCString(ValueType value_type) {
@@ -655,6 +687,8 @@ const char *Value::GetValueTypeAsCString(ValueType value_type) {
     return "load address";
   case ValueType::HostAddress:
     return "host address";
+  case ValueType::ImplicitPointer:
+    return "implicit pointer";
   };
   llvm_unreachable("enum cases exhausted.");
 }

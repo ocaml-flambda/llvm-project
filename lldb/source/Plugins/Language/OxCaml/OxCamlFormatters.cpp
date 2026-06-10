@@ -53,8 +53,12 @@
 #include "OxCamlHelpers.h"
 #include "OxCamlValueFormatters.h"
 #include "Plugins/TypeSystem/OxCaml/TypeSystemOxCaml.h"
+#include "lldb/Core/Value.h"
+#include "lldb/Expression/DWARFExpression.h"
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Target/Process.h"
+#include "lldb/Target/RegisterContext.h"
+#include "lldb/Target/StackFrame.h"
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Reference.h"
@@ -87,9 +91,19 @@ static uint64_t MakeLowBitMask(uint64_t bit_size) {
   return (1ULL << bit_size) - 1ULL;
 }
 
+// Most formatters receive, alongside [data], the implicit-pointer piece
+// table of the composite the bytes came from (empty for values read from
+// the target's memory). Ranges listed there contain placeholder bytes, not
+// data: their value is the table entry. See FormatImplicitPointer.
 static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
                         const OxCamlFormatContext &context,
-                        std::optional<lldb::addr_t> object_address);
+                        std::optional<lldb::addr_t> object_address,
+                        llvm::ArrayRef<Value::ImplicitPointerPiece>
+                            implicit_pieces = {});
+static bool FormatImplicitPointer(Stream &stream, OxCamlType *type,
+                                  const Value &pointer,
+                                  const OxCamlFormatContext &context,
+                                  unsigned depth = 0);
 static bool FormatUnboxedBase(Stream &stream,
                               OxCamlUnboxedBaseType *unboxed_type,
                               DataExtractor &data);
@@ -103,11 +117,15 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType *ptr_type,
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType *typedef_type,
                           DataExtractor &data,
                           const OxCamlFormatContext &context,
-                          std::optional<lldb::addr_t> object_address);
+                          std::optional<lldb::addr_t> object_address,
+                          llvm::ArrayRef<Value::ImplicitPointerPiece>
+                              implicit_pieces = {});
 static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
                             DataExtractor &data,
                             const OxCamlFormatContext &context,
-                            std::optional<lldb::addr_t> object_address);
+                            std::optional<lldb::addr_t> object_address,
+                            llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                implicit_pieces = {});
 static bool FormatPlaceholder(Stream &stream,
                               OxCamlPlaceholderType *placeholder_type,
                               DataExtractor &data);
@@ -124,7 +142,9 @@ static bool FormatVariantPart(Stream &stream,
                               DataExtractor &data,
                               const OxCamlFormatContext &context,
                               std::optional<lldb::addr_t> object_address,
-                              bool is_ocaml_variant);
+                              bool is_ocaml_variant,
+                              llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                  implicit_pieces = {});
 
 // ============================================================================
 // Entry Point: OxCamlValue_SummaryProvider
@@ -139,13 +159,6 @@ static bool FormatVariantPart(Stream &stream,
 
 bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
     ValueObject &valobj, Stream &stream, const TypeSummaryOptions &options) {
-  DataExtractor data;
-  Status error;
-  valobj.GetData(data, error);
-
-  ENSURE(error.Success(), stream, "<unavailable>",
-         "ValueObject data extraction failed: {0}", error.AsCString());
-
   CompilerType compiler_type = valobj.GetCompilerType();
   void *opaque_type = compiler_type.GetOpaqueQualType();
 
@@ -168,8 +181,28 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
          "(ptr={0:P})",
          process_sp.get());
 
+  // The variable may have been optimized away into an implicit pointer
+  // (DW_OP_implicit_pointer): it then has no bytes of its own, and the
+  // value it points at must be materialized from the DWARF description of
+  // the pointee instead.
+  if (valobj.GetValue().GetValueType() == Value::ValueType::ImplicitPointer) {
+    OxCamlFormatContext context{process_sp, valobj.GetExecutionContextRef(),
+                                process_sp->GetByteOrder(),
+                                process_sp->GetAddressByteSize(),
+                                valobj.GetModule()};
+    return FormatImplicitPointer(stream, type, valobj.GetValue(), context);
+  }
+
+  DataExtractor data;
+  Status error;
+  valobj.GetData(data, error);
+
+  ENSURE(error.Success(), stream, "<unavailable>",
+         "ValueObject data extraction failed: {0}", error.AsCString());
+
   OxCamlFormatContext context{process_sp, valobj.GetExecutionContextRef(),
-                              data.GetByteOrder(), data.GetAddressByteSize()};
+                              data.GetByteOrder(), data.GetAddressByteSize(),
+                              valobj.GetModule()};
 
   // No object address at entry: [data] holds the OCaml value itself
   // (typically a register-resident tagged pointer). FormatPointer sets the
@@ -481,9 +514,117 @@ static bool FormatPointer(Stream &stream, OxCamlPointerType *ptr_type,
 static bool FormatTypedef(Stream &stream, OxCamlTypedefType *typedef_type,
                           DataExtractor &data,
                           const OxCamlFormatContext &context,
-                          std::optional<lldb::addr_t> object_address) {
+                          std::optional<lldb::addr_t> object_address,
+                          llvm::ArrayRef<Value::ImplicitPointerPiece>
+                              implicit_pieces) {
   return FormatValue(stream, typedef_type->GetUnderlyingType(), data, context,
-                     object_address);
+                     object_address, implicit_pieces);
+}
+
+// Format a value whose location is an implicit pointer
+// (DW_OP_implicit_pointer): the pointer itself was optimized away and has no
+// numeric value, but the object it would point at is described by another
+// DIE. Materialize that object and format it as [type]'s pointee. Failures
+// surface as markers; an unavailable pointee is never rendered as a null or
+// zero pointer.
+static bool FormatImplicitPointer(Stream &stream, OxCamlType *type,
+                                  const Value &pointer,
+                                  const OxCamlFormatContext &context,
+                                  unsigned depth) {
+  // Guard against reference cycles in (malformed) DWARF; each level of the
+  // chain materializes one pointee.
+  ENSURE(depth < 32, stream, "<implicit-pointer>",
+         "Implicit pointer chain exceeds {0} levels, likely a cycle", 32);
+
+  // Resolve typedef chains to find the pointer type whose pointee we will
+  // format.
+  OxCamlType *resolved = type;
+  while (resolved && resolved->GetKind() == OxCamlType::Typedef)
+    resolved = static_cast<OxCamlTypedefType *>(resolved)->GetUnderlyingType();
+  ENSURE(resolved, stream, "<implicit-pointer>",
+         "Implicit pointer value has unresolved type '{0}'",
+         type ? type->GetDisplayName() : "<null>");
+  ENSURE(resolved->GetKind() == OxCamlType::Pointer, stream,
+         "<implicit-pointer>",
+         "Implicit pointer value has non-pointer type '{0}'",
+         resolved->GetDisplayName());
+  auto *ptr_type = static_cast<OxCamlPointerType *>(resolved);
+  OxCamlType *pointed_to = ptr_type->GetPointedToType();
+  ENSURE(pointed_to, stream, "<implicit-pointer>",
+         "Implicit pointer type '{0}' lacks a resolved target type",
+         ptr_type->GetDisplayName());
+
+  ExecutionContext exe_ctx(context.exe_ctx_ref);
+  RegisterContext *reg_ctx = nullptr;
+  if (StackFrame *frame = exe_ctx.GetFramePtr())
+    reg_ctx = frame->GetRegisterContext().get();
+
+  llvm::Expected<Value> pointee = DWARFExpression::DereferenceImplicitPointer(
+      pointer, &exe_ctx, reg_ctx, context.module_sp);
+  if (!pointee) {
+    OXCAML_EMIT_MARKER(stream, "<implicit-pointer>",
+                       "Failed to materialize the value of an optimized-out "
+                       "pointer of type '{0}': {1}",
+                       ptr_type->GetDisplayName(),
+                       llvm::toString(pointee.takeError()));
+    return true;
+  }
+
+  switch (pointee->GetValueType()) {
+  case Value::ValueType::LoadAddress: {
+    // The pointed-at object exists in the target's memory after all:
+    // re-enter the ordinary pointer-chasing path with its load address.
+    const uint64_t addr = pointee->GetScalar().ULongLong(LLDB_INVALID_ADDRESS);
+    uint8_t addr_bytes[sizeof(uint64_t)];
+    for (unsigned i = 0; i < sizeof(addr_bytes); ++i)
+      addr_bytes[i] = (context.byte_order == lldb::eByteOrderBig)
+                          ? uint8_t(addr >> (8 * (sizeof(addr_bytes) - 1 - i)))
+                          : uint8_t(addr >> (8 * i));
+    DataExtractor addr_data(addr_bytes, sizeof(addr_bytes), context.byte_order,
+                            context.address_byte_size);
+    return FormatPointer(stream, ptr_type, addr_data, context);
+  }
+
+  case Value::ValueType::HostAddress: {
+    // The pointed-at object exists only in the debugger: format the block
+    // from the materialized buffer, together with its implicit-pointer
+    // table (fields of the block may themselves be optimized-out
+    // pointers). Member locations that are constant object-relative
+    // offsets resolve against the buffer; there is no target-side object
+    // address.
+    DataExtractor pointee_data(pointee->GetBuffer().GetBytes(),
+                               pointee->GetBuffer().GetByteSize(),
+                               context.byte_order, context.address_byte_size);
+    return FormatValue(stream, pointed_to, pointee_data, context,
+                       /*object_address=*/std::nullopt,
+                       pointee->GetImplicitPointerPieces());
+  }
+
+  case Value::ValueType::Scalar: {
+    // The pointed-at object was materialized as a single word (e.g. its
+    // location is a register or a DW_AT_const_value integer).
+    uint64_t word = pointee->GetScalar().ULongLong();
+    DataExtractor word_data(&word, sizeof(word), context.byte_order,
+                            context.address_byte_size);
+    return FormatValue(stream, pointed_to, word_data, context,
+                       /*object_address=*/std::nullopt);
+  }
+
+  case Value::ValueType::ImplicitPointer:
+    // The pointed-at object is itself an optimized-out pointer.
+    return FormatImplicitPointer(stream, pointed_to, *pointee, context,
+                                 depth + 1);
+
+  case Value::ValueType::FileAddress:
+  case Value::ValueType::Invalid:
+    break;
+  }
+  OXCAML_EMIT_MARKER(stream, "<implicit-pointer>",
+                     "Unsupported materialized value kind {0} for an "
+                     "optimized-out pointer of type '{1}'",
+                     static_cast<int>(pointee->GetValueType()),
+                     ptr_type->GetDisplayName());
+  return true;
 }
 
 // Format an OCaml exception value
@@ -801,15 +942,46 @@ ResolveMemberLocation(Stream &stream, const OxCamlMember &member,
 
 // Read [byte_size] bytes for a member or discriminator into [out_buffer]
 // according to a resolved location.
-static bool
-ReadResolvedMemberBytes(Stream &stream, const OxCamlMember &member,
-                        uint64_t byte_size,
-                        const ResolvedMemberLocation &resolved,
-                        DataExtractor &data, const OxCamlFormatContext &context,
-                        llvm::SmallVectorImpl<uint8_t> &out_buffer) {
+//
+// [implicit_pieces] is the implicit-pointer table of [data]'s composite (if
+// any): ranges listed there contain placeholder bytes rather than data, so
+// reads overlapping them are refused, except that pieces falling entirely
+// inside the read are rebased onto the copied bytes and appended to
+// [contained_pieces] when the caller provides it (the caller then interprets
+// them against the copy).
+static bool ReadResolvedMemberBytes(
+    Stream &stream, const OxCamlMember &member, uint64_t byte_size,
+    const ResolvedMemberLocation &resolved, DataExtractor &data,
+    const OxCamlFormatContext &context,
+    llvm::SmallVectorImpl<uint8_t> &out_buffer,
+    llvm::ArrayRef<Value::ImplicitPointerPiece> implicit_pieces = {},
+    llvm::SmallVectorImpl<Value::ImplicitPointerPiece> *contained_pieces =
+        nullptr) {
   out_buffer.resize(byte_size);
   if (resolved.source == ResolvedMemberLocation::Source::BufferOffset) {
     uint64_t offset = resolved.buffer_offset;
+    for (const Value::ImplicitPointerPiece &piece : implicit_pieces) {
+      const bool overlaps = piece.buffer_offset < offset + byte_size &&
+                            offset < piece.buffer_offset + piece.byte_size;
+      if (!overlaps)
+        continue;
+      const bool contained =
+          piece.buffer_offset >= offset &&
+          piece.buffer_offset + piece.byte_size <= offset + byte_size;
+      if (contained && contained_pieces) {
+        contained_pieces->push_back(
+            {piece.buffer_offset - offset, piece.byte_size, piece.pointee});
+        continue;
+      }
+      // Refuse rather than reading the placeholder bytes: an optimized-out
+      // pointer's value must never be conflated with bytes such as zeros.
+      OXCAML_EMIT_MARKER(
+          stream, "<member>",
+          "Member '{0}' overlaps an optimized-out (implicit pointer) range "
+          "of its parent that cannot be read as bytes",
+          member.name.value_or("<unnamed>"));
+      return false;
+    }
     if (offset + byte_size > data.GetByteSize()) {
       OXCAML_EMIT_MARKER(
           stream, "<member>",
@@ -846,7 +1018,9 @@ ReadResolvedMemberBytes(Stream &stream, const OxCamlMember &member,
 static bool FormatMember(Stream &stream, const OxCamlMember &member,
                          DataExtractor &data,
                          const OxCamlFormatContext &context,
-                         std::optional<lldb::addr_t> object_address) {
+                         std::optional<lldb::addr_t> object_address,
+                         llvm::ArrayRef<Value::ImplicitPointerPiece>
+                             implicit_pieces = {}) {
   auto resolved =
       ResolveMemberLocation(stream, member, data, context, object_address);
   if (!resolved.has_value())
@@ -881,7 +1055,7 @@ static bool FormatMember(Stream &stream, const OxCamlMember &member,
 
     llvm::SmallVector<uint8_t, 8> word;
     if (!ReadResolvedMemberBytes(stream, member, sizeof(uint64_t), *resolved,
-                                 data, context, word))
+                                 data, context, word, implicit_pieces))
       return true;
 
     DataExtractor word_data(word.data(), word.size(), data.GetByteOrder(),
@@ -914,15 +1088,34 @@ static bool FormatMember(Stream &stream, const OxCamlMember &member,
   }
   uint64_t member_byte_size = *member_byte_size_expected;
 
+  // The member's bytes may not exist at all: if its range is exactly an
+  // implicit-pointer piece of the parent's composite, the member is an
+  // optimized-out pointer whose pointee is described by another DIE.
+  if (resolved->source == ResolvedMemberLocation::Source::BufferOffset) {
+    for (const Value::ImplicitPointerPiece &piece : implicit_pieces) {
+      if (piece.buffer_offset == resolved->buffer_offset &&
+          piece.byte_size == member_byte_size) {
+        Value pointer;
+        pointer.SetImplicitPointer(piece.pointee.delegate,
+                                   piece.pointee.die_offset,
+                                   piece.pointee.byte_offset);
+        return FormatImplicitPointer(stream, member.GetType(), pointer,
+                                     context);
+      }
+    }
+  }
+
   llvm::SmallVector<uint8_t, 32> buffer;
+  llvm::SmallVector<Value::ImplicitPointerPiece, 1> member_pieces;
   if (!ReadResolvedMemberBytes(stream, member, member_byte_size, *resolved,
-                               data, context, buffer))
+                               data, context, buffer, implicit_pieces,
+                               &member_pieces))
     return true;
 
   DataExtractor member_data(buffer.data(), member_byte_size,
                             data.GetByteOrder(), data.GetAddressByteSize());
   return FormatValue(stream, member.GetType(), member_data, context,
-                     resolved->member_object_address);
+                     resolved->member_object_address, member_pieces);
 }
 
 // Returns true if both members have constant data_member_location 0.
@@ -935,7 +1128,9 @@ static bool AreBothMembersAtConstantOffsetZero(const OxCamlMember &a,
 static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
                             DataExtractor &data,
                             const OxCamlFormatContext &context,
-                            std::optional<lldb::addr_t> object_address) {
+                            std::optional<lldb::addr_t> object_address,
+                            llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                implicit_pieces) {
   const auto &members = struct_type->GetMembers();
   const auto &variant_parts = struct_type->GetVariantParts();
 
@@ -943,7 +1138,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
   // variant part is rendered as the variant content alone (no braces).
   if (members.empty() && variant_parts.size() == 1) {
     return FormatVariantPart(stream, variant_parts[0], data, context,
-                             object_address, true);
+                             object_address, true, implicit_pieces);
   }
 
   // OCaml exception: a union-style struct with "exn" and "raw" members both
@@ -955,6 +1150,12 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
     const std::string &name1 = members[1].name.value();
     if ((name0 == "exn" && name1 == "raw") ||
         (name0 == "raw" && name1 == "exn")) {
+      // FormatException reads raw bytes itself and cannot interpret
+      // optimized-out (implicit pointer) ranges.
+      ENSURE(implicit_pieces.empty(), stream, "<exception>",
+             "Exception value contains optimized-out (implicit pointer) "
+             "ranges{0}",
+             "");
       return FormatException(stream, data, context);
     }
   }
@@ -976,7 +1177,8 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
       stream.Printf("%s = ", members[i].name.value().c_str());
     }
 
-    FormatMember(stream, members[i], data, context, object_address);
+    FormatMember(stream, members[i], data, context, object_address,
+                 implicit_pieces);
     has_content = true;
   }
 
@@ -985,7 +1187,7 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
       stream.Printf("%s", separator);
 
     FormatVariantPart(stream, variant_parts[i], data, context, object_address,
-                      false);
+                      false, implicit_pieces);
     has_content = true;
   }
 
@@ -996,7 +1198,22 @@ static bool FormatStructure(Stream &stream, OxCamlStructureType *struct_type,
 
 static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
                         const OxCamlFormatContext &context,
-                        std::optional<lldb::addr_t> object_address) {
+                        std::optional<lldb::addr_t> object_address,
+                        llvm::ArrayRef<Value::ImplicitPointerPiece>
+                            implicit_pieces) {
+  // Only the aggregate formatters below know how to interpret buffers that
+  // contain optimized-out (implicit pointer) ranges; refuse everywhere else
+  // rather than reading their placeholder bytes.
+  if (!implicit_pieces.empty() &&
+      (!type || (type->GetKind() != OxCamlType::Typedef &&
+                 type->GetKind() != OxCamlType::Structure))) {
+    OXCAML_EMIT_MARKER(stream, "<optimized-out>",
+                       "Value of type '{0}' contains optimized-out (implicit "
+                       "pointer) ranges, which this formatter cannot render",
+                       type ? type->GetDisplayName() : "<unknown>");
+    return true;
+  }
+
   if (!type) {
     Log *log = GetLog(OxCamlLog::Formatting);
     LLDB_LOG(
@@ -1019,10 +1236,10 @@ static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
                          context);
   case OxCamlType::Typedef:
     return FormatTypedef(stream, static_cast<OxCamlTypedefType *>(type), data,
-                         context, object_address);
+                         context, object_address, implicit_pieces);
   case OxCamlType::Structure:
     return FormatStructure(stream, static_cast<OxCamlStructureType *>(type),
-                           data, context, object_address);
+                           data, context, object_address, implicit_pieces);
   case OxCamlType::Array:
     return FormatArray(stream, static_cast<OxCamlArrayType *>(type), data,
                        context, object_address);
@@ -1038,7 +1255,9 @@ static bool FormatValue(Stream &stream, OxCamlType *type, DataExtractor &data,
 static std::optional<uint64_t>
 ReadDiscriminatorValue(Stream &stream, const OxCamlVariantPart &variant_part,
                        DataExtractor &data, const OxCamlFormatContext &context,
-                       std::optional<lldb::addr_t> object_address) {
+                       std::optional<lldb::addr_t> object_address,
+                       llvm::ArrayRef<Value::ImplicitPointerPiece>
+                           implicit_pieces = {}) {
   const auto &discriminator = variant_part.GetDiscriminator();
   uint64_t discriminator_byte_size = discriminator.GetType()->GetByteSize();
   // The discriminator value is later returned as a uint64_t, so wider
@@ -1054,7 +1273,8 @@ ReadDiscriminatorValue(Stream &stream, const OxCamlVariantPart &variant_part,
 
   llvm::SmallVector<uint8_t, 8> buffer;
   if (!ReadResolvedMemberBytes(stream, discriminator, discriminator_byte_size,
-                               *resolved, data, context, buffer))
+                               *resolved, data, context, buffer,
+                               implicit_pieces))
     return std::nullopt;
 
   DataExtractor discr_data(buffer.data(), buffer.size(), data.GetByteOrder(),
@@ -1112,7 +1332,9 @@ static bool FormatVariantPartGeneric(Stream &stream,
                                      const OxCamlFormatContext &context,
                                      std::optional<lldb::addr_t> object_address,
                                      uint64_t discr_value,
-                                     const std::vector<OxCamlMember> &members) {
+                                     const std::vector<OxCamlMember> &members,
+                                     llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                         implicit_pieces) {
   std::string discr_name = "Unknown";
   const auto &discriminator = variant_part.GetDiscriminator();
   if (discriminator.GetType()->GetKind() == OxCamlType::Enum) {
@@ -1133,7 +1355,8 @@ static bool FormatVariantPartGeneric(Stream &stream,
         stream.Printf("; ");
       if (members[i].name.has_value())
         stream.Printf("%s = ", members[i].name.value().c_str());
-      FormatMember(stream, members[i], data, context, object_address);
+      FormatMember(stream, members[i], data, context, object_address,
+                   implicit_pieces);
     }
     stream.Printf("]");
   }
@@ -1147,7 +1370,9 @@ static bool FormatVariantPartOxCaml(Stream &stream,
                                     const OxCamlFormatContext &context,
                                     std::optional<lldb::addr_t> object_address,
                                     uint64_t discr_value,
-                                    const std::vector<OxCamlMember> &members) {
+                                    const std::vector<OxCamlMember> &members,
+                                    llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                        implicit_pieces) {
 
   const auto &discriminator = variant_part.GetDiscriminator();
   ENSURE(discriminator.GetType()->GetKind() == OxCamlType::Enum, stream,
@@ -1224,7 +1449,8 @@ static bool FormatVariantPartOxCaml(Stream &stream,
       }
     }
 
-    FormatMember(stream, members[i], data, context, object_address);
+    FormatMember(stream, members[i], data, context, object_address,
+                 implicit_pieces);
   }
 
   stream.Printf("%s", close_delim);
@@ -1240,9 +1466,11 @@ static bool FormatVariantPart(Stream &stream,
                               DataExtractor &data,
                               const OxCamlFormatContext &context,
                               std::optional<lldb::addr_t> object_address,
-                              bool is_ocaml_variant) {
-  auto discr_value_opt = ReadDiscriminatorValue(stream, variant_part, data,
-                                                context, object_address);
+                              bool is_ocaml_variant,
+                              llvm::ArrayRef<Value::ImplicitPointerPiece>
+                                  implicit_pieces) {
+  auto discr_value_opt = ReadDiscriminatorValue(
+      stream, variant_part, data, context, object_address, implicit_pieces);
   ENSURE(discr_value_opt.has_value(), stream, "<variant>",
          "Discriminator value unreadable (variant={0})",
          variant_part.GetDiscriminator().name);
@@ -1257,15 +1485,18 @@ static bool FormatVariantPart(Stream &stream,
   const auto &members = (*active_variant)->members;
 
   if (variant_part.HasArtificialDiscriminator() && members.size() == 1) {
-    FormatMember(stream, members[0], data, context, object_address);
+    FormatMember(stream, members[0], data, context, object_address,
+                 implicit_pieces);
     return true;
   }
 
   if (is_ocaml_variant) {
     return FormatVariantPartOxCaml(stream, variant_part, data, context,
-                                   object_address, discr_value, members);
+                                   object_address, discr_value, members,
+                                   implicit_pieces);
   } else {
     return FormatVariantPartGeneric(stream, variant_part, data, context,
-                                    object_address, discr_value, members);
+                                    object_address, discr_value, members,
+                                    implicit_pieces);
   }
 }

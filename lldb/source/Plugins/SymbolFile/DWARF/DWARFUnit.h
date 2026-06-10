@@ -168,6 +168,9 @@ public:
   GetDIELocationExpression(uint64_t die_offset,
                            bool unit_relative) const override;
 
+  llvm::Expected<std::optional<Value>>
+  GetDIEConstValue(uint64_t die_offset) const override;
+
   lldb::offset_t GetVendorDWARFOpcodeSize(const DataExtractor &data,
                                           const lldb::offset_t data_offset,
                                           const uint8_t op) const override;

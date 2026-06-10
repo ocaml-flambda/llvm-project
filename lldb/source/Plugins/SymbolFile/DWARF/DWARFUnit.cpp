@@ -9,6 +9,7 @@
 #include "DWARFUnit.h"
 
 #include "lldb/Core/Module.h"
+#include "lldb/Core/Value.h"
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Utility/LLDBAssert.h"
 #include "lldb/Utility/StreamString.h"
@@ -781,6 +782,45 @@ DWARFUnit::GetDIELocationExpression(uint64_t die_offset,
   expr_data.SetAddressByteSize(expr_unit->GetAddressByteSize());
   return std::pair{expr_data,
                    static_cast<const DWARFExpression::Delegate *>(expr_unit)};
+}
+
+llvm::Expected<std::optional<Value>>
+DWARFUnit::GetDIEConstValue(uint64_t die_offset) const {
+  // FIXME: the constness has annoying ripple effects.
+  DWARFUnit *self = const_cast<DWARFUnit *>(this);
+  DWARFDIE die = self->GetSymbolFileDWARF().DebugInfo().GetDIE(
+      DIERef::Section::DebugInfo, die_offset);
+  if (!die)
+    return llvm::createStringError(
+        "cannot resolve DIE at .debug_info offset 0x%" PRIx64, die_offset);
+
+  DWARFFormValue form_value;
+  if (!die.GetDIE()->GetAttributeValue(die.GetCU(), DW_AT_const_value,
+                                       form_value,
+                                       /*end_attr_offset_ptr=*/nullptr,
+                                       /*check_elaborating_dies=*/true))
+    return std::nullopt;
+
+  if (DWARFFormValue::IsBlockForm(form_value.Form())) {
+    const uint8_t *block_data = form_value.BlockData();
+    const uint64_t block_length = form_value.Unsigned();
+    if (!block_data || block_length == 0)
+      return llvm::createStringError(
+          "DIE at .debug_info offset 0x%" PRIx64
+          " has an empty DW_AT_const_value block",
+          die_offset);
+    return Value(block_data, static_cast<int>(block_length));
+  }
+
+  if (const char *str = form_value.AsCString())
+    return Value(str, strlen(str) + 1);
+
+  // An integer constant. Only DW_FORM_sdata carries a signedness of its
+  // own; for the fixed-size data forms signedness would come from the
+  // type, which is not known here.
+  if (form_value.Form() == DW_FORM_sdata)
+    return Value(Scalar(form_value.Signed()));
+  return Value(Scalar(form_value.Unsigned()));
 }
 
 lldb::offset_t

@@ -156,7 +156,6 @@ GetOpcodeDataSize(const DataExtractor &data, const lldb::offset_t data_offset,
   case DW_OP_APPLE_uninit:
   case DW_OP_PGI_omp_thread_num:
   case DW_OP_hi_user:
-  case DW_OP_GNU_implicit_pointer:
     break;
 
   case DW_OP_addr:
@@ -364,12 +363,20 @@ GetOpcodeDataSize(const DataExtractor &data, const lldb::offset_t data_offset,
     return offset - data_offset;
   }
 
-  case DW_OP_implicit_pointer: // 0xa0 4-byte (or 8-byte for DWARF 64) constant
-                               // + LEB128
+  case DW_OP_implicit_pointer:     // 0xa0 DWARF offset sized DIE offset
+                                   // + SLEB128 (DWARF5)
+  case DW_OP_GNU_implicit_pointer: // 0xf2 GNU extension equivalent
   {
     data.Skip_LEB128(&offset);
-    return (dwarf_cu ? dwarf_cu->GetAddressByteSize() : 4) + offset -
-           data_offset;
+    lldb::offset_t ref_size = 4;
+    if (dwarf_cu) {
+      ref_size = dwarf_cu->GetDWARFOffsetByteSize();
+      // The GNU extension used an address sized reference in pre-DWARF 3
+      // units, which had no notion of an offset sized reference.
+      if (op == DW_OP_GNU_implicit_pointer && dwarf_cu->GetVersion() < 3)
+        ref_size = dwarf_cu->GetAddressByteSize();
+    }
+    return ref_size + offset - data_offset;
   }
 
   case DW_OP_GNU_entry_value:
@@ -921,6 +928,12 @@ static llvm::Error Evaluate_DW_OP_deref(DWARFExpression::Stack &stack,
     stack.back().GetScalar() = pointer_value;
     stack.back().ClearContext();
   } break;
+  case Value::ValueType::ImplicitPointer:
+    // Implicit pointers can only be dereferenced by materializing the
+    // pointed-at value via its DIE (see
+    // DWARFExpression::DereferenceImplicitPointer), not by reading memory.
+    return llvm::createStringError(
+        "DW_OP_deref of an implicit pointer is not supported");
   case Value::ValueType::Invalid:
     return llvm::createStringError("invalid value type for DW_OP_deref");
   }
@@ -1221,6 +1234,10 @@ static llvm::Error EvaluateOpcodes(
               "NULL execution context for DW_OP_deref_size");
         }
         break;
+
+      case Value::ValueType::ImplicitPointer:
+        return llvm::createStringError(
+            "DW_OP_deref_size of an implicit pointer is not supported");
 
       case Value::ValueType::Invalid:
 
@@ -1968,6 +1985,28 @@ static llvm::Error EvaluateOpcodes(
                 piece_byte_size, addr);
           } break;
 
+          case Value::ValueType::ImplicitPointer: {
+            // The piece is an implicit pointer: it has no actual bytes.
+            // Append placeholder bytes so that subsequent piece offsets stay
+            // correct, and record the byte range in the composite's
+            // implicit-pointer table. The table entry, never the placeholder
+            // bytes, is the piece's value; consumers must consult the table
+            // before interpreting any bytes of the composite.
+            const std::optional<Value::ImplicitPointerInfo> &pointee =
+                curr_piece_source_value.GetImplicitPointer();
+            if (!pointee)
+              return llvm::createStringError(
+                  "implicit pointer piece does not identify its pointee");
+            if (curr_piece.ResizeData(piece_byte_size) != piece_byte_size)
+              return llvm::createStringError(
+                  "failed to resize the piece memory buffer for "
+                  "DW_OP_piece(%" PRIu64 ")",
+                  piece_byte_size);
+            ::memset(curr_piece.GetBuffer().GetBytes(), 0, piece_byte_size);
+            pieces.AddImplicitPointerPiece(op_piece_offset, piece_byte_size,
+                                           *pointee);
+          } break;
+
           case Value::ValueType::Scalar: {
             uint32_t bit_size = piece_byte_size * 8;
             uint32_t bit_offset = 0;
@@ -2052,6 +2091,12 @@ static llvm::Error EvaluateOpcodes(
               "unable to extract DW_OP_bit_piece(bit_size = %" PRIu64
               ", bit_offset = %" PRIu64 ") from an address value.",
               piece_bit_size, piece_bit_offset);
+
+        case Value::ValueType::ImplicitPointer:
+          return llvm::createStringError(
+              "unable to extract DW_OP_bit_piece(bit_size = %" PRIu64
+              ", bit_offset = %" PRIu64 ") from an implicit pointer.",
+              piece_bit_size, piece_bit_offset);
         }
       }
       break;
@@ -2080,10 +2125,44 @@ static llvm::Error EvaluateOpcodes(
       break;
     }
 
-    case DW_OP_implicit_pointer: {
+    // OPCODE: DW_OP_implicit_pointer (DW_OP_GNU_implicit_pointer is the
+    // legacy vendor extension it was standardized from)
+    // OPERANDS: 2
+    //      A reference to a DIE in the .debug_info section, the size of an
+    //      offset in the DWARF format of the compile unit (4 bytes in the
+    //      32-bit DWARF format, 8 bytes in the 64-bit DWARF format)
+    //      SLEB128 byte offset into the value of that DIE
+    // DESCRIPTION: Specifies that the object is a pointer that cannot be
+    // represented as a real pointer, even though the value it would point to
+    // can be described: the referenced DIE describes the pointed-at value
+    // via its DW_AT_location (or DW_AT_const_value) attribute. The resulting
+    // value carries the DIE reference and byte offset so that the pointed-at
+    // value can be materialized on demand with
+    // DWARFExpression::DereferenceImplicitPointer(). The pointer itself has
+    // no numeric value; in particular it is distinct from a pointer whose
+    // value is zero.
+    case DW_OP_implicit_pointer:
+    case DW_OP_GNU_implicit_pointer: {
       dwarf4_location_description_kind = Implicit;
-      return llvm::createStringError("Could not evaluate %s.",
-                                     DW_OP_value_to_name(op));
+      if (!dwarf_cu)
+        return llvm::createStringError(
+            "%s found without a compile unit being specified",
+            DW_OP_value_to_name(op));
+
+      // The DIE reference operand has the size of an offset in the DWARF
+      // format of the compile unit, except for the GNU extension in
+      // pre-DWARF 3 units, which had no notion of an offset sized
+      // reference and used an address sized one.
+      uint32_t ref_byte_size = dwarf_cu->GetDWARFOffsetByteSize();
+      if (op == DW_OP_GNU_implicit_pointer && dwarf_cu->GetVersion() < 3)
+        ref_byte_size = opcodes.GetAddressByteSize();
+      const uint64_t die_offset = opcodes.GetMaxU64(&offset, ref_byte_size);
+      const int64_t byte_offset = opcodes.GetSLEB128(&offset);
+
+      Value result;
+      result.SetImplicitPointer(dwarf_cu, die_offset, byte_offset);
+      stack.push_back(result);
+      break;
     }
 
     // OPCODE: DW_OP_push_object_address
@@ -2408,6 +2487,117 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     }
   }
   return stack.back();
+}
+
+llvm::Expected<Value> DWARFExpression::DereferenceImplicitPointer(
+    const Value &implicit_pointer, ExecutionContext *exe_ctx,
+    RegisterContext *reg_ctx, lldb::ModuleSP module_sp) {
+  if (implicit_pointer.GetValueType() != Value::ValueType::ImplicitPointer)
+    return llvm::createStringError(
+        "cannot dereference a value that is not an implicit pointer");
+  const std::optional<Value::ImplicitPointerInfo> &info =
+      implicit_pointer.GetImplicitPointer();
+  if (!info || !info->delegate)
+    return llvm::createStringError(
+        "implicit pointer does not identify a DWARF unit");
+
+  auto pointee_loc_or_err = info->delegate->GetDIELocationExpression(
+      info->die_offset, /*unit_relative=*/false);
+  if (!pointee_loc_or_err)
+    return pointee_loc_or_err.takeError();
+  const DataExtractor &pointee_opcodes = pointee_loc_or_err->first;
+  const Delegate *pointee_cu = pointee_loc_or_err->second;
+
+  Value pointee;
+  if (pointee_opcodes.GetByteSize() != 0) {
+    llvm::Expected<Value> evaluated =
+        Evaluate(exe_ctx, reg_ctx, module_sp, pointee_opcodes, pointee_cu,
+                 lldb::eRegisterKindDWARF, /*initial_value_ptr=*/nullptr,
+                 /*object_address_ptr=*/nullptr);
+    if (!evaluated)
+      return evaluated.takeError();
+    pointee = std::move(*evaluated);
+  } else {
+    // The DWARF specification allows the referenced DIE to describe the
+    // pointed-at value with a DW_AT_const_value attribute instead of a
+    // DW_AT_location.
+    llvm::Expected<std::optional<Value>> const_value =
+        info->delegate->GetDIEConstValue(info->die_offset);
+    if (!const_value)
+      return const_value.takeError();
+    if (!*const_value)
+      // The pointed-at value is unavailable; report that explicitly so that
+      // it can never be conflated with a value that happens to be zero.
+      return llvm::createStringError(
+          "implicit pointer target DIE at .debug_info offset 0x%" PRIx64
+          " has neither DW_AT_location nor DW_AT_const_value; the pointed-at "
+          "value is unavailable",
+          info->die_offset);
+    pointee = std::move(**const_value);
+  }
+
+  const int64_t byte_offset = info->byte_offset;
+  switch (pointee.GetValueType()) {
+  case Value::ValueType::FileAddress:
+  case Value::ValueType::LoadAddress:
+    // The pointed-at value exists in the target's memory after all, so the
+    // result is an ordinary address there.
+    if (byte_offset != 0)
+      pointee.GetScalar() += byte_offset;
+    return pointee;
+
+  case Value::ValueType::HostAddress: {
+    // The pointed-at value was materialized into a buffer that lives in
+    // LLDB's own memory, not the target's. Slice off the requested byte
+    // offset into a fresh value: Value's copy semantics only preserve
+    // scalars that point at the start of their own buffer, so we must not
+    // hand out a pointer into the middle of one.
+    if (byte_offset == 0)
+      return pointee;
+    const uint8_t *bytes = pointee.GetBuffer().GetBytes();
+    const uint64_t byte_size = pointee.GetBuffer().GetByteSize();
+    if (!bytes || byte_offset < 0 ||
+        static_cast<uint64_t>(byte_offset) >= byte_size)
+      return llvm::createStringError(
+          "implicit pointer byte offset %" PRId64
+          " is outside the materialized value (%" PRIu64 " bytes)",
+          byte_offset, byte_size);
+    Value sliced(bytes + byte_offset, static_cast<int>(byte_size - byte_offset));
+    // Rebase the composite's implicit-pointer table onto the slice. Pieces
+    // entirely before the slice fall away with their bytes; a piece
+    // straddling the slice boundary would leave unmarked placeholder bytes
+    // in the slice, so refuse it.
+    const uint64_t slice_begin = static_cast<uint64_t>(byte_offset);
+    for (const Value::ImplicitPointerPiece &piece :
+         pointee.GetImplicitPointerPieces()) {
+      if (piece.buffer_offset >= slice_begin)
+        sliced.AddImplicitPointerPiece(piece.buffer_offset - slice_begin,
+                                       piece.byte_size, piece.pointee);
+      else if (piece.buffer_offset + piece.byte_size > slice_begin)
+        return llvm::createStringError(
+            "implicit pointer byte offset %" PRId64
+            " splits an implicit pointer piece of the pointed-at value",
+            byte_offset);
+    }
+    return sliced;
+  }
+
+  case Value::ValueType::Scalar:
+  case Value::ValueType::ImplicitPointer:
+    // A scalar (e.g. a pointee location ending in DW_OP_stack_value, or an
+    // integer DW_AT_const_value) or a chained implicit pointer has no
+    // addressable bytes to offset into.
+    if (byte_offset != 0)
+      return llvm::createStringError(
+          "cannot apply implicit pointer byte offset %" PRId64 " to a %s",
+          byte_offset, Value::GetValueTypeAsCString(pointee.GetValueType()));
+    return pointee;
+
+  case Value::ValueType::Invalid:
+    return llvm::createStringError(
+        "implicit pointer target evaluated to an invalid value");
+  }
+  llvm_unreachable("all value types handled");
 }
 
 bool DWARFExpression::MatchesOperand(
