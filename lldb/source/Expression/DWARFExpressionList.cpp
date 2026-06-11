@@ -11,6 +11,8 @@
 #include "lldb/Symbol/Function.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/StackFrame.h"
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
 #include "llvm/DebugInfo/DWARF/DWARFFormValue.h"
 
@@ -142,6 +144,37 @@ bool DWARFExpressionList::LinkThreadLocalStorage(
   if (expr.LinkThreadLocalStorage(m_dwarf_cu, link_address_callback))
     m_module_wp = new_module_sp;
   return true;
+}
+
+bool DWARFExpressionList::LinkDWOPAddrOperands(
+    std::function<lldb::addr_t(lldb::addr_t file_addr)> const
+        &link_address_callback) {
+  bool all_linked = true;
+  for (size_t i = 0; i < m_exprs.GetSize(); ++i) {
+    DWARFExpression &expr = m_exprs.GetMutableEntryAtIndex(i)->data;
+    llvm::Expected<lldb::addr_t> file_addr =
+        expr.GetLocation_DW_OP_addr(m_dwarf_cu);
+    if (!file_addr) {
+      LLDB_LOG_ERROR(GetLog(LLDBLog::Expressions), file_addr.takeError(),
+                     "Cannot link DW_OP_addr operand: {0}");
+      all_linked = false;
+      continue;
+    }
+    if (*file_addr == LLDB_INVALID_ADDRESS)
+      // The expression has no DW_OP_addr operation.
+      continue;
+    const lldb::addr_t linked_file_addr = link_address_callback(*file_addr);
+    if (linked_file_addr == LLDB_INVALID_ADDRESS) {
+      // The object the address refers to did not make it into the linked
+      // executable. Leave the expression untouched; evaluating it will not
+      // produce a resolvable address.
+      all_linked = false;
+      continue;
+    }
+    if (!expr.Update_DW_OP_addr(m_dwarf_cu, linked_file_addr))
+      all_linked = false;
+  }
+  return all_linked;
 }
 
 bool DWARFExpressionList::MatchesOperand(

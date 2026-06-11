@@ -790,6 +790,18 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
     return maybe_result.takeError();
   }
 
+  // A DW_AT_call_value expression produces a value, not a location, so a
+  // DW_OP_addr within it (e.g. a pointer argument to a statically
+  // allocated object) denotes the address as the value. Resolve such a
+  // file address here, where the module it belongs to (the caller
+  // expression's own) is known: the caller may be in a different module
+  // than the callee whose expression we resume below, and under a Darwin
+  // debug map each .o has its own file address space, so resolving it any
+  // later could consult the wrong module.
+  if (maybe_result->GetValueType() == Value::ValueType::FileAddress)
+    maybe_result->ConvertToLoadAddress(param_expr.GetModule().get(),
+                                       parent_exe_ctx.GetTargetPtr());
+
   stack.push_back(*maybe_result);
   return llvm::Error::success();
 }
@@ -2306,7 +2318,20 @@ static llvm::Error EvaluateOpcodes(
     // rather is a constant value.  The value from the top of the stack is the
     // value to be used.  This is the actual object value and not the location.
     case DW_OP_stack_value:
+      if (stack.empty())
+        return llvm::createStringError(
+            "expression stack needs at least 1 item for DW_OP_stack_value");
       dwarf4_location_description_kind = Implicit;
+      // The value may be an as-yet unresolved file address (e.g. DW_OP_addr
+      // ... DW_OP_stack_value, describing a pointer to a statically
+      // allocated object). DW_OP_addr pushes an address "relocated by the
+      // consumer"; complete that deferred relocation now, before the
+      // conversion to a plain scalar erases the value's address provenance.
+      // Otherwise consumers would receive the unrelocated address (under a
+      // Darwin debug map, an address in the .o file's own address space).
+      // If the address cannot be resolved (no target, or the module is not
+      // loaded), the value is left as the file address, as before.
+      stack.back().ConvertToLoadAddress(module_sp.get(), target);
       stack.back().SetValueType(Value::ValueType::Scalar);
       break;
 

@@ -93,6 +93,23 @@ public:
       std::function<lldb::addr_t(lldb::addr_t file_addr)> const
           &link_address_callback);
 
+  /// Rewrite the operand of the DW_OP_addr operation in each expression of
+  /// the list by passing it through \a link_address_callback. This is used
+  /// when the expressions come from a .o file behind a debug map (Darwin
+  /// without a dSYM): DW_OP_addr operands then hold .o file addresses,
+  /// which must be linked into the executable's address space to be
+  /// resolvable at evaluation time. Expressions without a DW_OP_addr are
+  /// left untouched.
+  ///
+  /// \return
+  ///     True if every DW_OP_addr operand found was successfully linked
+  ///     and rewritten; false if any was left unlinked (the callback
+  ///     returned LLDB_INVALID_ADDRESS, e.g. the referenced object did
+  ///     not make it into the linked executable) or could not be parsed.
+  bool LinkDWOPAddrOperands(
+      std::function<lldb::addr_t(lldb::addr_t file_addr)> const
+          &link_address_callback);
+
   bool MatchesOperand(StackFrame &frame,
                       const Instruction::Operand &operand) const;
 
@@ -119,6 +136,11 @@ public:
   bool ContainsAddress(lldb::addr_t func_load_addr, lldb::addr_t addr) const;
 
   void SetModule(const lldb::ModuleSP &module) { m_module_wp = module; }
+
+  /// Return the module whose DWARF the expressions came from, if it is
+  /// still loaded. Addresses pushed by DW_OP_addr within the expressions
+  /// are file addresses in this module's address space.
+  lldb::ModuleSP GetModule() const { return m_module_wp.lock(); }
 
   llvm::Expected<Value> Evaluate(ExecutionContext *exe_ctx,
                                  RegisterContext *reg_ctx,
