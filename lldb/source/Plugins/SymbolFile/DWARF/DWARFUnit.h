@@ -165,8 +165,9 @@ public:
   }
 
   llvm::Expected<std::pair<DataExtractor, const DWARFExpression::Delegate *>>
-  GetDIELocationExpression(uint64_t die_offset,
-                           bool unit_relative) const override;
+  GetDIELocationExpression(uint64_t die_offset, bool unit_relative,
+                           std::optional<uint64_t> pc_function_offset)
+      const override;
 
   llvm::Expected<std::optional<Value>>
   GetDIEConstValue(uint64_t die_offset) const override;

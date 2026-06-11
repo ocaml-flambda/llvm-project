@@ -62,19 +62,38 @@ public:
   ///     (DW_OP_call2/DW_OP_call4), otherwise it is an offset in the
   ///     .debug_info section (DW_OP_call_ref, DW_OP_implicit_pointer).
   ///
+  /// \param[in] pc_function_offset
+  ///     The offset of the program counter from the entry point of the
+  ///     function the frame is executing in, or std::nullopt when there is
+  ///     no frame or function. When the referenced DIE's DW_AT_location is
+  ///     a location list rather than a single expression, this selects the
+  ///     list entry that applies. A function-relative offset is used
+  ///     because location list ranges are expressed in the address space
+  ///     of the DWARF that defines them, which is not necessarily the
+  ///     address space the program runs in (for example on Darwin without
+  ///     a dSYM, where the DWARF lives in the .o files); the offset is the
+  ///     same in both spaces and is re-anchored at the DWARF-side
+  ///     function's entry point.
+  ///
   /// \return
   ///     The location expression data and the delegate to evaluate it
   ///     with. An empty (zero length) DataExtractor is returned when the
-  ///     referenced DIE exists but has no DW_AT_location attribute; the
-  ///     caller decides what that means (for the DW_OP_call operations it
-  ///     means the call has no effect; for DW_OP_implicit_pointer it means
-  ///     the pointed-at value is unavailable). An error is returned if the
-  ///     DIE cannot be resolved or its DW_AT_location is not an expression
-  ///     block (i.e. it is a location list, which is not currently
-  ///     supported here).
+  ///     referenced DIE exists but has no location description that
+  ///     applies: either it has no DW_AT_location attribute at all, or the
+  ///     attribute is a location list none of whose entries cover the
+  ///     program counter. The caller decides what that means (for the
+  ///     DW_OP_call operations the call has no effect, which
+  ///     compiler-emitted guard expressions rely on to detect unavailable
+  ///     values; for DW_OP_implicit_pointer the pointed-at value is
+  ///     unavailable). An error is returned if the DIE cannot be resolved,
+  ///     or if its DW_AT_location is a location list and
+  ///     \a pc_function_offset is unknown (the applicable entry then
+  ///     cannot be determined at all).
   virtual llvm::Expected<
       std::pair<DataExtractor, const DWARFExpressionDelegate *>>
-  GetDIELocationExpression(uint64_t die_offset, bool unit_relative) const = 0;
+  GetDIELocationExpression(uint64_t die_offset, bool unit_relative,
+                           std::optional<uint64_t> pc_function_offset)
+      const = 0;
 
   /// Return the value of the DW_AT_const_value attribute of the DIE at
   /// \a die_offset in the .debug_info section. This is used when

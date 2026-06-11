@@ -10,6 +10,7 @@
 
 #include "lldb/Core/Module.h"
 #include "lldb/Core/Value.h"
+#include "lldb/Expression/DWARFExpressionList.h"
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Utility/LLDBAssert.h"
 #include "lldb/Utility/StreamString.h"
@@ -729,8 +730,9 @@ DWARFUnit::GetDIEBitSizeAndSign(uint64_t relative_die_offset) const {
 }
 
 llvm::Expected<std::pair<DataExtractor, const DWARFExpression::Delegate *>>
-DWARFUnit::GetDIELocationExpression(uint64_t die_offset,
-                                    bool unit_relative) const {
+DWARFUnit::GetDIELocationExpression(
+    uint64_t die_offset, bool unit_relative,
+    std::optional<uint64_t> pc_function_offset) const {
   // FIXME: the constness has annoying ripple effects.
   DWARFUnit *self = const_cast<DWARFUnit *>(this);
   DWARFDIE die;
@@ -758,12 +760,97 @@ DWARFUnit::GetDIELocationExpression(uint64_t die_offset,
     return std::pair{DataExtractor(),
                      static_cast<const DWARFExpression::Delegate *>(this)};
 
-  if (!DWARFFormValue::IsBlockForm(form_value.Form()))
-    return llvm::createStringError(
-        "DW_OP_call target DIE at offset 0x%" PRIx64
-        " has a DW_AT_location that is not an expression block "
-        "(location lists are not supported)",
-        die_offset);
+  if (!DWARFFormValue::IsBlockForm(form_value.Form())) {
+    // The DW_AT_location is a location list: which expression describes the
+    // value depends on the program counter. Parse the list and select the
+    // entry covering the current PC.
+    const DWARFUnit *expr_unit = form_value.GetUnit();
+    if (!pc_function_offset)
+      return llvm::createStringError(
+          "DIE at offset 0x%" PRIx64 " has a location list DW_AT_location, "
+          "but the current PC is unknown so no entry can be selected",
+          die_offset);
+
+    // Location list ranges are expressed in the address space of this
+    // DWARF, which is not necessarily the address space the program runs
+    // in (for example on Darwin without a dSYM, where the DWARF lives in
+    // the .o files). Translate the function-relative PC into this space by
+    // anchoring it at the entry point of the function containing the
+    // referenced DIE; DIEs whose locations are referenced by DW_OP_call*
+    // or DW_OP_implicit_pointer describe values of the function being
+    // executed, so this is the same function the PC offset is relative to.
+    DWARFDIE func_die = die;
+    while (func_die && func_die.Tag() != DW_TAG_subprogram)
+      func_die = func_die.GetParent();
+    if (!func_die)
+      return llvm::createStringError(
+          "DIE at offset 0x%" PRIx64 " has a location list DW_AT_location "
+          "but no enclosing DW_TAG_subprogram to anchor the PC against",
+          die_offset);
+    const dw_addr_t func_low_pc =
+        func_die.GetAttributeValueAsAddress(DW_AT_low_pc, LLDB_INVALID_ADDRESS);
+    if (func_low_pc == LLDB_INVALID_ADDRESS)
+      return llvm::createStringError(
+          "the function enclosing the DIE at offset 0x%" PRIx64
+          " has no DW_AT_low_pc to anchor the PC against for its location "
+          "list",
+          die_offset);
+    const dw_addr_t pc_file_addr = func_low_pc + *pc_function_offset;
+
+    DataExtractor loc_data = expr_unit->GetLocationData();
+    uint64_t loc_offset = form_value.Unsigned();
+    if (form_value.Form() == DW_FORM_loclistx) {
+      std::optional<uint64_t> indexed_offset =
+          const_cast<DWARFUnit *>(expr_unit)->GetLoclistOffset(loc_offset);
+      if (!indexed_offset)
+        return llvm::createStringError(
+            "DIE at offset 0x%" PRIx64 " has an unresolvable DW_FORM_loclistx "
+            "location list index %" PRIu64,
+            die_offset, loc_offset);
+      loc_offset = *indexed_offset;
+    }
+    if (!loc_data.ValidOffset(loc_offset))
+      return llvm::createStringError(
+          "DIE at offset 0x%" PRIx64 " has a location list offset 0x%" PRIx64
+          " outside the location list section",
+          die_offset, loc_offset);
+
+    loc_data = DataExtractor(loc_data, loc_offset,
+                             loc_data.GetByteSize() - loc_offset);
+    lldb::ModuleSP module_sp =
+        GetSymbolFileDWARF().GetObjectFile()->GetModule();
+    DWARFExpressionList location_list(module_sp, DWARFExpression(), expr_unit);
+    if (!expr_unit->ParseDWARFLocationList(loc_data, location_list))
+      return llvm::createStringError(
+          "failed to parse the location list of the DIE at offset 0x%" PRIx64,
+          die_offset);
+
+    // The list entries hold file address ranges; passing
+    // LLDB_INVALID_ADDRESS as the function load address makes the lookup
+    // interpret pc_file_addr in file address terms as well.
+    const DWARFExpression *expr = location_list.GetExpressionAtAddress(
+        LLDB_INVALID_ADDRESS, pc_file_addr);
+    if (!expr)
+      // No entry covers the current PC: the value is unavailable at this
+      // point in the program. This is the location list analogue of a
+      // missing DW_AT_location attribute, so report it the same way, with
+      // an empty expression. DW_OP_call* then has no effect, which
+      // compiler-emitted guard expressions (push a fallback; call; branch
+      // on whether the call pushed a value) rely on, and dereferencing an
+      // implicit pointer reports the pointee as unavailable.
+      return std::pair{DataExtractor(),
+                       static_cast<const DWARFExpression::Delegate *>(this)};
+
+    DataExtractor expr_data;
+    if (!expr->GetExpressionData(expr_data))
+      return llvm::createStringError(
+          "failed to extract the location list expression of the DIE at "
+          "offset 0x%" PRIx64,
+          die_offset);
+    expr_data.SetAddressByteSize(expr_unit->GetAddressByteSize());
+    return std::pair{expr_data,
+                     static_cast<const DWARFExpression::Delegate *>(expr_unit)};
+  }
 
   const uint8_t *block_data = form_value.BlockData();
   uint64_t block_length = form_value.Unsigned();

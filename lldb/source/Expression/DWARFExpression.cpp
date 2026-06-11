@@ -966,6 +966,45 @@ static Scalar DerefSizeExtractDataHelper(uint8_t *addr_bytes,
 /// references in (malformed) DWARF, which would otherwise recurse forever.
 static constexpr uint32_t g_max_dwarf_call_depth = 64;
 
+/// Return the offset of the program counter from the entry point of the
+/// function the frame is executing in, for selecting the entry of a
+/// location list that applies at that point in the program (see
+/// DWARFExpressionDelegate::GetDIELocationExpression). Returns std::nullopt
+/// when there is no frame or no function, never an offset that could be
+/// mistaken for a real one.
+static std::optional<uint64_t>
+GetPCFunctionOffsetForLocationLists(ExecutionContext *exe_ctx,
+                                    RegisterContext *reg_ctx) {
+  StackFrame *frame = exe_ctx ? exe_ctx->GetFramePtr() : nullptr;
+  Address pc;
+  if (!reg_ctx || !reg_ctx->GetPCForSymbolication(pc)) {
+    if (!frame)
+      return std::nullopt;
+    lldb::RegisterContextSP reg_ctx_sp = frame->GetRegisterContext();
+    if (!reg_ctx_sp || !reg_ctx_sp->GetPCForSymbolication(pc))
+      return std::nullopt;
+  }
+  if (!pc.IsValid() || !frame)
+    return std::nullopt;
+  const SymbolContext &sc =
+      frame->GetSymbolContext(lldb::eSymbolContextFunction);
+  if (!sc.function)
+    return std::nullopt;
+  Target *target = exe_ctx->GetTargetPtr();
+  lldb::addr_t pc_addr = pc.GetLoadAddress(target);
+  lldb::addr_t func_addr = sc.function->GetAddress().GetLoadAddress(target);
+  if (pc_addr == LLDB_INVALID_ADDRESS || func_addr == LLDB_INVALID_ADDRESS) {
+    // Not loaded into a process (e.g. static analysis of a binary): both
+    // addresses are still comparable as file addresses.
+    pc_addr = pc.GetFileAddress();
+    func_addr = sc.function->GetAddress().GetFileAddress();
+  }
+  if (pc_addr == LLDB_INVALID_ADDRESS || func_addr == LLDB_INVALID_ADDRESS ||
+      pc_addr < func_addr)
+    return std::nullopt;
+  return pc_addr - func_addr;
+}
+
 /// Evaluate the DWARF expression in \a opcodes against \a stack.
 ///
 /// This implements the opcode interpreter loop of DWARFExpression::Evaluate,
@@ -2228,8 +2267,12 @@ static llvm::Error EvaluateOpcodes(
         unit_relative = false;
       }
 
-      auto callee_or_err =
-          dwarf_cu->GetDIELocationExpression(die_offset, unit_relative);
+      // The current PC selects the applicable entry when the referenced
+      // DIE's DW_AT_location is a location list rather than a single
+      // expression.
+      auto callee_or_err = dwarf_cu->GetDIELocationExpression(
+          die_offset, unit_relative,
+          GetPCFunctionOffsetForLocationLists(exe_ctx, reg_ctx));
       if (!callee_or_err)
         return callee_or_err.takeError();
       const DataExtractor &callee_opcodes = callee_or_err->first;
@@ -2501,8 +2544,11 @@ llvm::Expected<Value> DWARFExpression::DereferenceImplicitPointer(
     return llvm::createStringError(
         "implicit pointer does not identify a DWARF unit");
 
+  // The current PC selects the applicable entry when the pointee DIE's
+  // DW_AT_location is a location list rather than a single expression.
   auto pointee_loc_or_err = info->delegate->GetDIELocationExpression(
-      info->die_offset, /*unit_relative=*/false);
+      info->die_offset, /*unit_relative=*/false,
+      GetPCFunctionOffsetForLocationLists(exe_ctx, reg_ctx));
   if (!pointee_loc_or_err)
     return pointee_loc_or_err.takeError();
   const DataExtractor &pointee_opcodes = pointee_loc_or_err->first;
@@ -2530,8 +2576,8 @@ llvm::Expected<Value> DWARFExpression::DereferenceImplicitPointer(
       // it can never be conflated with a value that happens to be zero.
       return llvm::createStringError(
           "implicit pointer target DIE at .debug_info offset 0x%" PRIx64
-          " has neither DW_AT_location nor DW_AT_const_value; the pointed-at "
-          "value is unavailable",
+          " has no DW_AT_location applicable at the current PC and no "
+          "DW_AT_const_value; the pointed-at value is unavailable",
           info->die_offset);
     pointee = std::move(**const_value);
   }

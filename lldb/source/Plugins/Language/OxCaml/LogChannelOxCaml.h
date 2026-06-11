@@ -29,12 +29,17 @@ LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 
 #define OXCAML_EXPLAIN_ERROR_MARKER(DISPLAY_TOKEN, FORMAT_STRING, ...)         \
   do {                                                                         \
+    /* The format arguments must be evaluated exactly once, whether or not     \
+       the log channel is enabled: call sites pass expressions with side       \
+       effects, such as llvm::toString(expected.takeError()), which must run   \
+       to consume the error (an unconsumed llvm::Expected error aborts). */    \
+    std::string oxcaml_explanation__ =                                         \
+        llvm::formatv(FORMAT_STRING, __VA_ARGS__).str();                       \
     ::lldb_private::Log *oxcaml_log__ =                                        \
         ::lldb_private::GetLog(::lldb_private::OxCamlLog::UserVisibleErrors);  \
     if (oxcaml_log__)                                                          \
-      LLDB_LOG(oxcaml_log__, "{0}; displaying {1} ({2})",                      \
-               llvm::formatv(FORMAT_STRING, __VA_ARGS__), (DISPLAY_TOKEN),     \
-               __func__);                                                      \
+      LLDB_LOG(oxcaml_log__, "{0}; displaying {1} ({2})", oxcaml_explanation__, \
+               (DISPLAY_TOKEN), __func__);                                     \
   } while (false)
 
 #define OXCAML_EMIT_MARKER(STREAM, MARKER_EXPR, ERROR_FMT, ...)                \
