@@ -193,7 +193,8 @@ static bool DecodeAnonymousLocation(std::string_view& Mangled, OutputBuffer& Dem
   return true;
 }
 
-char *llvm::oxcamlDemangle(std::string_view Mangled) {
+// Demangle a symbol in the structured scheme (prefix "_Caml").
+static char *demangleStructured(std::string_view Mangled) {
   if(!starts_with(Mangled, "_Caml"))
     return nullptr;
   Mangled.remove_prefix(5);
@@ -271,4 +272,233 @@ char *llvm::oxcamlDemangle(std::string_view Mangled) {
   Demangled << '\0';
 
   return Demangled.getBuffer();
+}
+
+// ===========================================================================
+// Flat scheme (legacy "caml"/"_caml" prefixes)
+//
+// Ports the flat0 (OCaml <= 5.2) and flat1 (OCaml >= 5.3) demanglers from the
+// ocamlfilt reference tool. flat0 uses "__" as the module separator and "$xx"
+// hex escapes. flat1 additionally supports the macOS assembler flavour, which
+// uses "$" as the separator and "$$xx"/"$$$xx" escapes; the flavour is
+// auto-detected per symbol. As with the structured scheme, the trailing
+// compiler suffix (e.g. "_42") is preserved verbatim.
+// ===========================================================================
+
+static bool IsUpperAZ(char c) { return c >= 'A' && c <= 'Z'; }
+
+static bool IsFlatXDigit(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
+
+static unsigned FlatHex(char c) {
+  if(c >= '0' && c <= '9')
+    return c - '0';
+  if(c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  return c - 'A' + 10;
+}
+
+// If Mangled starts with a recognised flat prefix ("caml", or the
+// underscore-prefixed "_caml" that the macOS assembler emits) followed by an
+// uppercase letter (a syntactically valid OCaml module name), return the
+// matched prefix length; otherwise return 0.
+static size_t MatchedFlatPrefixLen(std::string_view Mangled) {
+  if(Mangled.size() > 5 && starts_with(Mangled, "_caml") && IsUpperAZ(Mangled[5]))
+    return 5;
+  if(Mangled.size() > 4 && starts_with(Mangled, "caml") && IsUpperAZ(Mangled[4]))
+    return 4;
+  return 0;
+}
+
+enum class FlatStyle { Linux, Macos };
+
+// flat1 emits one of two flavours per binary. A bare '.' or "__" is a positive
+// Linux marker; "$$" or a '$' not followed by two hex digits is a positive
+// macOS marker. A '$' followed by two hex digits is ambiguous in isolation, so
+// if no Linux marker appears anywhere the only coherent reading is macOS.
+static FlatStyle DetectFlatStyle(std::string_view S, size_t PrefixLen) {
+  size_t len = S.size();
+  bool saw_dollar_hex_pair = false;
+  for(size_t i = PrefixLen; i < len;) {
+    if(S[i] == '.')
+      return FlatStyle::Linux;
+    if(S[i] == '_' && i + 1 < len && S[i + 1] == '_')
+      return FlatStyle::Linux;
+    if(S[i] == '$') {
+      if(i + 1 < len && S[i + 1] == '$')
+        return FlatStyle::Macos;
+      if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
+        saw_dollar_hex_pair = true;
+        i += 3;
+        continue;
+      }
+      return FlatStyle::Macos;
+    }
+    i++;
+  }
+  return saw_dollar_hex_pair ? FlatStyle::Macos : FlatStyle::Linux;
+}
+
+// flat0 (OCaml <= 5.2): "__" -> '.', "$xx" -> hex char, else literal. Returns a
+// malloc'd C string.
+static char *demangleFlat0(std::string_view S, size_t PrefixLen) {
+  size_t len = S.size();
+  char *Out = static_cast<char *>(std::malloc(len + 1));
+  if(Out == nullptr)
+    std::terminate();
+
+  size_t j = 0;
+  for(size_t i = PrefixLen; i < len;) {
+    if(S[i] == '_') {
+      if(i + 1 >= len)
+        break; // dangling '_' -> stop
+      if(S[i + 1] == '_') {
+        Out[j++] = '.';
+        i += 2;
+        continue;
+      }
+      Out[j++] = '_';
+      i++;
+      continue;
+    }
+    if(S[i] == '$') {
+      if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
+        Out[j++] = (char)((FlatHex(S[i + 1]) << 4) | FlatHex(S[i + 2]));
+        i += 3;
+        continue;
+      }
+      Out[j++] = '$'; // not a valid escape -> literal '$'
+      i++;
+      continue;
+    }
+    Out[j++] = S[i++];
+  }
+  Out[j] = '\0';
+  return Out;
+}
+
+// flat1 (OCaml >= 5.3): Linux flavour matches flat0; the macOS flavour uses '$'
+// as the separator with "$$xx" / "$$$xx" escapes. Returns a malloc'd C string.
+static char *demangleFlat1(std::string_view S, size_t PrefixLen) {
+  size_t len = S.size();
+  FlatStyle style = DetectFlatStyle(S, PrefixLen);
+  char *Out = static_cast<char *>(std::malloc(len + 1));
+  if(Out == nullptr)
+    std::terminate();
+
+  size_t j = 0;
+  for(size_t i = PrefixLen; i < len;) {
+    if(style == FlatStyle::Macos) {
+      if(S[i] != '$') {
+        Out[j++] = S[i++];
+        continue;
+      }
+      if(i + 4 < len && S[i + 1] == '$' && S[i + 2] == '$' &&
+         IsFlatXDigit(S[i + 3]) && IsFlatXDigit(S[i + 4])) {
+        // "$$$xx" -> separator + hex char
+        Out[j++] = '.';
+        Out[j++] = (char)((FlatHex(S[i + 3]) << 4) | FlatHex(S[i + 4]));
+        i += 5;
+        continue;
+      }
+      if(i + 3 < len && S[i + 1] == '$' && IsFlatXDigit(S[i + 2]) &&
+         IsFlatXDigit(S[i + 3])) {
+        // "$$xx" -> hex char
+        Out[j++] = (char)((FlatHex(S[i + 2]) << 4) | FlatHex(S[i + 3]));
+        i += 4;
+        continue;
+      }
+      // bare '$' -> separator
+      Out[j++] = '.';
+      i++;
+      continue;
+    }
+
+    // Linux flavour
+    if(S[i] == '$') {
+      if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
+        Out[j++] = (char)((FlatHex(S[i + 1]) << 4) | FlatHex(S[i + 2]));
+        i += 3;
+        continue;
+      }
+      Out[j++] = '$';
+      i++;
+      continue;
+    }
+    if(S[i] == '_' && i + 1 < len && S[i + 1] == '_') {
+      Out[j++] = '.';
+      i += 2;
+      continue;
+    }
+    Out[j++] = S[i++];
+  }
+  Out[j] = '\0';
+  return Out;
+}
+
+bool llvm::isOxCamlMangledName(std::string_view MangledName) {
+  return starts_with(MangledName, "_Caml") ||
+         MatchedFlatPrefixLen(MangledName) != 0;
+}
+
+char *llvm::oxcamlDemangle(std::string_view Mangled) {
+  if(starts_with(Mangled, "_Caml"))
+    return demangleStructured(Mangled);
+
+  if(size_t PrefixLen = MatchedFlatPrefixLen(Mangled)) {
+    // flat1 (>= 5.3) is a superset of flat0; only fall back to flat0 (<= 5.2)
+    // if flat1 rejects the symbol.
+    if(char *Result = demangleFlat1(Mangled, PrefixLen))
+      return Result;
+    return demangleFlat0(Mangled, PrefixLen);
+  }
+
+  return nullptr;
+}
+
+// Length of the demangled name S[0..len) with any trailing OCaml compiler stamp
+// removed. The stamp is a non-deterministic counter (plus an optional "_code"
+// marker for code symbols) the compiler appends to keep linker symbols unique;
+// it is unstable across builds and carries no source meaning. Recognised
+// trailing forms: "_<digits>_<digits>_code", "_<digits>_code", "_<digits>".
+// Source spans ("[...]"/"(...)") and operator/identifier characters are kept,
+// since they do not end in "_<digits>".
+static size_t lengthWithoutStamp(const char *S, size_t len) {
+  // Strip one trailing "_<digits>" group ending at End; return the new end, or
+  // End unchanged when there is no such group.
+  auto stripGroup = [&](size_t End) -> size_t {
+    size_t p = End;
+    while(p > 0 && S[p - 1] >= '0' && S[p - 1] <= '9')
+      p--;
+    if(p < End && p > 0 && S[p - 1] == '_')
+      return p - 1;
+    return End;
+  };
+
+  if(len >= 5 && S[len - 5] == '_' && S[len - 4] == 'c' && S[len - 3] == 'o' &&
+     S[len - 2] == 'd' && S[len - 1] == 'e') {
+    // "..._code": only a stamp if preceded by at least one "_<digits>" group,
+    // otherwise "_code" is part of a name (e.g. "process_code").
+    size_t after_code = len - 5;
+    size_t e1 = stripGroup(after_code);
+    if(e1 == after_code)
+      return len;
+    return stripGroup(e1); // optionally a second group ("_<digits>_<digits>_code")
+  }
+  return stripGroup(len);
+}
+
+// Like oxcamlDemangle, but strips the trailing compiler stamp for display.
+char *llvm::oxcamlDemangleNoStamp(std::string_view Mangled) {
+  char *Result = oxcamlDemangle(Mangled);
+  if(Result == nullptr)
+    return nullptr;
+
+  size_t len = 0;
+  while(Result[len] != '\0')
+    len++;
+  Result[lengthWithoutStamp(Result, len)] = '\0';
+  return Result;
 }

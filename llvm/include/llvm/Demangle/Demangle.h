@@ -58,8 +58,16 @@ char *microsoftDemangle(std::string_view mangled_name, size_t *n_read,
 std::optional<size_t>
 getArm64ECInsertionPointInMangledName(std::string_view MangledName);
 
-// Demangles an OxCaml mangled symbol
+// Demangles an OxCaml mangled symbol (structured "_Caml" scheme or the legacy
+// flat "caml"/"_caml" schemes).
 char *oxcamlDemangle(std::string_view MangledName);
+
+// Returns true if MangledName uses a recognised OxCaml mangling scheme.
+bool isOxCamlMangledName(std::string_view MangledName);
+
+// Like oxcamlDemangle, but strips the trailing (non-deterministic) compiler
+// stamp from the result for display purposes.
+char *oxcamlDemangleNoStamp(std::string_view MangledName);
 
 // Demangles a Rust v0 mangled symbol.
 char *rustDemangle(std::string_view MangledName);

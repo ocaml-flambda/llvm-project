@@ -47,7 +47,7 @@ Mangled::ManglingScheme Mangled::GetManglingScheme(llvm::StringRef const name) {
   if (name.starts_with("?"))
     return Mangled::eManglingSchemeMSVC;
 
-  if (name.starts_with("_Caml"))
+  if (llvm::isOxCamlMangledName(name))
     return Mangled::eManglingSchemeOxCaml;
 
   if (name.starts_with("_R"))
@@ -201,7 +201,10 @@ GetItaniumDemangledStr(const char *M) {
 }
 
 static char *GetOxCamlDemangledStr(llvm::StringRef M) {
-  char *demangled_cstr = llvm::oxcamlDemangle(M);
+  // Use the stamp-stripped form for display: the trailing compiler stamp is a
+  // non-deterministic counter that hurts breakpoint-by-name and clutters
+  // output; the source location is recovered from DWARF (line table) instead.
+  char *demangled_cstr = llvm::oxcamlDemangleNoStamp(M);
 
   if (Log *log = GetLog(LLDBLog::Demangle)) {
     if (demangled_cstr && demangled_cstr[0])
