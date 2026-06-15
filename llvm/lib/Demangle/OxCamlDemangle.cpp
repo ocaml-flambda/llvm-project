@@ -443,7 +443,8 @@ bool llvm::isOxCamlMangledName(std::string_view MangledName) {
          MatchedFlatPrefixLen(MangledName) != 0;
 }
 
-char *llvm::oxcamlDemangle(std::string_view Mangled) {
+// Dispatch to the appropriate scheme, without post-processing.
+static char *demangleAnyScheme(std::string_view Mangled) {
   if(starts_with(Mangled, "_Caml"))
     return demangleStructured(Mangled);
 
@@ -466,36 +467,41 @@ char *llvm::oxcamlDemangle(std::string_view Mangled) {
 // Source spans ("[...]"/"(...)") and operator/identifier characters are kept,
 // since they do not end in "_<digits>".
 static size_t lengthWithoutStamp(const char *S, size_t len) {
-  // Strip one trailing "_<digits>" group ending at End; return the new end, or
-  // End unchanged when there is no such group.
-  auto stripGroup = [&](size_t End) -> size_t {
-    size_t p = End;
+  size_t end = len;
+
+  // Drop a trailing "_code" marker, but only when it follows a "_<digits>"
+  // group (otherwise "_code" is part of an identifier, e.g. "process_code").
+  if(end >= 5 && S[end - 5] == '_' && S[end - 4] == 'c' && S[end - 3] == 'o' &&
+     S[end - 2] == 'd' && S[end - 1] == 'e') {
+    size_t p = end - 5;
     while(p > 0 && S[p - 1] >= '0' && S[p - 1] <= '9')
       p--;
-    if(p < End && p > 0 && S[p - 1] == '_')
-      return p - 1;
-    return End;
-  };
-
-  if(len >= 5 && S[len - 5] == '_' && S[len - 4] == 'c' && S[len - 3] == 'o' &&
-     S[len - 2] == 'd' && S[len - 1] == 'e') {
-    // "..._code": only a stamp if preceded by at least one "_<digits>" group,
-    // otherwise "_code" is part of a name (e.g. "process_code").
-    size_t after_code = len - 5;
-    size_t e1 = stripGroup(after_code);
-    if(e1 == after_code)
-      return len;
-    return stripGroup(e1); // optionally a second group ("_<digits>_<digits>_code")
+    if(p < end - 5 && p > 0 && S[p - 1] == '_')
+      end -= 5;
   }
-  return stripGroup(len);
+
+  // Drop all trailing "_<digits>" groups. Non-numeric identifier characters
+  // stop the scan, so "add_string" and "bar_baz" survive while a numeric stamp
+  // like "..._4_9" does not.
+  for(;;) {
+    size_t p = end;
+    while(p > 0 && S[p - 1] >= '0' && S[p - 1] <= '9')
+      p--;
+    if(p < end && p > 0 && S[p - 1] == '_')
+      end = p - 1;
+    else
+      break;
+  }
+  return end;
 }
 
-// Like oxcamlDemangle, but strips the trailing compiler stamp for display.
-char *llvm::oxcamlDemangleNoStamp(std::string_view Mangled) {
-  char *Result = oxcamlDemangle(Mangled);
+char *llvm::oxcamlDemangle(std::string_view Mangled) {
+  char *Result = demangleAnyScheme(Mangled);
   if(Result == nullptr)
     return nullptr;
 
+  // Strip the trailing compiler stamp: it is a non-deterministic counter with
+  // no source meaning, so it is dropped from the demangled name.
   size_t len = 0;
   while(Result[len] != '\0')
     len++;

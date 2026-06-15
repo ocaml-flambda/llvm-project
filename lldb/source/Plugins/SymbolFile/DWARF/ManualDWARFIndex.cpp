@@ -335,17 +335,7 @@ void ManualDWARFIndex::IndexUnitImpl(DWARFUnit &unit,
           else
             set.function_basenames.Insert(ConstString(name), ref);
 
-          // For OCaml, DW_AT_name is the user-facing source name (e.g.
-          // "Module.function") and DW_AT_linkage_name is the mangled assembly
-          // symbol. lldb has no OCaml demangler, so the standard
-          // function_fullnames entry built from DW_AT_linkage_name below is
-          // not what users will type when setting a breakpoint. Index the
-          // source name as a full name too so that name-based lookups (which
-          // default to eFunctionNameTypeFull) hit it.
-          // TODO(oxcaml): remove the OCaml carve-out once lldb can demangle
-          // OCaml linkage names; the default branch will then suffice.
-          if (!is_method && !is_objc_method &&
-              (!mangled_cstr || cu_language == eLanguageTypeOCaml))
+          if (!is_method && !is_objc_method && !mangled_cstr)
             set.function_fullnames.Insert(ConstString(name), ref);
         }
         if (mangled_cstr) {

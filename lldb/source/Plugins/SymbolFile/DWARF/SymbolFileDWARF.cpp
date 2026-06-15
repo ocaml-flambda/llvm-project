@@ -1376,42 +1376,11 @@ size_t SymbolFileDWARF::ParseBlocksRecursive(CompileUnit &comp_unit,
                   call_file.value_or(0)),
               call_line.value_or(0), call_column.value_or(0));
 
-        // For OCaml, the default char-pointer overload would feed
-        // mangled_name through Mangled::SetValue, which doesn't recognise
-        // OCaml mangling and would route the linkage name into m_demangled.
-        // Backtraces (e.g. "[inlined] camlHello__concat_1_4_code") would then
-        // show the mangled symbol instead of the source name. Build the
-        // Mangled explicitly so both slots are populated correctly.
-        // TODO(oxcaml): drop this carve-out once lldb has an OCaml demangler
-        // registered with Mangled::GetManglingScheme(); the default branch
-        // will then suffice.
-        if (GetLanguage(*die.GetCU()) == eLanguageTypeOCaml) {
-          Mangled inlined_mangled;
-          if (name && name[0] != '\0')
-            inlined_mangled.SetDemangledName(ConstString(name));
-          if (mangled_name && mangled_name[0] != '\0')
-            inlined_mangled.SetMangledName(ConstString(mangled_name));
-          block->SetInlinedFunctionInfo(ConstString(name), inlined_mangled,
-                                        decl_up.get(), call_up.get());
-        } else {
-          block->SetInlinedFunctionInfo(name, mangled_name, decl_up.get(),
-                                        call_up.get());
-
-        /* FIXME(oxcaml) Should it be this instead?
-          // If mangled_name is NULL but name is mangled (e.g., OxCaml symbols),
-          // swap them so the Mangled class can handle demangling correctly
-          const char *use_name = name;
-          const char *use_mangled = mangled_name;
-          if (mangled_name == nullptr && name != nullptr &&
-              Mangled::GetManglingScheme(name) != Mangled::eManglingSchemeNone) {
-            use_mangled = name;
-            use_name = nullptr;
-          }
-
-          block->SetInlinedFunctionInfo(use_name, use_mangled, decl_up.get(),
-                                        call_up.get());
-        */
-        }
+        // For OCaml, mangled_name is the mangled assembly symbol; lldb now
+        // demangles it through Mangled::GetManglingScheme(), so the default
+        // overload yields the source-level name in inlined backtraces.
+        block->SetInlinedFunctionInfo(name, mangled_name, decl_up.get(),
+                                      call_up.get());
       }
 
       ++blocks_added;

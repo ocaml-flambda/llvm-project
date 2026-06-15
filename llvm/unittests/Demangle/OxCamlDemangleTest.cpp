@@ -47,10 +47,9 @@ void CheckDemangle(const DemangleCase &C) {
 }
 } // namespace
 
-// Golden corpus from oxcaml/oxcaml PR #5100, the pure-OCaml `ocamlfilt`
-// reference demangler (testsuite/tests/tool-ocamlfilt/structured.{sh,reference}).
-// Our output must match `ocamlfilt --format structured` exactly, including the
-// trailing compiler suffix (kept verbatim to avoid name clashes).
+// Corpus from oxcaml/oxcaml PR #5100, the pure-OCaml `ocamlfilt` reference
+// demangler (testsuite/tests/tool-ocamlfilt/structured.{sh,reference}), with the
+// non-deterministic trailing compiler stamp dropped (oxcamlDemangle strips it).
 TEST(OxCamlDemangle, StructuredCorpus) {
     static const DemangleCase Cases[] = {
         {"_CamlU3FooM3BarF3baz", "Foo.Bar.baz"},
@@ -67,23 +66,23 @@ TEST(OxCamlDemangle, StructuredCorpus) {
         {"_CamlU3FooP5_10_5", "Foo.partial(:10:5)"},        // partial, empty file
         {"_CamlU3FooM3BarM3BazF6my_fun", "Foo.Bar.Baz.my_fun"},
         {"_CamlU3FooFu5_0foo", "Foo.0foo"},                 // digit-leading name
-        {"_CamlU4MainF11say_hello_0_5_code",                // suffix kept verbatim
-         "Main.say_hello_0_5_code"},
-        {"_CamlU4MainM4TestF5foo_1_6_code", "Main.Test.foo_1_6_code"},
+        {"_CamlU4MainF11say_hello_0_5_code",                // stamp stripped
+         "Main.say_hello"},
+        {"_CamlU4MainM4TestF5foo_1_6_code", "Main.Test.foo"},
         {"_CamlU12Stdlib__ListF6map_15_113_code",           // __ pack separator
-         "Stdlib__List.map_15_113_code"},
-        {"_CamlU4MainSu15E2e_testml_5_15_300",
-         "Main.mod(test.ml:5:15)_300"},
+         "Stdlib__List.map"},
+        {"_CamlU4MainSu15E2e_testml_5_15_300",              // span kept, stamp dropped
+         "Main.mod(test.ml:5:15)"},
         {"_CamlU4MainF4mainLu15E2e_mainml_7_32F4fn_4_9_code",
-         "Main.main.fn(main.ml:7:32).fn_4_9_code"},
+         "Main.main.fn(main.ml:7:32).fn"},
         {"_CamlU3FooF3barLu14D2e_fooml_3_15Lu14D2e_fooml_4_22F4fn_7", // nested
-         "Foo.bar.fn(foo.ml:3:15).fn(foo.ml:4:22).fn_7"},
+         "Foo.bar.fn(foo.ml:3:15).fn(foo.ml:4:22).fn"},
         {"_CamlU3FooM3BarLu14D2e_fooml_5_10F3bazF4fn_1_2",
-         "Foo.Bar.fn(foo.ml:5:10).baz.fn_1_2"},
+         "Foo.Bar.fn(foo.ml:5:10).baz.fn"},
         {"_CamlU8Functor2F8combinedLu14D2e_fooml_8_12F4fn_1_3_code",
-         "Functor2.combined.fn(foo.ml:8:12).fn_1_3_code"},
+         "Functor2.combined.fn(foo.ml:8:12).fn"},
         {"_CamlU3FooSu14D2e_fooml_2_10F4initF4fn_5_6",
-         "Foo.mod(foo.ml:2:10).init.fn_5_6"},
+         "Foo.mod(foo.ml:2:10).init.fn"},
         {"_CamlU3FooF3barPu14D2e_fooml_9_15", "Foo.bar.partial(foo.ml:9:15)"},
         {"_CamlU3FooM3BarIU3BazF3qux", "Foo.Bar.<specialization_of>.Baz.qux"},
         {"_CamlU3FooM3BarO5ShapeF4area", "Foo.Bar.Shape.area"},
@@ -96,36 +95,36 @@ TEST(OxCamlDemangle, StructuredCorpus) {
 // (testsuite/tests/tool-ocamlfilt/flat0.{sh,reference} and flat1.{sh,reference}).
 // flat0 = OCaml <= 5.2 ("__" separators, "$xx" escapes); flat1 = OCaml >= 5.3,
 // which adds the macOS flavour ("$" separators, "$$xx"/"$$$xx" escapes,
-// auto-detected). The trailing compiler suffix is preserved.
+// auto-detected). The non-deterministic trailing compiler stamp is stripped.
 TEST(OxCamlDemangle, FlatCorpus) {
     static const DemangleCase Cases[] = {
         // flat0 (and Linux flat1, which is identical)
         {"camlFoo", "Foo"},
-        {"camlFoo__bar_0", "Foo.bar_0"},
-        {"camlA__B__C__D__func_0", "A.B.C.D.func_0"},
-        {"camlFoo__bar_baz_42", "Foo.bar_baz_42"},
-        {"camlStdlib__array__map_154", "Stdlib.array.map_154"},
-        {"camlBaz__Foo__Bar__init_0", "Baz.Foo.Bar.init_0"},
+        {"camlFoo__bar_0", "Foo.bar"},
+        {"camlA__B__C__D__func_0", "A.B.C.D.func"},
+        {"camlFoo__bar_baz_42", "Foo.bar_baz"},            // name '_' kept
+        {"camlStdlib__array__map_154", "Stdlib.array.map"},
+        {"camlBaz__Foo__Bar__init_0", "Baz.Foo.Bar.init"},
         {"camlFoo__", "Foo."},
-        {"camlStdlib__bytes__$2b$2b_2205", "Stdlib.bytes.++_2205"},
-        {"camlFoo__$2b$2b$2b_1", "Foo.+++_1"},
+        {"camlStdlib__bytes__$2b$2b_2205", "Stdlib.bytes.++"},
+        {"camlFoo__$2b$2b$2b_1", "Foo.+++"},
         {"camlStdlib__anon_fn$5bstdlib$2eml$3a334$2c0$2d$2d54$5d_1453",
-         "Stdlib.anon_fn[stdlib.ml:334,0--54]_1453"},
-        {"_camlFoo__bar_0", "Foo.bar_0"},                  // macOS "_caml" prefix
-        {"_camlStdlib__array__map_154", "Stdlib.array.map_154"},
+         "Stdlib.anon_fn[stdlib.ml:334,0--54]"},           // span kept
+        {"_camlFoo__bar_0", "Foo.bar"},                    // macOS "_caml" prefix
+        {"_camlStdlib__array__map_154", "Stdlib.array.map"},
         // flat1 Linux escapes
-        {"camlFoo__$3e$3e$3d_12", "Foo.>>=_12"},
-        {"camlIndexing__.$25$28$29_2_14_code", "Indexing..%()_2_14_code"},
+        {"camlFoo__$3e$3e$3d_12", "Foo.>>="},
+        {"camlIndexing__.$25$28$29_2_14_code", "Indexing..%()"},
         // flat1 macOS flavour: "$" separator, "$$xx"/"$$$xx" escapes
-        {"camlA$B$C$D$func_0", "A.B.C.D.func_0"},
-        {"camlFoo$$$3e$$3e$$3d_12", "Foo.>>=_12"},
-        {"camlFoo$$$2b$$2b_5", "Foo.++_5"},
-        {"camlIndexing$$$2e$$25$$28$$29_2_14_code", "Indexing..%()_2_14_code"},
+        {"camlA$B$C$D$func_0", "A.B.C.D.func"},
+        {"camlFoo$$$3e$$3e$$3d_12", "Foo.>>="},
+        {"camlFoo$$$2b$$2b_5", "Foo.++"},
+        {"camlIndexing$$$2e$$25$$28$$29_2_14_code", "Indexing..%()"},
         {"camlStdlib$anon_fn$$5bstdlib$$2eml$$3a334$$2c0$$2d$$2d54$$5d_1453",
-         "Stdlib.anon_fn[stdlib.ml:334,0--54]_1453"},
-        {"camlList$add_42", "List.add_42"},
-        {"camlBuffer$add_string_5_28_code", "Buffer.add_string_5_28_code"},
-        {"_camlStdlib__List__map_15_113_code", "Stdlib.List.map_15_113_code"},
+         "Stdlib.anon_fn[stdlib.ml:334,0--54]"},
+        {"camlList$add_42", "List.add"},
+        {"camlBuffer$add_string_5_28_code", "Buffer.add_string"},
+        {"_camlStdlib__List__map_15_113_code", "Stdlib.List.map"},
     };
     for (const auto &C : Cases)
         CheckDemangle(C);
@@ -152,35 +151,4 @@ TEST(OxCamlDemangle, RejectCorpus) {
     };
     for (const auto &C : Cases)
         CheckDemangle(C);
-}
-
-// oxcamlDemangleNoStamp: the display variant strips the trailing compiler
-// stamp ("_<digits>", "_<digits>_code", "_<digits>_<digits>_code") while
-// keeping source spans, operators, and identifier underscores intact.
-static void CheckNoStamp(const char *Mangled, const char *Expected) {
-    char *Demangled = llvm::oxcamlDemangleNoStamp(Mangled);
-    EXPECT_STREQ(Demangled, Expected) << "input: " << Mangled;
-    std::free(Demangled);
-}
-
-TEST(OxCamlDemangle, DisplayNoStamp) {
-    // structured
-    CheckNoStamp("_CamlU3FooM3BarF3baz", "Foo.Bar.baz");        // no stamp
-    CheckNoStamp("_CamlU3FooFu8A3e3e3d_", "Foo.>>=");           // operator, no stamp
-    CheckNoStamp("_CamlU4MainF11say_hello_0_5_code", "Main.say_hello");
-    CheckNoStamp("_CamlU4MainM4TestF5foo_1_6_code", "Main.Test.foo");
-    CheckNoStamp("_CamlU4MainSu15E2e_testml_5_15_300",
-                 "Main.mod(test.ml:5:15)"); // span kept, _300 stripped
-    CheckNoStamp("_CamlU4MainF4mainLu15E2e_mainml_7_32F4fn_4_9_code",
-                 "Main.main.fn(main.ml:7:32).fn");
-    // flat
-    CheckNoStamp("camlFoo__bar_0", "Foo.bar");
-    CheckNoStamp("camlA__B__C__D__func_0", "A.B.C.D.func");
-    CheckNoStamp("camlStdlib__array__map_154", "Stdlib.array.map");
-    CheckNoStamp("camlBuffer$add_string_5_28_code",
-                 "Buffer.add_string"); // internal '_' kept, stamp stripped
-    CheckNoStamp("camlStdlib__anon_fn$5bstdlib$2eml$3a334$2c0$2d$2d54$5d_1453",
-                 "Stdlib.anon_fn[stdlib.ml:334,0--54]"); // span kept
-    // not OxCaml -> nullptr passes through
-    CheckNoStamp("caml_foo", nullptr);
 }
