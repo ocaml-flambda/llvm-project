@@ -201,7 +201,8 @@ DirectCallEdge::DirectCallEdge(const char *symbol_name,
   lazy_callee.symbol_name = symbol_name;
 }
 
-Function *DirectCallEdge::GetCallee(ModuleList &images, ExecutionContext &) {
+Function *DirectCallEdge::GetCallee(ModuleList &images, ExecutionContext &,
+                                   const EntryValueResolutionContext *) {
   ParseSymbolFileAndResolve(images);
   assert(resolved && "Did not resolve lazy callee");
   return lazy_callee.def;
@@ -216,14 +217,15 @@ IndirectCallEdge::IndirectCallEdge(DWARFExpressionList call_target,
                std::move(parameters)),
       call_target(std::move(call_target)) {}
 
-Function *IndirectCallEdge::GetCallee(ModuleList &images,
-                                      ExecutionContext &exe_ctx) {
+Function *
+IndirectCallEdge::GetCallee(ModuleList &images, ExecutionContext &exe_ctx,
+                            const EntryValueResolutionContext *entry_value_ctx) {
   Log *log = GetLog(LLDBLog::Step);
   Status error;
   llvm::Expected<Value> callee_addr_val = call_target.Evaluate(
       &exe_ctx, exe_ctx.GetRegisterContext(), LLDB_INVALID_ADDRESS,
       /*initial_value_ptr=*/nullptr,
-      /*object_address_ptr=*/nullptr);
+      /*object_address_ptr=*/nullptr, entry_value_ctx);
   if (!callee_addr_val) {
     LLDB_LOG_ERROR(log, callee_addr_val.takeError(),
                    "IndirectCallEdge: Could not evaluate expression: {0}");

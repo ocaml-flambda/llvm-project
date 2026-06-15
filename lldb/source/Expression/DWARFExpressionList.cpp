@@ -265,7 +265,8 @@ void DWARFExpressionList::GetDescription(Stream *s,
 llvm::Expected<Value> DWARFExpressionList::Evaluate(
     ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
     lldb::addr_t func_load_addr, const Value *initial_value_ptr,
-    const Value *object_address_ptr) const {
+    const Value *object_address_ptr,
+    const EntryValueResolutionContext *entry_value_ctx) const {
   ModuleSP module_sp = m_module_wp.lock();
   DataExtractor data;
   RegisterKind reg_kind;
@@ -300,5 +301,5 @@ llvm::Expected<Value> DWARFExpressionList::Evaluate(
   reg_kind = expr.GetRegisterKind();
   return DWARFExpression::Evaluate(exe_ctx, reg_ctx, module_sp, data,
                                    m_dwarf_cu, reg_kind, initial_value_ptr,
-                                   object_address_ptr);
+                                   object_address_ptr, entry_value_ctx);
 }

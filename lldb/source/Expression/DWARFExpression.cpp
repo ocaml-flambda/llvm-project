@@ -604,12 +604,12 @@ bool DWARFExpression::LinkThreadLocalStorage(
   return true;
 }
 
-static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
-                                              ExecutionContext *exe_ctx,
-                                              RegisterContext *reg_ctx,
-                                              const DataExtractor &opcodes,
-                                              lldb::offset_t &opcode_offset,
-                                              Log *log) {
+static llvm::Error
+Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
+                           ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
+                           const DataExtractor &opcodes,
+                           lldb::offset_t &opcode_offset, Log *log,
+                           const EntryValueResolutionContext *entry_value_ctx) {
   // DW_OP_entry_value(sub-expr) describes the location a variable had upon
   // function entry: this variable location is presumed to be optimized out at
   // the current PC value.  The caller of the function may have call site
@@ -655,84 +655,113 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   // and evaluates the corresponding location for that parameter in `parent`.
 
   // 1. Find the function which pushed the current frame onto the stack.
-  if ((!exe_ctx || !exe_ctx->HasTargetScope()) || !reg_ctx) {
-    return llvm::createStringError("no exe/reg context");
-  }
-
-  StackFrame *current_frame = exe_ctx->GetFramePtr();
-  Thread *thread = exe_ctx->GetThreadPtr();
-  if (!current_frame || !thread)
-    return llvm::createStringError("no current frame/thread");
+  if (!exe_ctx || !exe_ctx->HasTargetScope())
+    return llvm::createStringError("no exe/target context");
+  // A register context is only needed for the live-stack walk below; an
+  // explicit resolution context carries everything it needs itself.
+  if (!entry_value_ctx && !reg_ctx)
+    return llvm::createStringError("no register context");
 
   Target &target = exe_ctx->GetTargetRef();
-  StackFrameSP parent_frame = nullptr;
-  addr_t return_pc = LLDB_INVALID_ADDRESS;
-  uint32_t current_frame_idx = current_frame->GetFrameIndex();
-
-  for (uint32_t parent_frame_idx = current_frame_idx + 1;; parent_frame_idx++) {
-    parent_frame = thread->GetStackFrameAtIndex(parent_frame_idx);
-    // If this is null, we're at the end of the stack.
-    if (!parent_frame)
-      break;
-
-    // Record the first valid return address, even if this is an inlined frame,
-    // in order to look up the associated call edge in the first non-inlined
-    // parent frame.
-    if (return_pc == LLDB_INVALID_ADDRESS) {
-      return_pc = parent_frame->GetFrameCodeAddress().GetLoadAddress(&target);
-      LLDB_LOG(log, "immediate ancestor with pc = {0:x}", return_pc);
-    }
-
-    // If we've found an inlined frame, skip it (these have no call site
-    // parameters).
-    if (parent_frame->IsInlined())
-      continue;
-
-    // We've found the first non-inlined parent frame.
-    break;
-  }
-  if (!parent_frame || !parent_frame->GetRegisterContext()) {
-    return llvm::createStringError("no parent frame with reg ctx");
-  }
-
-  Function *parent_func =
-      parent_frame->GetSymbolContext(eSymbolContextFunction).function;
-  if (!parent_func)
-    return llvm::createStringError("no parent function");
-
-  // 2. Find the call edge in the parent function responsible for creating the
-  //    current activation.
-  Function *current_func =
-      current_frame->GetSymbolContext(eSymbolContextFunction).function;
-  if (!current_func)
-    return llvm::createStringError("no current function");
-
-  CallEdge *call_edge = nullptr;
   ModuleList &modlist = target.GetImages();
-  ExecutionContext parent_exe_ctx = *exe_ctx;
-  parent_exe_ctx.SetFrameSP(parent_frame);
-  if (!parent_frame->IsArtificial()) {
-    // If the parent frame is not artificial, the current activation may be
-    // produced by an ambiguous tail call. In this case, refuse to proceed.
-    call_edge = parent_func->GetCallEdgeForReturnAddress(return_pc, target);
-    if (!call_edge) {
+
+  // The call edge whose call site parameters describe the entry value, plus how
+  // to evaluate the matched caller-side location: either in a live frame
+  // (\ref caller_frame), or — for a frameless link in a tail-call chain — by
+  // chaining any DW_OP_entry_value it contains through \ref outer_ctx.
+  const CallEdge *call_edge = nullptr;
+  StackFrameSP caller_frame;
+  const EntryValueResolutionContext *outer_ctx = nullptr;
+
+  if (entry_value_ctx) {
+    // Explicit resolution: the referenced function has no live frame (this
+    // happens while synthesizing tail-call frames). Use the supplied edge and
+    // caller context directly. Walking the live stack here is both impossible
+    // (the function has no frame) and unsafe (it would re-enter the stack frame
+    // list while it is being built).
+    call_edge = entry_value_ctx->edge;
+    if (!call_edge)
+      return llvm::createStringError("entry value context has no call edge");
+    if (entry_value_ctx->caller_frame)
+      caller_frame = entry_value_ctx->caller_frame->shared_from_this();
+    outer_ctx = entry_value_ctx->outer;
+    if (!caller_frame && !outer_ctx)
       return llvm::createStringError(
-          llvm::formatv("no call edge for retn-pc = {0:x} in parent frame {1}",
-                        return_pc, parent_func->GetName()));
-    }
-    Function *callee_func = call_edge->GetCallee(modlist, parent_exe_ctx);
-    if (callee_func != current_func) {
-      return llvm::createStringError(
-          "ambiguous call sequence, can't find real parent frame");
-    }
+          "entry value caller is frameless and cannot be resolved");
   } else {
-    // The StackFrameList solver machinery has deduced that an unambiguous tail
-    // call sequence that produced the current activation.  The first edge in
-    // the parent that points to the current function must be valid.
-    for (auto &edge : parent_func->GetTailCallingEdges()) {
-      if (edge->GetCallee(modlist, parent_exe_ctx) == current_func) {
-        call_edge = edge.get();
+    StackFrame *current_frame = exe_ctx->GetFramePtr();
+    Thread *thread = exe_ctx->GetThreadPtr();
+    if (!current_frame || !thread)
+      return llvm::createStringError("no current frame/thread");
+
+    addr_t return_pc = LLDB_INVALID_ADDRESS;
+    uint32_t current_frame_idx = current_frame->GetFrameIndex();
+
+    for (uint32_t parent_frame_idx = current_frame_idx + 1;;
+         parent_frame_idx++) {
+      caller_frame = thread->GetStackFrameAtIndex(parent_frame_idx);
+      // If this is null, we're at the end of the stack.
+      if (!caller_frame)
         break;
+
+      // Record the first valid return address, even if this is an inlined
+      // frame, in order to look up the associated call edge in the first
+      // non-inlined parent frame.
+      if (return_pc == LLDB_INVALID_ADDRESS) {
+        return_pc = caller_frame->GetFrameCodeAddress().GetLoadAddress(&target);
+        LLDB_LOG(log, "immediate ancestor with pc = {0:x}", return_pc);
+      }
+
+      // If we've found an inlined frame, skip it (these have no call site
+      // parameters).
+      if (caller_frame->IsInlined())
+        continue;
+
+      // We've found the first non-inlined parent frame.
+      break;
+    }
+    if (!caller_frame || !caller_frame->GetRegisterContext())
+      return llvm::createStringError("no parent frame with reg ctx");
+
+    Function *parent_func =
+        caller_frame->GetSymbolContext(eSymbolContextFunction).function;
+    if (!parent_func)
+      return llvm::createStringError("no parent function");
+
+    // 2. Find the call edge in the parent function responsible for creating
+    //    the current activation.
+    Function *current_func =
+        current_frame->GetSymbolContext(eSymbolContextFunction).function;
+    if (!current_func)
+      return llvm::createStringError("no current function");
+
+    ExecutionContext parent_exe_ctx = *exe_ctx;
+    parent_exe_ctx.SetFrameSP(caller_frame);
+    if (!caller_frame->IsArtificial()) {
+      // If the parent frame is not artificial, the current activation may be
+      // produced by an ambiguous tail call. In this case, refuse to proceed.
+      CallEdge *return_edge =
+          parent_func->GetCallEdgeForReturnAddress(return_pc, target);
+      if (!return_edge)
+        return llvm::createStringError(llvm::formatv(
+            "no call edge for retn-pc = {0:x} in parent frame {1}", return_pc,
+            parent_func->GetName()));
+      Function *callee_func = return_edge->GetCallee(
+          modlist, parent_exe_ctx, /*entry_value_ctx=*/nullptr);
+      if (callee_func != current_func)
+        return llvm::createStringError(
+            "ambiguous call sequence, can't find real parent frame");
+      call_edge = return_edge;
+    } else {
+      // The StackFrameList solver machinery has deduced that an unambiguous
+      // tail call sequence produced the current activation. The first edge in
+      // the parent that points to the current function must be valid.
+      for (auto &edge : parent_func->GetTailCallingEdges()) {
+        if (edge->GetCallee(modlist, parent_exe_ctx,
+                            /*entry_value_ctx=*/nullptr) == current_func) {
+          call_edge = edge.get();
+          break;
+        }
       }
     }
   }
@@ -779,11 +808,31 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   // subexpresion whenever llvm does.
   const DWARFExpressionList &param_expr = matched_param->LocationInCaller;
 
-  llvm::Expected<Value> maybe_result = param_expr.Evaluate(
-      &parent_exe_ctx, parent_frame->GetRegisterContext().get(),
-      LLDB_INVALID_ADDRESS,
-      /*initial_value_ptr=*/nullptr,
-      /*object_address_ptr=*/nullptr);
+  // Evaluate the caller-side location to obtain the entry value.
+  llvm::Expected<Value> maybe_result =
+      [&]() -> llvm::Expected<Value> {
+    if (caller_frame) {
+      // The caller is a live frame: evaluate the location in it as usual.
+      ExecutionContext caller_exe_ctx = *exe_ctx;
+      caller_exe_ctx.SetFrameSP(caller_frame);
+      return param_expr.Evaluate(&caller_exe_ctx,
+                                 caller_frame->GetRegisterContext().get(),
+                                 LLDB_INVALID_ADDRESS,
+                                 /*initial_value_ptr=*/nullptr,
+                                 /*object_address_ptr=*/nullptr);
+    }
+    // The caller is itself a frameless link in a tail-call chain. Its
+    // registers and stack are gone; only further entry values and constants
+    // can be recovered. Evaluate with no frame and no register context so that
+    // any access to the vanished activation's state fails cleanly, and chain a
+    // nested DW_OP_entry_value to the outer resolution context.
+    ExecutionContext frameless_ctx(exe_ctx->GetTargetSP(),
+                                   /*get_process=*/true);
+    return param_expr.Evaluate(&frameless_ctx, /*reg_ctx=*/nullptr,
+                               LLDB_INVALID_ADDRESS,
+                               /*initial_value_ptr=*/nullptr,
+                               /*object_address_ptr=*/nullptr, outer_ctx);
+  }();
   if (!maybe_result) {
     LLDB_LOG(log,
              "Evaluate_DW_OP_entry_value: call site param evaluation failed");
@@ -800,7 +849,7 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   // later could consult the wrong module.
   if (maybe_result->GetValueType() == Value::ValueType::FileAddress)
     maybe_result->ConvertToLoadAddress(param_expr.GetModule().get(),
-                                       parent_exe_ctx.GetTargetPtr());
+                                       exe_ctx->GetTargetPtr());
 
   stack.push_back(*maybe_result);
   return llvm::Error::success();
@@ -1032,7 +1081,8 @@ static llvm::Error EvaluateOpcodes(
     const lldb::RegisterKind reg_kind, const Value *object_address_ptr,
     DWARFExpression::Stack &stack,
     LocationDescriptionKind &dwarf4_location_description_kind, Value &pieces,
-    uint64_t &op_piece_offset, const uint32_t call_depth) {
+    uint64_t &op_piece_offset, const uint32_t call_depth,
+    const EntryValueResolutionContext *entry_value_ctx) {
   Process *process = nullptr;
   StackFrame *frame = nullptr;
   Target *target = nullptr;
@@ -2307,7 +2357,7 @@ static llvm::Error EvaluateOpcodes(
       if (llvm::Error err = EvaluateOpcodes(
               exe_ctx, reg_ctx, module_sp, callee_opcodes, callee_cu, reg_kind,
               object_address_ptr, stack, dwarf4_location_description_kind,
-              pieces, op_piece_offset, call_depth + 1))
+              pieces, op_piece_offset, call_depth + 1, entry_value_ctx))
         return err;
       break;
     }
@@ -2476,8 +2526,9 @@ static llvm::Error EvaluateOpcodes(
 
     case DW_OP_GNU_entry_value:
     case DW_OP_entry_value: {
-      if (llvm::Error err = Evaluate_DW_OP_entry_value(stack, exe_ctx, reg_ctx,
-                                                       opcodes, offset, log))
+      if (llvm::Error err =
+              Evaluate_DW_OP_entry_value(stack, exe_ctx, reg_ctx, opcodes,
+                                         offset, log, entry_value_ctx))
         return llvm::createStringError(
             "could not evaluate DW_OP_entry_value: %s",
             llvm::toString(std::move(err)).c_str());
@@ -2503,7 +2554,8 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     lldb::ModuleSP module_sp, const DataExtractor &opcodes,
     const DWARFExpression::Delegate *dwarf_cu,
     const lldb::RegisterKind reg_kind, const Value *initial_value_ptr,
-    const Value *object_address_ptr) {
+    const Value *object_address_ptr,
+    const EntryValueResolutionContext *entry_value_ctx) {
 
   if (opcodes.GetByteSize() == 0)
     return llvm::createStringError(
@@ -2526,7 +2578,7 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
   if (llvm::Error err = EvaluateOpcodes(
           exe_ctx, reg_ctx, module_sp, opcodes, dwarf_cu, reg_kind,
           object_address_ptr, stack, dwarf4_location_description_kind, pieces,
-          op_piece_offset, /*call_depth=*/0))
+          op_piece_offset, /*call_depth=*/0, entry_value_ctx))
     return std::move(err);
 
   Log *log = GetLog(LLDBLog::Expressions);

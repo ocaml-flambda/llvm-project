@@ -142,11 +142,11 @@ public:
   /// are file addresses in this module's address space.
   lldb::ModuleSP GetModule() const { return m_module_wp.lock(); }
 
-  llvm::Expected<Value> Evaluate(ExecutionContext *exe_ctx,
-                                 RegisterContext *reg_ctx,
-                                 lldb::addr_t func_load_addr,
-                                 const Value *initial_value_ptr,
-                                 const Value *object_address_ptr) const;
+  llvm::Expected<Value>
+  Evaluate(ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
+           lldb::addr_t func_load_addr, const Value *initial_value_ptr,
+           const Value *object_address_ptr,
+           const EntryValueResolutionContext *entry_value_ctx = nullptr) const;
 
 private:
   // RangeDataVector requires a comparator for DWARFExpression, but it doesn't

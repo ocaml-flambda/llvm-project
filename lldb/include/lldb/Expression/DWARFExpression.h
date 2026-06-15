@@ -24,6 +24,49 @@
 
 namespace lldb_private {
 
+class CallEdge;
+
+/// Context for resolving a DW_OP_entry_value that refers to the entry of a
+/// function which is not represented by a live stack frame.
+///
+/// Normally DW_OP_entry_value is resolved by walking the live call stack from
+/// the frame being evaluated up to its caller, then finding the call site that
+/// produced the activation (see Evaluate_DW_OP_entry_value). That walk is
+/// impossible while the stack frame list is still being built, which is when
+/// tail-call frames are synthesized: the function whose entry value is
+/// referenced was reached through the static call graph and has no frame of
+/// its own to walk back from, and re-entering the frame list would deadlock.
+///
+/// This structure supplies that information explicitly instead. \ref edge is
+/// the call that produced the activation whose entry is referenced; its call
+/// site parameters map a callee-side location (matched against the
+/// DW_OP_entry_value sub-expression) to a caller-side location. That
+/// caller-side location is then evaluated either in \ref caller_frame, when
+/// the caller is a live frame, or — when the caller is itself a frameless link
+/// in a tail-call chain — by recursively resolving any DW_OP_entry_value it
+/// contains against \ref outer, chaining back through the tail-call chain until
+/// a live frame is reached.
+///
+/// A frameless caller can only contribute values that are themselves further
+/// entry values or constants. If its caller-side location needs state that a
+/// vanished activation cannot provide (a register, frame base, or stack slot),
+/// evaluation fails rather than producing an unreliable value.
+struct EntryValueResolutionContext {
+  /// The call edge whose call site parameters describe the entry value. Never
+  /// null in a well-formed context.
+  const CallEdge *edge = nullptr;
+
+  /// The live frame of the caller (the function containing \ref edge's call
+  /// site), or null when that caller is itself a frameless link in a tail-call
+  /// chain.
+  StackFrame *caller_frame = nullptr;
+
+  /// When \ref caller_frame is null, how to resolve a DW_OP_entry_value that
+  /// appears within the caller-side location expression. A null \ref outer
+  /// together with a null \ref caller_frame means the chain cannot be resolved.
+  const EntryValueResolutionContext *outer = nullptr;
+};
+
 /// \class DWARFExpressionDelegate DWARFExpression.h
 /// "lldb/Expression/DWARFExpression.h" Interface through which the DWARF
 /// expression evaluator accesses the DWARF unit that contains the expression
@@ -225,11 +268,17 @@ public:
   /// \return
   ///     True on success; false otherwise.  If error_ptr is non-NULL,
   ///     details of the failure are provided through it.
+  /// \param[in] entry_value_ctx
+  ///     Optional explicit context for resolving a DW_OP_entry_value whose
+  ///     referenced function has no live stack frame (used while synthesizing
+  ///     tail-call frames). When null, DW_OP_entry_value is resolved by walking
+  ///     the live call stack instead. \see EntryValueResolutionContext.
   static llvm::Expected<Value>
   Evaluate(ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
            lldb::ModuleSP module_sp, const DataExtractor &opcodes,
            const Delegate *dwarf_cu, const lldb::RegisterKind reg_set,
-           const Value *initial_value_ptr, const Value *object_address_ptr);
+           const Value *initial_value_ptr, const Value *object_address_ptr,
+           const EntryValueResolutionContext *entry_value_ctx = nullptr);
 
   /// Materialize the value an implicit pointer points at.
   ///
