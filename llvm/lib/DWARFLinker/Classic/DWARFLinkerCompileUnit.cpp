@@ -136,8 +136,9 @@ uint64_t CompileUnit::computeNextUnitOffset(uint16_t DwarfVersion) {
 /// Keep track of a forward cross-cu reference from this unit
 /// to \p Die that lives in \p RefUnit.
 void CompileUnit::noteForwardReference(DIE *Die, const CompileUnit *RefUnit,
-                                       DeclContext *Ctxt, PatchLocation Attr) {
-  ForwardDIEReferences.emplace_back(Die, RefUnit, Ctxt, Attr);
+                                       DeclContext *Ctxt, PatchLocation Attr,
+                                       bool SectionRelative) {
+  ForwardDIEReferences.emplace_back(Die, RefUnit, Ctxt, Attr, SectionRelative);
 }
 
 void CompileUnit::fixupForwardReferences() {
@@ -146,14 +147,20 @@ void CompileUnit::fixupForwardReferences() {
     const CompileUnit *RefUnit;
     PatchLocation Attr;
     DeclContext *Ctxt;
-    std::tie(RefDie, RefUnit, Ctxt, Attr) = Ref;
+    bool SectionRelative;
+    std::tie(RefDie, RefUnit, Ctxt, Attr, SectionRelative) = Ref;
     if (Ctxt && Ctxt->hasCanonicalDIE()) {
       assert(Ctxt->getCanonicalDIEOffset() &&
              "Canonical die offset is not set");
       Attr.set(Ctxt->getCanonicalDIEOffset());
     } else {
       assert(RefDie->getOffset() && "Referenced die offset is not set");
-      Attr.set(RefDie->getOffset() + RefUnit->getStartOffset());
+      // CU-relative references (DW_OP_call2/call4 in a DWARF expression) use
+      // the offset of the DIE within its unit; everything else is an absolute
+      // .debug_info offset.
+      Attr.set(SectionRelative
+                   ? RefDie->getOffset() + RefUnit->getStartOffset()
+                   : RefDie->getOffset());
     }
   }
 }

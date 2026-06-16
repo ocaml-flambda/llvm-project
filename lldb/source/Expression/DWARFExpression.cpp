@@ -672,6 +672,11 @@ Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   const CallEdge *call_edge = nullptr;
   StackFrameSP caller_frame;
   const EntryValueResolutionContext *outer_ctx = nullptr;
+  // Backing storage for an [outer_ctx] synthesized in the live-stack-walk path
+  // below, when the current activation was entered by a tail call from a
+  // frameless function that the (live) parent frame called. Kept at function
+  // scope so [outer_ctx] remains valid through the parameter evaluation.
+  std::optional<EntryValueResolutionContext> tail_link_ctx;
 
   if (entry_value_ctx) {
     // Explicit resolution: the referenced function has no live frame (this
@@ -738,8 +743,9 @@ Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
     ExecutionContext parent_exe_ctx = *exe_ctx;
     parent_exe_ctx.SetFrameSP(caller_frame);
     if (!caller_frame->IsArtificial()) {
-      // If the parent frame is not artificial, the current activation may be
-      // produced by an ambiguous tail call. In this case, refuse to proceed.
+      // The parent frame is not artificial, so the current activation was
+      // produced either by a direct call from the parent, or by a tail call
+      // from a frameless function that the parent called.
       CallEdge *return_edge =
           parent_func->GetCallEdgeForReturnAddress(return_pc, target);
       if (!return_edge)
@@ -748,10 +754,43 @@ Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
             parent_func->GetName()));
       Function *callee_func = return_edge->GetCallee(
           modlist, parent_exe_ctx, /*entry_value_ctx=*/nullptr);
-      if (callee_func != current_func)
+      if (callee_func == current_func) {
+        // The parent called the current function directly.
+        call_edge = return_edge;
+      } else if (callee_func) {
+        // The parent called \ref callee_func, which is not the current function
+        // but may have entered it by a tail call, leaving no frame of its own
+        // (e.g. a thunk or a partial-application veneer that loads its arguments
+        // and tail-calls the real callee). Find the unique tail-calling edge
+        // from \ref callee_func to the current function and resolve the entry
+        // value through it. That edge is frameless: \ref callee_func's own entry
+        // values, and any indirect callee it names, chain back through \ref
+        // return_edge to this live parent frame.
+        tail_link_ctx = EntryValueResolutionContext{
+            return_edge, caller_frame.get(), /*outer=*/nullptr};
+        for (auto &edge : callee_func->GetTailCallingEdges()) {
+          if (edge->GetCallee(modlist, parent_exe_ctx, &*tail_link_ctx) !=
+              current_func)
+            continue;
+          if (call_edge) {
+            // More than one tail call reaches the current function: ambiguous.
+            call_edge = nullptr;
+            break;
+          }
+          call_edge = edge.get();
+        }
+        if (!call_edge)
+          return llvm::createStringError(
+              "ambiguous call sequence, can't find real parent frame");
+        // \ref callee_func has no live frame; evaluate the matched parameter as
+        // a frameless tail-call link chained to the parent via \ref return_edge.
+        caller_frame = nullptr;
+        outer_ctx = &*tail_link_ctx;
+      } else {
+        // The parent's indirect call target could not be resolved.
         return llvm::createStringError(
             "ambiguous call sequence, can't find real parent frame");
-      call_edge = return_edge;
+      }
     } else {
       // The StackFrameList solver machinery has deduced that an unambiguous
       // tail call sequence produced the current activation. The first edge in
