@@ -692,11 +692,18 @@ private:
     /// Clone a DWARF expression that may be referencing another DIE. Any DIE
     /// references found in the expression are appended to \p References so the
     /// caller can emit them as patchable values.
+    ///
+    /// When \p RelocateExprLocAddr is true the expression is part of a location
+    /// list (.debug_loc/.debug_loclists), whose address operands are not
+    /// relocated by applyValidRelocs; any DW_OP_addr operand is then translated
+    /// to its linked address via the debug map. For exprlocs in .debug_info it
+    /// must be false, as those operands are relocated by applyValidRelocs.
     void cloneExpression(DataExtractor &Data, DWARFExpression Expression,
                          const DWARFFile &File, CompileUnit &Unit,
                          SmallVectorImpl<uint8_t> &OutputBuffer,
                          int64_t AddrRelocAdjustment, bool IsLittleEndian,
-                         SmallVectorImpl<ExpressionDIEReference> &References);
+                         SmallVectorImpl<ExpressionDIEReference> &References,
+                         bool RelocateExprLocAddr = false);
 
     /// Clone an attribute referencing another DIE and add
     /// it to \p Die.

@@ -1222,7 +1222,8 @@ void DWARFLinker::DIECloner::cloneExpression(
     DataExtractor &Data, DWARFExpression Expression, const DWARFFile &File,
     CompileUnit &Unit, SmallVectorImpl<uint8_t> &OutputBuffer,
     int64_t AddrRelocAdjustment, bool IsLittleEndian,
-    SmallVectorImpl<ExpressionDIEReference> &References) {
+    SmallVectorImpl<ExpressionDIEReference> &References,
+    bool RelocateExprLocAddr) {
   using Encoding = DWARFExpression::Operation::Encoding;
 
   uint8_t OrigAddressByteSize = Unit.getOrigUnit().getAddressByteSize();
@@ -1370,6 +1371,32 @@ void DWARFLinker::DIECloner::cloneExpression(
         }
       } else
         Linker.reportWarning("cannot read DW_OP_constx operand.", File);
+    } else if (RelocateExprLocAddr && Op.getCode() == dwarf::DW_OP_addr) {
+      // A DW_OP_addr operand inside a location list carries the object-file
+      // address of a symbol (e.g. a statically-allocated OCaml closure).
+      // Location lists are not relocated by applyValidRelocs, so translate the
+      // operand to its linked address via the debug map here. (For exprlocs in
+      // .debug_info, RelocateExprLocAddr is false and the operand is relocated
+      // by applyValidRelocs instead, so this must not run for them.)
+      uint64_t ObjectAddress = Op.getRawOperand(0);
+      std::optional<uint64_t> LinkedAddress;
+      if (File.Addresses)
+        LinkedAddress =
+            File.Addresses->getExprOpAddressLinkedAddress(ObjectAddress);
+      if (LinkedAddress) {
+        OutputBuffer.push_back(dwarf::DW_OP_addr);
+        uint64_t Address = *LinkedAddress;
+        if (IsLittleEndian != sys::IsLittleEndianHost)
+          sys::swapByteOrder(Address);
+        ArrayRef<uint8_t> AddressBytes(
+            reinterpret_cast<const uint8_t *>(&Address), OrigAddressByteSize);
+        OutputBuffer.append(AddressBytes.begin(), AddressBytes.end());
+      } else {
+        // Unknown address; copy the operation unmodified rather than emit a
+        // bogus value.
+        StringRef Bytes = Data.getData().slice(OpOffset, Op.getEndOffset());
+        OutputBuffer.append(Bytes.begin(), Bytes.end());
+      }
     } else if (Op.getCode() == dwarf::DW_OP_call_ref ||
                Op.getCode() == dwarf::DW_OP_implicit_pointer ||
                Op.getCode() == dwarf::DW_OP_GNU_implicit_pointer) {
@@ -2905,7 +2932,8 @@ uint64_t DWARFLinker::DIECloner::cloneAllCompileUnits(
                         DWARFExpression(Data, OrigUnit.getAddressByteSize(),
                                         OrigUnit.getFormParams().Format),
                         File, *CurrentUnit, OutBytes, RelocAdjustment,
-                        IsLittleEndian, References);
+                        IsLittleEndian, References,
+                        /*RelocateExprLocAddr=*/true);
         // Location lists are written straight into the section and cannot be
         // patched afterwards, so resolve any DIE references now. The current
         // unit (and all earlier units) have already been fully cloned, so the

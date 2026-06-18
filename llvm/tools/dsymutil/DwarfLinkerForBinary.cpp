@@ -591,7 +591,54 @@ void DwarfLinkerForBinary::copySwiftReflectionMetadata(
   }
 }
 
+void DwarfLinkerForBinary::buildMainBinarySymbolMap(const DebugMap &Map) {
+  if (Map.getBinaryPath().empty())
+    return;
+
+  auto ObjectEntry = BinHolder.getObjectEntry(Map.getBinaryPath());
+  if (!ObjectEntry) {
+    consumeError(ObjectEntry.takeError());
+    return;
+  }
+
+  auto Object =
+      ObjectEntry->getObjectAs<object::MachOObjectFile>(Map.getTriple());
+  if (!Object) {
+    consumeError(Object.takeError());
+    return;
+  }
+
+  for (const object::SymbolRef &Sym : Object->symbols()) {
+    Expected<uint32_t> FlagsOrErr = Sym.getFlags();
+    if (!FlagsOrErr) {
+      consumeError(FlagsOrErr.takeError());
+      continue;
+    }
+    // Undefined symbols have no address in this binary.
+    if (*FlagsOrErr & object::SymbolRef::SF_Undefined)
+      continue;
+
+    Expected<StringRef> NameOrErr = Sym.getName();
+    if (!NameOrErr) {
+      consumeError(NameOrErr.takeError());
+      continue;
+    }
+    if (NameOrErr->empty())
+      continue;
+
+    Expected<uint64_t> AddrOrErr = Sym.getValue();
+    if (!AddrOrErr) {
+      consumeError(AddrOrErr.takeError());
+      continue;
+    }
+
+    MainBinarySymbolAddresses[*NameOrErr] = *AddrOrErr;
+  }
+}
+
 bool DwarfLinkerForBinary::link(const DebugMap &Map) {
+  buildMainBinarySymbolMap(Map);
+
   if (Options.DWARFLinkerType == DsymutilDWARFLinkerType::Parallel)
     return linkImpl<parallel::DWARFLinker>(Map, Options.FileType);
 
@@ -958,6 +1005,16 @@ void DwarfLinkerForBinary::AddressManager::findValidRelocsMachO(
       if (const auto *Mapping = DMO.lookupSymbol(*SymbolName))
         ValidRelocs.emplace_back(Offset64, RelocSize, Addend, Mapping->getKey(),
                                  Mapping->getValue());
+      else if (auto GlobalIt = Linker.MainBinarySymbolAddresses.find(*SymbolName);
+               GlobalIt != Linker.MainBinarySymbolAddresses.end())
+        // Cross-module reference: the target symbol is defined in another
+        // object and so is absent from this object's debug map. Resolve it via
+        // the linked binary's global symbol table instead. The addend (0 for a
+        // plain symbol reference) is preserved; [relocate] computes
+        // BinaryAddress + Addend.
+        ValidRelocs.emplace_back(
+            Offset64, RelocSize, Addend, *SymbolName,
+            SymbolMapping(std::nullopt, GlobalIt->getValue(), 0));
     } else if (const auto *Mapping = DMO.lookupObjectAddress(SymAddress)) {
       // Do not store the addend. The addend was the address of the symbol in
       // the object file, the address in the binary that is stored in the debug
@@ -1114,6 +1171,27 @@ DwarfLinkerForBinary::AddressManager::getExprOpAddressRelocAdjustment(
   } break;
   }
 
+  return std::nullopt;
+}
+
+std::optional<uint64_t>
+DwarfLinkerForBinary::AddressManager::getExprOpAddressLinkedAddress(
+    uint64_t ObjectAddress) {
+  if (!DbgMapObj)
+    return std::nullopt;
+  // The debug map records, for each symbol, its address in the object file and
+  // in the linked binary. A DW_OP_addr operand inside a location list holds the
+  // object-file address of such a symbol (e.g. a statically-allocated OCaml
+  // closure), so translate it to the corresponding linked address.
+  if (const DebugMapObject::DebugMapEntry *Mapping =
+          DbgMapObj->lookupObjectAddress(ObjectAddress)) {
+    uint64_t SymObjectAddress =
+        Mapping->getValue().ObjectAddress
+            ? uint64_t(*Mapping->getValue().ObjectAddress)
+            : ObjectAddress;
+    return uint64_t(Mapping->getValue().BinaryAddress) +
+           (ObjectAddress - SymObjectAddress);
+  }
   return std::nullopt;
 }
 
