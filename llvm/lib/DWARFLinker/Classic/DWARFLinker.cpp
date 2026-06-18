@@ -630,6 +630,10 @@ unsigned DWARFLinker::shouldKeepDIE(AddressesMap &RelocMgr, const DWARFDie &DIE,
   case dwarf::DW_TAG_base_type:
     // DWARF Expressions may reference basic types, but scanning them
     // is expensive. Basic types are tiny, so just keep all of them.
+  case dwarf::DW_TAG_dwarf_procedure:
+    // DWARF procedures are the targets of DW_OP_call2/call4/call_ref. Those
+    // calls can appear in location lists, which the keep-analysis does not
+    // scan, so keep all procedures (they are small) to be safe.
   case dwarf::DW_TAG_imported_module:
   case dwarf::DW_TAG_imported_declaration:
   case dwarf::DW_TAG_imported_unit:
@@ -738,6 +742,57 @@ void DWARFLinker::markODRCanonicalDie(const DWARFDie &Die, CompileUnit &CU) {
     Info.Ctxt->setHasCanonicalDIE();
 }
 
+/// Collect DIEs referenced by DWARF expression operands inside the location
+/// expression \p Val and append them to \p ReferencedDIEs. DW_OP_call2/call4,
+/// DW_OP_call_ref and DW_OP_implicit_pointer (and its GNU predecessor) all
+/// carry a reference to another DIE; those targets must be kept so that
+/// DIECloner::cloneExpression() can later remap the reference to its new
+/// location instead of emitting a dangling offset.
+static void collectExpressionReferencedDIEs(
+    const DWARFFormValue &Val, CompileUnit &CU, const UnitListTy &Units,
+    SmallVectorImpl<std::pair<DWARFDie, CompileUnit &>> &ReferencedDIEs) {
+  std::optional<ArrayRef<uint8_t>> Expr = Val.getAsBlock();
+  if (!Expr || Expr->empty())
+    return;
+
+  DWARFUnit &Unit = CU.getOrigUnit();
+  DataExtractor Data(toStringRef(*Expr), Unit.getContext().isLittleEndian(),
+                     Unit.getAddressByteSize());
+  DWARFExpression Expression(Data, Unit.getAddressByteSize(),
+                             Unit.getFormParams().Format);
+
+  for (const DWARFExpression::Operation &Op : Expression) {
+    if (Op.isError())
+      break;
+
+    uint64_t RefOffset;
+    switch (Op.getCode()) {
+    case dwarf::DW_OP_call2:
+    case dwarf::DW_OP_call4:
+      // Compilation-unit-relative reference (DW_FORM_ref2/ref4-like).
+      RefOffset = Unit.getOffset() + Op.getRawOperand(0);
+      break;
+    case dwarf::DW_OP_call_ref:
+    case dwarf::DW_OP_implicit_pointer:
+    case dwarf::DW_OP_GNU_implicit_pointer:
+      // Section-relative reference (DW_FORM_ref_addr-like).
+      RefOffset = Op.getRawOperand(0);
+      break;
+    default:
+      continue;
+    }
+
+    CompileUnit *RefUnit = getUnitForOffset(Units, RefOffset);
+    if (!RefUnit)
+      continue;
+    DWARFDie RefDie = RefUnit->getOrigUnit().getDIEForOffset(RefOffset);
+    if (!RefDie || RefDie.isNULL())
+      continue;
+    RefUnit->getInfo(RefDie).Prune = false;
+    ReferencedDIEs.emplace_back(RefDie, *RefUnit);
+  }
+}
+
 /// Look at DIEs referenced by the given DIE and decide whether they should be
 /// kept. All DIEs referenced though attributes should be kept.
 void DWARFLinker::lookForRefDIEsToKeep(
@@ -757,8 +812,18 @@ void DWARFLinker::lookForRefDIEsToKeep(
     DWARFFormValue Val(AttrSpec.Form);
     if (!Val.isFormClass(DWARFFormValue::FC_Reference) ||
         AttrSpec.Attr == dwarf::DW_AT_sibling) {
-      DWARFFormValue::skipValue(AttrSpec.Form, Data, &Offset,
-                                Unit.getFormParams());
+      // A location expression may reference other DIEs through DW_OP_call* and
+      // DW_OP_implicit_pointer; those targets must be kept too. Everything else
+      // is skipped.
+      if (DWARFAttribute::mayHaveLocationExpr(AttrSpec.Attr) &&
+          (Val.isFormClass(DWARFFormValue::FC_Block) ||
+           Val.isFormClass(DWARFFormValue::FC_Exprloc))) {
+        Val.extractValue(Data, &Offset, Unit.getFormParams(), &Unit);
+        collectExpressionReferencedDIEs(Val, CU, Units, ReferencedDIEs);
+      } else {
+        DWARFFormValue::skipValue(AttrSpec.Form, Data, &Offset,
+                                  Unit.getFormParams());
+      }
       continue;
     }
 
@@ -1156,10 +1221,50 @@ unsigned DWARFLinker::DIECloner::cloneDieReferenceAttribute(
 void DWARFLinker::DIECloner::cloneExpression(
     DataExtractor &Data, DWARFExpression Expression, const DWARFFile &File,
     CompileUnit &Unit, SmallVectorImpl<uint8_t> &OutputBuffer,
-    int64_t AddrRelocAdjustment, bool IsLittleEndian) {
+    int64_t AddrRelocAdjustment, bool IsLittleEndian,
+    SmallVectorImpl<ExpressionDIEReference> &References,
+    bool RelocateExprLocAddr) {
   using Encoding = DWARFExpression::Operation::Encoding;
 
   uint8_t OrigAddressByteSize = Unit.getOrigUnit().getAddressByteSize();
+
+  // Record a reference to the DIE at original .debug_info offset \p AbsOffset
+  // and reserve \p Size zero bytes for the operand in the output buffer. The
+  // referenced DIE's clone may not exist yet (forward reference), so a
+  // placeholder is created if needed and the final offset is filled in by
+  // CompileUnit::fixupForwardReferences() once all DIEs are cloned. With
+  // \p SectionRelative the patched value is an absolute .debug_info offset
+  // (DW_FORM_ref_addr-like); otherwise it is relative to the start of the
+  // referenced unit (DW_FORM_ref2/ref4-like).
+  auto AppendDIEReference = [&](uint64_t AbsOffset, unsigned Size,
+                                bool SectionRelative, const Twine &Kind) {
+    DIE *RefClone = nullptr;
+    CompileUnit *RefUnit = getUnitForOffset(CompileUnits, AbsOffset);
+    DWARFDie RefDie =
+        RefUnit ? RefUnit->getOrigUnit().getDIEForOffset(AbsOffset) : DWARFDie();
+    if (!RefUnit || !RefDie || RefDie.isNULL()) {
+      Linker.reportWarning(Kind + " references an unknown DIE.", File);
+    } else {
+      CompileUnit::DIEInfo &Info = RefUnit->getInfo(RefDie);
+      if (!Info.Keep) {
+        Linker.reportWarning(Kind + " references a DIE that was not kept.",
+                             File);
+      } else {
+        if (!Info.Clone) {
+          // Forward (or not-yet-cloned) reference: create the placeholder the
+          // real clone will reuse, exactly like cloneDieReferenceAttribute().
+          Info.UnclonedReference = true;
+          Info.Clone = DIE::get(DIEAlloc, dwarf::Tag(RefDie.getTag()));
+        }
+        RefClone = Info.Clone;
+      }
+    }
+
+    if (RefClone)
+      References.push_back({OutputBuffer.size(), static_cast<uint8_t>(Size),
+                            RefClone, RefUnit, SectionRelative});
+    OutputBuffer.append(Size, uint8_t(0));
+  };
 
   uint64_t OpOffset = 0;
   for (auto &Op : Expression) {
@@ -1266,6 +1371,59 @@ void DWARFLinker::DIECloner::cloneExpression(
         }
       } else
         Linker.reportWarning("cannot read DW_OP_constx operand.", File);
+    } else if (RelocateExprLocAddr && Op.getCode() == dwarf::DW_OP_addr) {
+      // A DW_OP_addr operand inside a location list carries the object-file
+      // address of a symbol (e.g. a statically-allocated OCaml closure).
+      // Location lists are not relocated by applyValidRelocs, so translate the
+      // operand to its linked address via the debug map here. (For exprlocs in
+      // .debug_info, RelocateExprLocAddr is false and the operand is relocated
+      // by applyValidRelocs instead, so this must not run for them.)
+      uint64_t ObjectAddress = Op.getRawOperand(0);
+      std::optional<uint64_t> LinkedAddress;
+      if (File.Addresses)
+        LinkedAddress =
+            File.Addresses->getExprOpAddressLinkedAddress(ObjectAddress);
+      if (LinkedAddress) {
+        OutputBuffer.push_back(dwarf::DW_OP_addr);
+        uint64_t Address = *LinkedAddress;
+        if (IsLittleEndian != sys::IsLittleEndianHost)
+          sys::swapByteOrder(Address);
+        ArrayRef<uint8_t> AddressBytes(
+            reinterpret_cast<const uint8_t *>(&Address), OrigAddressByteSize);
+        OutputBuffer.append(AddressBytes.begin(), AddressBytes.end());
+      } else {
+        // Unknown address; copy the operation unmodified rather than emit a
+        // bogus value.
+        StringRef Bytes = Data.getData().slice(OpOffset, Op.getEndOffset());
+        OutputBuffer.append(Bytes.begin(), Bytes.end());
+      }
+    } else if (Op.getCode() == dwarf::DW_OP_call_ref ||
+               Op.getCode() == dwarf::DW_OP_implicit_pointer ||
+               Op.getCode() == dwarf::DW_OP_GNU_implicit_pointer) {
+      // These take a .debug_info-section-relative reference to a DIE
+      // (interpreted like DW_FORM_ref_addr) as their first operand.
+      // DW_OP_implicit_pointer additionally carries a trailing SLEB128 byte
+      // offset, copied unmodified. The reference is recorded for deferred
+      // patching so it is correct even for forward references. The operand
+      // width matches what the decoder consumed (DWARF32 vs DWARF64).
+      unsigned RefSize = Op.getOperandEndOffset(0) - (OpOffset + 1);
+      OutputBuffer.push_back(Op.getCode());
+      AppendDIEReference(Op.getRawOperand(0), RefSize, /*SectionRelative=*/true,
+                         dwarf::OperationEncodingString(Op.getCode()));
+      StringRef Tail =
+          Data.getData().slice(Op.getOperandEndOffset(0), Op.getEndOffset());
+      OutputBuffer.append(Tail.begin(), Tail.end());
+    } else if (Op.getCode() == dwarf::DW_OP_call2 ||
+               Op.getCode() == dwarf::DW_OP_call4) {
+      // DW_OP_call2/call4 take a compilation-unit-relative reference to a DIE
+      // (interpreted like DW_FORM_ref2/ref4), encoded as a fixed 2- or 4-byte
+      // value. Record it for deferred patching to the cloned DIE's new
+      // unit-relative offset.
+      unsigned RefSize = Op.getOperandEndOffset(0) - (OpOffset + 1);
+      uint64_t AbsOffset = Op.getRawOperand(0) + Unit.getOrigUnit().getOffset();
+      OutputBuffer.push_back(Op.getCode());
+      AppendDIEReference(AbsOffset, RefSize, /*SectionRelative=*/false,
+                         dwarf::OperationEncodingString(Op.getCode()));
     } else {
       // Copy over everything else unmodified.
       StringRef Bytes = Data.getData().slice(OpOffset, Op.getEndOffset());
@@ -1297,6 +1455,7 @@ unsigned DWARFLinker::DIECloner::cloneBlockAttribute(
   // If the block is a DWARF Expression, clone it into the temporary
   // buffer using cloneExpression(), otherwise copy the data directly.
   SmallVector<uint8_t, 32> Buffer;
+  SmallVector<ExpressionDIEReference, 4> References;
   ArrayRef<uint8_t> Bytes = *Val.getAsBlock();
   if (DWARFAttribute::mayHaveLocationExpr(AttrSpec.Attr) &&
       (Val.isFormClass(DWARFFormValue::FC_Block) ||
@@ -1306,12 +1465,32 @@ unsigned DWARFLinker::DIECloner::cloneBlockAttribute(
     DWARFExpression Expr(Data, OrigUnit.getAddressByteSize(),
                          OrigUnit.getFormParams().Format);
     cloneExpression(Data, Expr, File, Unit, Buffer,
-                    Unit.getInfo(InputDIE).AddrAdjust, IsLittleEndian);
+                    Unit.getInfo(InputDIE).AddrAdjust, IsLittleEndian,
+                    References);
     Bytes = Buffer;
   }
-  for (auto Byte : Bytes)
-    Attr->addValue(DIEAlloc, static_cast<dwarf::Attribute>(0),
-                   dwarf::DW_FORM_data1, DIEInteger(Byte));
+  // Emit the expression bytes as DIE values. DIE references collected by
+  // cloneExpression() are emitted as a single patchable integer and recorded
+  // for fixup once DIE offsets are final; all other bytes are emitted as
+  // individual DW_FORM_data1 values.
+  size_t NextRef = 0;
+  for (size_t I = 0, E = Bytes.size(); I != E;) {
+    if (NextRef < References.size() && References[NextRef].BufferOffset == I) {
+      const ExpressionDIEReference &Ref = References[NextRef++];
+      dwarf::Form Form = Ref.Size == 2   ? dwarf::DW_FORM_data2
+                         : Ref.Size == 4 ? dwarf::DW_FORM_data4
+                                         : dwarf::DW_FORM_data8;
+      auto Patch = Attr->addValue(DIEAlloc, static_cast<dwarf::Attribute>(0),
+                                  Form, DIEInteger(0));
+      Unit.noteForwardReference(Ref.RefDie, Ref.RefUnit, /*Ctxt=*/nullptr, Patch,
+                                Ref.SectionRelative);
+      I += Ref.Size;
+    } else {
+      Attr->addValue(DIEAlloc, static_cast<dwarf::Attribute>(0),
+                     dwarf::DW_FORM_data1, DIEInteger(Bytes[I]));
+      ++I;
+    }
+  }
 
   // FIXME: If DIEBlock and DIELoc just reuses the Size field of
   // the DIE class, this "if" could be replaced by
@@ -2748,11 +2927,35 @@ uint64_t DWARFLinker::DIECloner::cloneAllCompileUnits(
         DWARFUnit &OrigUnit = CurrentUnit->getOrigUnit();
         DataExtractor Data(SrcBytes, IsLittleEndian,
                            OrigUnit.getAddressByteSize());
+        SmallVector<ExpressionDIEReference, 4> References;
         cloneExpression(Data,
                         DWARFExpression(Data, OrigUnit.getAddressByteSize(),
                                         OrigUnit.getFormParams().Format),
                         File, *CurrentUnit, OutBytes, RelocAdjustment,
-                        IsLittleEndian);
+                        IsLittleEndian, References,
+                        /*RelocateExprLocAddr=*/true);
+        // Location lists are written straight into the section and cannot be
+        // patched afterwards, so resolve any DIE references now. The current
+        // unit (and all earlier units) have already been fully cloned, so the
+        // referenced DIE offsets are final. A reference into a not-yet-cloned
+        // later unit is left unresolved, with a warning.
+        for (const ExpressionDIEReference &Ref : References) {
+          uint64_t TargetOffset = Ref.RefDie->getOffset();
+          if (!TargetOffset) {
+            Linker.reportWarning("DWARF expression in a location list "
+                                 "references a DIE in a later unit; reference "
+                                 "left unresolved.",
+                                 File);
+            continue;
+          }
+          if (Ref.SectionRelative)
+            TargetOffset += Ref.RefUnit->getStartOffset();
+          for (unsigned I = 0; I != Ref.Size; ++I) {
+            unsigned Shift = IsLittleEndian ? I : Ref.Size - 1 - I;
+            OutBytes[Ref.BufferOffset + I] =
+                (TargetOffset >> (8 * Shift)) & 0xff;
+          }
+        }
       };
       generateUnitLocations(*CurrentUnit, File, ProcessExpr);
       emitDebugAddrSection(*CurrentUnit, DwarfVersion);

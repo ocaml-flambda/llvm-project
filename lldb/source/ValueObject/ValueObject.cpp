@@ -311,6 +311,12 @@ const char *ValueObject::GetLocationAsCStringImpl(const Value &value,
           m_location_str = "scalar";
         break;
 
+      case Value::ValueType::ImplicitPointer:
+        // The pointer was optimized away; it has no numeric value (which is
+        // distinct from having the value zero).
+        m_location_str = "implicit pointer";
+        break;
+
       case Value::ValueType::LoadAddress:
       case Value::ValueType::FileAddress:
       case Value::ValueType::HostAddress: {
@@ -800,6 +806,10 @@ bool ValueObject::SetData(DataExtractor &data, Status &error) {
   switch (value_type) {
   case Value::ValueType::Invalid:
     error = Status::FromErrorString("invalid location");
+    return false;
+  case Value::ValueType::ImplicitPointer:
+    error = Status::FromErrorString(
+        "cannot modify the value of an implicit pointer");
     return false;
   case Value::ValueType::Scalar: {
     Status set_error =
@@ -1607,6 +1617,7 @@ ValueObject::GetAddressOf(bool scalar_is_load_address) {
 
   switch (m_value.GetValueType()) {
   case Value::ValueType::Invalid:
+  case Value::ValueType::ImplicitPointer:
     return {};
   case Value::ValueType::Scalar:
     if (scalar_is_load_address) {
@@ -1631,6 +1642,11 @@ ValueObject::AddrAndType ValueObject::GetPointerValue() {
 
   switch (m_value.GetValueType()) {
   case Value::ValueType::Invalid:
+    return {};
+  case Value::ValueType::ImplicitPointer:
+    // The pointer was optimized away and has no numeric value. Returning
+    // the invalid address (and not zero) keeps this case distinct from a
+    // pointer whose value is a null pointer.
     return {};
   case Value::ValueType::Scalar:
     return {m_value.GetScalar().ULongLong(LLDB_INVALID_ADDRESS),
@@ -1727,6 +1743,10 @@ bool ValueObject::SetValueFromCString(const char *value_str, Status &error) {
       } break;
       case Value::ValueType::Invalid:
         error = Status::FromErrorString("invalid location");
+        return false;
+      case Value::ValueType::ImplicitPointer:
+        error = Status::FromErrorString(
+            "cannot modify the value of an implicit pointer");
         return false;
       case Value::ValueType::FileAddress:
       case Value::ValueType::Scalar:

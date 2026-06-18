@@ -177,7 +177,13 @@ static void FindInterveningFrames(Function &begin, Function &end,
   }
 
   // The first callee may not be resolved, or there may be nothing to fill in.
-  Function *first_callee = first_edge->GetCallee(images, exe_ctx);
+  // No explicit entry-value resolution context applies here: a DW_OP_entry_value
+  // in this regular call's target would refer to the begin function's own
+  // entry, for which we have no call edge (it would require walking to the
+  // begin frame's caller, which is unavailable while the frame list is being
+  // built). Such a target therefore simply stays unresolved, as before.
+  Function *first_callee =
+      first_edge->GetCallee(images, exe_ctx, /*entry_value_ctx=*/nullptr);
   if (!first_callee) {
     LLDB_LOG(log, "Could not resolve callee");
     return;
@@ -207,12 +213,20 @@ static void FindInterveningFrames(Function &begin, Function &end,
 
     void search(CallEdge &first_edge, Function &first_callee,
                 CallSequence &path) {
-      dfs(first_edge, first_callee);
+      // The first callee was reached by a regular (non-tail) call from the
+      // frame in \ref context, which is a live frame. A DW_OP_entry_value in
+      // one of the first callee's outgoing edges therefore refers to the first
+      // callee's entry and is resolved against that live caller via
+      // \ref first_edge.
+      EntryValueResolutionContext first_ctx{&first_edge, context.GetFramePtr(),
+                                            /*outer=*/nullptr};
+      dfs(first_edge, first_callee, &first_ctx);
       if (!ambiguous)
         path = std::move(solution_path);
     }
 
-    void dfs(CallEdge &current_edge, Function &callee) {
+    void dfs(CallEdge &current_edge, Function &callee,
+             const EntryValueResolutionContext *callee_ctx) {
       // Found a path to the target function.
       if (&callee == end) {
         if (solution_path.empty())
@@ -234,14 +248,21 @@ static void FindInterveningFrames(Function &begin, Function &end,
       // Search the calls made from this callee.
       active_path.push_back(CallDescriptor{&callee});
       for (const auto &edge : callee.GetTailCallingEdges()) {
-        Function *next_callee = edge->GetCallee(images, context);
+        // A DW_OP_entry_value in this edge's indirect target refers to the
+        // entry of \p callee; \ref callee_ctx says how to resolve it. The
+        // function reached through this edge is itself frameless (it was
+        // tail-called), so if its own entry values are needed deeper in the
+        // search they chain back through \ref callee_ctx.
+        Function *next_callee = edge->GetCallee(images, context, callee_ctx);
         if (!next_callee)
           continue;
 
         std::tie(active_path.back().address_type, active_path.back().address) =
             edge->GetCallerAddress(callee, target);
 
-        dfs(*edge, *next_callee);
+        EntryValueResolutionContext next_ctx{
+            edge.get(), /*caller_frame=*/nullptr, callee_ctx};
+        dfs(*edge, *next_callee, &next_ctx);
         if (ambiguous)
           return;
       }

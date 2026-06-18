@@ -196,9 +196,12 @@ public:
   /// Keep track of a forward reference to DIE \p Die in \p RefUnit by \p
   /// Attr. The attribute should be fixed up later to point to the absolute
   /// offset of \p Die in the debug_info section or to the canonical offset of
-  /// \p Ctxt if it is non-null.
+  /// \p Ctxt if it is non-null. When \p SectionRelative is false the fixup
+  /// instead uses the offset of \p Die relative to the start of \p RefUnit,
+  /// as needed by CU-relative DWARF expression references (DW_OP_call2/call4).
   LLVM_ABI void noteForwardReference(DIE *Die, const CompileUnit *RefUnit,
-                                     DeclContext *Ctxt, PatchLocation Attr);
+                                     DeclContext *Ctxt, PatchLocation Attr,
+                                     bool SectionRelative = true);
 
   /// Apply all fixups recorded by noteForwardReference().
   LLVM_ABI void fixupForwardReferences();
@@ -297,8 +300,8 @@ private:
   /// The offsets for the attributes in this array couldn't be set while
   /// cloning because for cross-cu forward references the target DIE's offset
   /// isn't known you emit the reference attribute.
-  std::vector<
-      std::tuple<DIE *, const CompileUnit *, DeclContext *, PatchLocation>>
+  std::vector<std::tuple<DIE *, const CompileUnit *, DeclContext *,
+                         PatchLocation, bool>>
       ForwardDIEReferences;
 
   /// The ranges in that map are the PC ranges for functions in this unit,

@@ -121,6 +121,11 @@ private:
 
     std::optional<std::string> LibInstallName;
 
+    /// The debug map object this manager was built from. Used to map the
+    /// object-file address of a DW_OP_addr operand inside a location list to
+    /// its linked address. Outlives this manager.
+    const DebugMapObject *DbgMapObj = nullptr;
+
     /// Returns list of valid relocations from \p Relocs,
     /// between \p StartOffset and \p NextOffset.
     ///
@@ -145,7 +150,8 @@ private:
                    const DebugMapObject &DMO,
                    std::shared_ptr<DwarfLinkerForBinaryRelocationMap> DLBRM)
         : Linker(Linker), SrcFileName(DMO.getObjectFilename()),
-          DebugMapObjectType(MachO::N_OSO), DwarfLinkerRelocMap(DLBRM) {
+          DebugMapObjectType(MachO::N_OSO), DwarfLinkerRelocMap(DLBRM),
+          DbgMapObj(&DMO) {
       if (DMO.getRelocationMap().has_value()) {
         DebugMapObjectType = MachO::N_LIB;
         LibInstallName.emplace(DMO.getInstallName().value());
@@ -206,6 +212,9 @@ private:
 
     std::optional<int64_t> getSubprogramRelocAdjustment(const DWARFDie &DIE,
                                                         bool Verbose) override;
+
+    std::optional<uint64_t>
+    getExprOpAddressLinkedAddress(uint64_t ObjectAddress) override;
 
     std::optional<StringRef> getLibraryInstallName() override;
 
@@ -269,10 +278,21 @@ private:
   Error emitRelocations(const DebugMap &DM,
                         std::vector<ObjectWithRelocMap> &ObjectsForLinking);
 
+  /// Populate \p MainBinarySymbolAddresses from the linked binary's symbol
+  /// table, so that cross-module symbol references in debug info (whose target
+  /// symbol is absent from the referencing object's debug map) can still be
+  /// relocated. See \p AddressManager::findValidRelocsMachO.
+  void buildMainBinarySymbolMap(const DebugMap &Map);
+
   raw_fd_ostream &OutFile;
   BinaryHolder &BinHolder;
   LinkOptions Options;
   std::mutex &ErrorHandlerMutex;
+
+  /// Maps a defined symbol name in the linked binary to its address. Used as a
+  /// fallback to resolve extern relocations against symbols defined in another
+  /// object (and hence missing from the current object's debug map).
+  StringMap<uint64_t> MainBinarySymbolAddresses;
 
   std::vector<std::string> EmptyWarnings;
 

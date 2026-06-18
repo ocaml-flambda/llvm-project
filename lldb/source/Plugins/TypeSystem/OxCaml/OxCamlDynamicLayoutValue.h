@@ -46,6 +46,9 @@ struct OxCamlFormatContext {
   ExecutionContextRef exe_ctx_ref;
   lldb::ByteOrder byte_order;
   uint32_t address_byte_size;
+  /// The module the value's debug info lives in; needed to evaluate the
+  /// DWARF descriptions of optimized-out values (implicit pointers).
+  lldb::ModuleSP module_sp;
 };
 
 /// A layout fact that may be a constant or a DWARF expression.

@@ -671,11 +671,39 @@ private:
                                         const DWARFFile &File,
                                         CompileUnit &Unit);
 
-    /// Clone a DWARF expression that may be referencing another DIE.
+    /// A DIE reference embedded in a cloned DWARF expression. DIE offsets are
+    /// only final after every unit is cloned, so the reference operand is
+    /// emitted as a patchable value and fixed up later (see cloneExpression()
+    /// and CompileUnit::fixupForwardReferences()).
+    struct ExpressionDIEReference {
+      /// Byte offset of the reference operand within the cloned expression.
+      uint64_t BufferOffset;
+      /// Size of the operand in bytes (2, 4 or 8).
+      uint8_t Size;
+      /// (Possibly placeholder) clone of the referenced DIE.
+      DIE *RefDie;
+      /// Compile unit owning \p RefDie.
+      const CompileUnit *RefUnit;
+      /// True for absolute .debug_info references (DW_OP_call_ref,
+      /// DW_OP_implicit_pointer); false for CU-relative ones (DW_OP_call2/4).
+      bool SectionRelative;
+    };
+
+    /// Clone a DWARF expression that may be referencing another DIE. Any DIE
+    /// references found in the expression are appended to \p References so the
+    /// caller can emit them as patchable values.
+    ///
+    /// When \p RelocateExprLocAddr is true the expression is part of a location
+    /// list (.debug_loc/.debug_loclists), whose address operands are not
+    /// relocated by applyValidRelocs; any DW_OP_addr operand is then translated
+    /// to its linked address via the debug map. For exprlocs in .debug_info it
+    /// must be false, as those operands are relocated by applyValidRelocs.
     void cloneExpression(DataExtractor &Data, DWARFExpression Expression,
                          const DWARFFile &File, CompileUnit &Unit,
                          SmallVectorImpl<uint8_t> &OutputBuffer,
-                         int64_t AddrRelocAdjustment, bool IsLittleEndian);
+                         int64_t AddrRelocAdjustment, bool IsLittleEndian,
+                         SmallVectorImpl<ExpressionDIEReference> &References,
+                         bool RelocateExprLocAddr = false);
 
     /// Clone an attribute referencing another DIE and add
     /// it to \p Die.

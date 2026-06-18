@@ -3598,6 +3598,19 @@ VariableSP SymbolFileDWARF::ParseVariableDIE(const SymbolContext &sc,
                       this, unlinked_file_addr);
                 });
             scope = eValueTypeVariableThreadLocal;
+          } else {
+            // A local's location list entries may also contain DW_OP_addr
+            // operands holding .o file addresses, e.g. a pointer to a
+            // statically allocated object described as DW_OP_addr <addr>,
+            // DW_OP_stack_value. Link them into the executable's address
+            // space, like the static-variable case above does for its
+            // single expression.
+            location_list.LinkDWOPAddrOperands(
+                [this, debug_map_symfile](
+                    lldb::addr_t unlinked_file_addr) -> lldb::addr_t {
+                  return debug_map_symfile->LinkOSOFileAddress(
+                      this, unlinked_file_addr);
+                });
           }
         }
       }
@@ -4088,6 +4101,29 @@ SymbolFileDWARF::CollectCallEdges(ModuleSP module, DWARFDIE function_die) {
     // Extract call site parameters.
     CallSiteParameterArray parameters =
         CollectCallSiteParameters(module, child);
+
+    // The expressions above were built from the raw DWARF, so under a debug
+    // map any DW_OP_addr operand they contain still holds a .o file address.
+    // Link such operands into the executable's address space, and point the
+    // expressions at the linked module so the addresses resolve there when
+    // they are evaluated. Note that LocationInCallee must stay untouched: it
+    // is matched byte-for-byte against the callee's DW_OP_entry_value
+    // sub-expression (also raw DWARF) and is never evaluated.
+    if (SymbolFileDWARFDebugMap *debug_map_symfile = GetDebugMapSymfile()) {
+      ModuleSP linked_module_sp =
+          debug_map_symfile->GetObjectFile()->GetModule();
+      const auto link_address = [this](lldb::addr_t file_addr) {
+        return FixupAddress(file_addr);
+      };
+      for (CallSiteParameter &param : parameters) {
+        param.LocationInCaller.LinkDWOPAddrOperands(link_address);
+        param.LocationInCaller.SetModule(linked_module_sp);
+      }
+      if (call_target) {
+        call_target->LinkDWOPAddrOperands(link_address);
+        call_target->SetModule(linked_module_sp);
+      }
+    }
 
     std::unique_ptr<CallEdge> edge;
     if (call_origin) {

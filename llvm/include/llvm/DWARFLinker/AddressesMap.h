@@ -55,6 +55,20 @@ public:
   virtual std::optional<int64_t>
   getSubprogramRelocAdjustment(const DWARFDie &DIE, bool Verbose) = 0;
 
+  /// Maps the object-file address \p ObjectAddress carried by a DW_OP_addr
+  /// operand inside a *location list* expression to its address in the linked
+  /// binary. Location-list sections (.debug_loc/.debug_loclists) are not
+  /// covered by applyValidRelocs (which only handles .debug_info), so the
+  /// address operands of their expressions have to be relocated explicitly
+  /// when the list is cloned.
+  /// \returns the linked address, or std::nullopt if \p ObjectAddress does not
+  /// correspond to a known live symbol. The default implementation performs no
+  /// mapping.
+  virtual std::optional<uint64_t>
+  getExprOpAddressLinkedAddress(uint64_t ObjectAddress) {
+    return std::nullopt;
+  }
+
   // Returns the library install name associated to the AddessesMap.
   virtual std::optional<StringRef> getLibraryInstallName() = 0;
 

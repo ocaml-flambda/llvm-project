@@ -274,8 +274,16 @@ public:
   ///
   /// Note that this might lazily invoke the DWARF parser. A register context
   /// from the caller's activation is needed to find indirect call targets.
-  virtual Function *GetCallee(ModuleList &images,
-                              ExecutionContext &exe_ctx) = 0;
+  ///
+  /// \param[in] entry_value_ctx
+  ///     Optional context for resolving a DW_OP_entry_value in an indirect
+  ///     call target whose containing function has no live frame, as happens
+  ///     while synthesizing tail-call frames. Null in the common case, where
+  ///     DW_OP_entry_value resolves against the live call stack.
+  ///     \see EntryValueResolutionContext.
+  virtual Function *
+  GetCallee(ModuleList &images, ExecutionContext &exe_ctx,
+            const EntryValueResolutionContext *entry_value_ctx = nullptr) = 0;
 
   /// Get the load PC address of the instruction which executes after the call
   /// returns. Returns LLDB_INVALID_ADDRESS iff this is a tail call. \p caller
@@ -339,7 +347,9 @@ public:
                  lldb::addr_t caller_address, bool is_tail_call,
                  CallSiteParameterArray &&parameters);
 
-  Function *GetCallee(ModuleList &images, ExecutionContext &exe_ctx) override;
+  Function *
+  GetCallee(ModuleList &images, ExecutionContext &exe_ctx,
+            const EntryValueResolutionContext *entry_value_ctx) override;
 
 private:
   void ParseSymbolFileAndResolve(ModuleList &images);
@@ -368,7 +378,9 @@ public:
                    AddrType caller_address_type, lldb::addr_t caller_address,
                    bool is_tail_call, CallSiteParameterArray &&parameters);
 
-  Function *GetCallee(ModuleList &images, ExecutionContext &exe_ctx) override;
+  Function *
+  GetCallee(ModuleList &images, ExecutionContext &exe_ctx,
+            const EntryValueResolutionContext *entry_value_ctx) override;
 
 private:
   // Used to describe an indirect call.

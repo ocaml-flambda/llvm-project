@@ -156,12 +156,19 @@ GetOpcodeDataSize(const DataExtractor &data, const lldb::offset_t data_offset,
   case DW_OP_APPLE_uninit:
   case DW_OP_PGI_omp_thread_num:
   case DW_OP_hi_user:
-  case DW_OP_GNU_implicit_pointer:
     break;
 
   case DW_OP_addr:
-  case DW_OP_call_ref: // 0x9a 1 address sized offset of DIE (DWARF3)
     return data.GetAddressByteSize();
+
+  // DW_OP_call_ref takes a single operand: the offset of a DIE in the
+  // .debug_info section. Its size is that of an offset in the DWARF format
+  // of the compile unit: 4 bytes for the 32-bit DWARF format, 8 bytes for
+  // the 64-bit DWARF format. Fall back to the address size if the compile
+  // unit is not available.
+  case DW_OP_call_ref: // 0x9a DWARF offset sized offset of DIE (DWARF3)
+    return dwarf_cu ? dwarf_cu->GetDWARFOffsetByteSize()
+                    : data.GetAddressByteSize();
 
   // Opcodes with no arguments
   case DW_OP_deref:                // 0x06
@@ -356,12 +363,20 @@ GetOpcodeDataSize(const DataExtractor &data, const lldb::offset_t data_offset,
     return offset - data_offset;
   }
 
-  case DW_OP_implicit_pointer: // 0xa0 4-byte (or 8-byte for DWARF 64) constant
-                               // + LEB128
+  case DW_OP_implicit_pointer:     // 0xa0 DWARF offset sized DIE offset
+                                   // + SLEB128 (DWARF5)
+  case DW_OP_GNU_implicit_pointer: // 0xf2 GNU extension equivalent
   {
     data.Skip_LEB128(&offset);
-    return (dwarf_cu ? dwarf_cu->GetAddressByteSize() : 4) + offset -
-           data_offset;
+    lldb::offset_t ref_size = 4;
+    if (dwarf_cu) {
+      ref_size = dwarf_cu->GetDWARFOffsetByteSize();
+      // The GNU extension used an address sized reference in pre-DWARF 3
+      // units, which had no notion of an offset sized reference.
+      if (op == DW_OP_GNU_implicit_pointer && dwarf_cu->GetVersion() < 3)
+        ref_size = dwarf_cu->GetAddressByteSize();
+    }
+    return ref_size + offset - data_offset;
   }
 
   case DW_OP_GNU_entry_value:
@@ -589,12 +604,12 @@ bool DWARFExpression::LinkThreadLocalStorage(
   return true;
 }
 
-static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
-                                              ExecutionContext *exe_ctx,
-                                              RegisterContext *reg_ctx,
-                                              const DataExtractor &opcodes,
-                                              lldb::offset_t &opcode_offset,
-                                              Log *log) {
+static llvm::Error
+Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
+                           ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
+                           const DataExtractor &opcodes,
+                           lldb::offset_t &opcode_offset, Log *log,
+                           const EntryValueResolutionContext *entry_value_ctx) {
   // DW_OP_entry_value(sub-expr) describes the location a variable had upon
   // function entry: this variable location is presumed to be optimized out at
   // the current PC value.  The caller of the function may have call site
@@ -640,84 +655,152 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   // and evaluates the corresponding location for that parameter in `parent`.
 
   // 1. Find the function which pushed the current frame onto the stack.
-  if ((!exe_ctx || !exe_ctx->HasTargetScope()) || !reg_ctx) {
-    return llvm::createStringError("no exe/reg context");
-  }
-
-  StackFrame *current_frame = exe_ctx->GetFramePtr();
-  Thread *thread = exe_ctx->GetThreadPtr();
-  if (!current_frame || !thread)
-    return llvm::createStringError("no current frame/thread");
+  if (!exe_ctx || !exe_ctx->HasTargetScope())
+    return llvm::createStringError("no exe/target context");
+  // A register context is only needed for the live-stack walk below; an
+  // explicit resolution context carries everything it needs itself.
+  if (!entry_value_ctx && !reg_ctx)
+    return llvm::createStringError("no register context");
 
   Target &target = exe_ctx->GetTargetRef();
-  StackFrameSP parent_frame = nullptr;
-  addr_t return_pc = LLDB_INVALID_ADDRESS;
-  uint32_t current_frame_idx = current_frame->GetFrameIndex();
-
-  for (uint32_t parent_frame_idx = current_frame_idx + 1;; parent_frame_idx++) {
-    parent_frame = thread->GetStackFrameAtIndex(parent_frame_idx);
-    // If this is null, we're at the end of the stack.
-    if (!parent_frame)
-      break;
-
-    // Record the first valid return address, even if this is an inlined frame,
-    // in order to look up the associated call edge in the first non-inlined
-    // parent frame.
-    if (return_pc == LLDB_INVALID_ADDRESS) {
-      return_pc = parent_frame->GetFrameCodeAddress().GetLoadAddress(&target);
-      LLDB_LOG(log, "immediate ancestor with pc = {0:x}", return_pc);
-    }
-
-    // If we've found an inlined frame, skip it (these have no call site
-    // parameters).
-    if (parent_frame->IsInlined())
-      continue;
-
-    // We've found the first non-inlined parent frame.
-    break;
-  }
-  if (!parent_frame || !parent_frame->GetRegisterContext()) {
-    return llvm::createStringError("no parent frame with reg ctx");
-  }
-
-  Function *parent_func =
-      parent_frame->GetSymbolContext(eSymbolContextFunction).function;
-  if (!parent_func)
-    return llvm::createStringError("no parent function");
-
-  // 2. Find the call edge in the parent function responsible for creating the
-  //    current activation.
-  Function *current_func =
-      current_frame->GetSymbolContext(eSymbolContextFunction).function;
-  if (!current_func)
-    return llvm::createStringError("no current function");
-
-  CallEdge *call_edge = nullptr;
   ModuleList &modlist = target.GetImages();
-  ExecutionContext parent_exe_ctx = *exe_ctx;
-  parent_exe_ctx.SetFrameSP(parent_frame);
-  if (!parent_frame->IsArtificial()) {
-    // If the parent frame is not artificial, the current activation may be
-    // produced by an ambiguous tail call. In this case, refuse to proceed.
-    call_edge = parent_func->GetCallEdgeForReturnAddress(return_pc, target);
-    if (!call_edge) {
+
+  // The call edge whose call site parameters describe the entry value, plus how
+  // to evaluate the matched caller-side location: either in a live frame
+  // (\ref caller_frame), or — for a frameless link in a tail-call chain — by
+  // chaining any DW_OP_entry_value it contains through \ref outer_ctx.
+  const CallEdge *call_edge = nullptr;
+  StackFrameSP caller_frame;
+  const EntryValueResolutionContext *outer_ctx = nullptr;
+  // Backing storage for an [outer_ctx] synthesized in the live-stack-walk path
+  // below, when the current activation was entered by a tail call from a
+  // frameless function that the (live) parent frame called. Kept at function
+  // scope so [outer_ctx] remains valid through the parameter evaluation.
+  std::optional<EntryValueResolutionContext> tail_link_ctx;
+
+  if (entry_value_ctx) {
+    // Explicit resolution: the referenced function has no live frame (this
+    // happens while synthesizing tail-call frames). Use the supplied edge and
+    // caller context directly. Walking the live stack here is both impossible
+    // (the function has no frame) and unsafe (it would re-enter the stack frame
+    // list while it is being built).
+    call_edge = entry_value_ctx->edge;
+    if (!call_edge)
+      return llvm::createStringError("entry value context has no call edge");
+    if (entry_value_ctx->caller_frame)
+      caller_frame = entry_value_ctx->caller_frame->shared_from_this();
+    outer_ctx = entry_value_ctx->outer;
+    if (!caller_frame && !outer_ctx)
       return llvm::createStringError(
-          llvm::formatv("no call edge for retn-pc = {0:x} in parent frame {1}",
-                        return_pc, parent_func->GetName()));
-    }
-    Function *callee_func = call_edge->GetCallee(modlist, parent_exe_ctx);
-    if (callee_func != current_func) {
-      return llvm::createStringError(
-          "ambiguous call sequence, can't find real parent frame");
-    }
+          "entry value caller is frameless and cannot be resolved");
   } else {
-    // The StackFrameList solver machinery has deduced that an unambiguous tail
-    // call sequence that produced the current activation.  The first edge in
-    // the parent that points to the current function must be valid.
-    for (auto &edge : parent_func->GetTailCallingEdges()) {
-      if (edge->GetCallee(modlist, parent_exe_ctx) == current_func) {
-        call_edge = edge.get();
+    StackFrame *current_frame = exe_ctx->GetFramePtr();
+    Thread *thread = exe_ctx->GetThreadPtr();
+    if (!current_frame || !thread)
+      return llvm::createStringError("no current frame/thread");
+
+    addr_t return_pc = LLDB_INVALID_ADDRESS;
+    uint32_t current_frame_idx = current_frame->GetFrameIndex();
+
+    for (uint32_t parent_frame_idx = current_frame_idx + 1;;
+         parent_frame_idx++) {
+      caller_frame = thread->GetStackFrameAtIndex(parent_frame_idx);
+      // If this is null, we're at the end of the stack.
+      if (!caller_frame)
         break;
+
+      // Record the first valid return address, even if this is an inlined
+      // frame, in order to look up the associated call edge in the first
+      // non-inlined parent frame.
+      if (return_pc == LLDB_INVALID_ADDRESS) {
+        return_pc = caller_frame->GetFrameCodeAddress().GetLoadAddress(&target);
+        LLDB_LOG(log, "immediate ancestor with pc = {0:x}", return_pc);
+      }
+
+      // If we've found an inlined frame, skip it (these have no call site
+      // parameters).
+      if (caller_frame->IsInlined())
+        continue;
+
+      // We've found the first non-inlined parent frame.
+      break;
+    }
+    if (!caller_frame || !caller_frame->GetRegisterContext())
+      return llvm::createStringError("no parent frame with reg ctx");
+
+    Function *parent_func =
+        caller_frame->GetSymbolContext(eSymbolContextFunction).function;
+    if (!parent_func)
+      return llvm::createStringError("no parent function");
+
+    // 2. Find the call edge in the parent function responsible for creating
+    //    the current activation.
+    Function *current_func =
+        current_frame->GetSymbolContext(eSymbolContextFunction).function;
+    if (!current_func)
+      return llvm::createStringError("no current function");
+
+    ExecutionContext parent_exe_ctx = *exe_ctx;
+    parent_exe_ctx.SetFrameSP(caller_frame);
+    if (!caller_frame->IsArtificial()) {
+      // The parent frame is not artificial, so the current activation was
+      // produced either by a direct call from the parent, or by a tail call
+      // from a frameless function that the parent called.
+      CallEdge *return_edge =
+          parent_func->GetCallEdgeForReturnAddress(return_pc, target);
+      if (!return_edge)
+        return llvm::createStringError(llvm::formatv(
+            "no call edge for retn-pc = {0:x} in parent frame {1}", return_pc,
+            parent_func->GetName()));
+      Function *callee_func = return_edge->GetCallee(
+          modlist, parent_exe_ctx, /*entry_value_ctx=*/nullptr);
+      if (callee_func == current_func) {
+        // The parent called the current function directly.
+        call_edge = return_edge;
+      } else if (callee_func) {
+        // The parent called \ref callee_func, which is not the current function
+        // but may have entered it by a tail call, leaving no frame of its own
+        // (e.g. a thunk or a partial-application veneer that loads its arguments
+        // and tail-calls the real callee). Find the unique tail-calling edge
+        // from \ref callee_func to the current function and resolve the entry
+        // value through it. That edge is frameless: \ref callee_func's own entry
+        // values, and any indirect callee it names, chain back through \ref
+        // return_edge to this live parent frame.
+        tail_link_ctx = EntryValueResolutionContext{
+            return_edge, caller_frame.get(), /*outer=*/nullptr};
+        for (auto &edge : callee_func->GetTailCallingEdges()) {
+          if (edge->GetCallee(modlist, parent_exe_ctx, &*tail_link_ctx) !=
+              current_func)
+            continue;
+          if (call_edge) {
+            // More than one tail call reaches the current function: ambiguous.
+            call_edge = nullptr;
+            break;
+          }
+          call_edge = edge.get();
+        }
+        if (!call_edge)
+          return llvm::createStringError(
+              "ambiguous call sequence, can't find real parent frame");
+        // \ref callee_func has no live frame; evaluate the matched parameter as
+        // a frameless tail-call link chained to the parent via \ref return_edge.
+        caller_frame = nullptr;
+        outer_ctx = &*tail_link_ctx;
+      } else {
+        // The parent's indirect call target could not be resolved.
+        return llvm::createStringError(
+            "ambiguous call sequence, can't find real parent frame");
+      }
+    } else {
+      // The StackFrameList solver machinery has deduced that an unambiguous
+      // tail call sequence produced the current activation. The first edge in
+      // the parent that points to the current function must be valid.
+      for (auto &edge : parent_func->GetTailCallingEdges()) {
+        if (edge->GetCallee(modlist, parent_exe_ctx,
+                            /*entry_value_ctx=*/nullptr) == current_func) {
+          call_edge = edge.get();
+          break;
+        }
       }
     }
   }
@@ -764,16 +847,48 @@ static llvm::Error Evaluate_DW_OP_entry_value(DWARFExpression::Stack &stack,
   // subexpresion whenever llvm does.
   const DWARFExpressionList &param_expr = matched_param->LocationInCaller;
 
-  llvm::Expected<Value> maybe_result = param_expr.Evaluate(
-      &parent_exe_ctx, parent_frame->GetRegisterContext().get(),
-      LLDB_INVALID_ADDRESS,
-      /*initial_value_ptr=*/nullptr,
-      /*object_address_ptr=*/nullptr);
+  // Evaluate the caller-side location to obtain the entry value.
+  llvm::Expected<Value> maybe_result =
+      [&]() -> llvm::Expected<Value> {
+    if (caller_frame) {
+      // The caller is a live frame: evaluate the location in it as usual.
+      ExecutionContext caller_exe_ctx = *exe_ctx;
+      caller_exe_ctx.SetFrameSP(caller_frame);
+      return param_expr.Evaluate(&caller_exe_ctx,
+                                 caller_frame->GetRegisterContext().get(),
+                                 LLDB_INVALID_ADDRESS,
+                                 /*initial_value_ptr=*/nullptr,
+                                 /*object_address_ptr=*/nullptr);
+    }
+    // The caller is itself a frameless link in a tail-call chain. Its
+    // registers and stack are gone; only further entry values and constants
+    // can be recovered. Evaluate with no frame and no register context so that
+    // any access to the vanished activation's state fails cleanly, and chain a
+    // nested DW_OP_entry_value to the outer resolution context.
+    ExecutionContext frameless_ctx(exe_ctx->GetTargetSP(),
+                                   /*get_process=*/true);
+    return param_expr.Evaluate(&frameless_ctx, /*reg_ctx=*/nullptr,
+                               LLDB_INVALID_ADDRESS,
+                               /*initial_value_ptr=*/nullptr,
+                               /*object_address_ptr=*/nullptr, outer_ctx);
+  }();
   if (!maybe_result) {
     LLDB_LOG(log,
              "Evaluate_DW_OP_entry_value: call site param evaluation failed");
     return maybe_result.takeError();
   }
+
+  // A DW_AT_call_value expression produces a value, not a location, so a
+  // DW_OP_addr within it (e.g. a pointer argument to a statically
+  // allocated object) denotes the address as the value. Resolve such a
+  // file address here, where the module it belongs to (the caller
+  // expression's own) is known: the caller may be in a different module
+  // than the callee whose expression we resume below, and under a Darwin
+  // debug map each .o has its own file address space, so resolving it any
+  // later could consult the wrong module.
+  if (maybe_result->GetValueType() == Value::ValueType::FileAddress)
+    maybe_result->ConvertToLoadAddress(param_expr.GetModule().get(),
+                                       exe_ctx->GetTargetPtr());
 
   stack.push_back(*maybe_result);
   return llvm::Error::success();
@@ -913,6 +1028,12 @@ static llvm::Error Evaluate_DW_OP_deref(DWARFExpression::Stack &stack,
     stack.back().GetScalar() = pointer_value;
     stack.back().ClearContext();
   } break;
+  case Value::ValueType::ImplicitPointer:
+    // Implicit pointers can only be dereferenced by materializing the
+    // pointed-at value via its DIE (see
+    // DWARFExpression::DereferenceImplicitPointer), not by reading memory.
+    return llvm::createStringError(
+        "DW_OP_deref of an implicit pointer is not supported");
   case Value::ValueType::Invalid:
     return llvm::createStringError("invalid value type for DW_OP_deref");
   }
@@ -940,19 +1061,67 @@ static Scalar DerefSizeExtractDataHelper(uint8_t *addr_bytes,
     return addr_data.GetAddress(&addr_data_offset);
 }
 
-llvm::Expected<Value> DWARFExpression::Evaluate(
+/// The maximum number of nested DW_OP_call2, DW_OP_call4 and DW_OP_call_ref
+/// operations that may be active at once. This guards against cyclic DIE
+/// references in (malformed) DWARF, which would otherwise recurse forever.
+static constexpr uint32_t g_max_dwarf_call_depth = 64;
+
+/// Return the offset of the program counter from the entry point of the
+/// function the frame is executing in, for selecting the entry of a
+/// location list that applies at that point in the program (see
+/// DWARFExpressionDelegate::GetDIELocationExpression). Returns std::nullopt
+/// when there is no frame or no function, never an offset that could be
+/// mistaken for a real one.
+static std::optional<uint64_t>
+GetPCFunctionOffsetForLocationLists(ExecutionContext *exe_ctx,
+                                    RegisterContext *reg_ctx) {
+  StackFrame *frame = exe_ctx ? exe_ctx->GetFramePtr() : nullptr;
+  Address pc;
+  if (!reg_ctx || !reg_ctx->GetPCForSymbolication(pc)) {
+    if (!frame)
+      return std::nullopt;
+    lldb::RegisterContextSP reg_ctx_sp = frame->GetRegisterContext();
+    if (!reg_ctx_sp || !reg_ctx_sp->GetPCForSymbolication(pc))
+      return std::nullopt;
+  }
+  if (!pc.IsValid() || !frame)
+    return std::nullopt;
+  const SymbolContext &sc =
+      frame->GetSymbolContext(lldb::eSymbolContextFunction);
+  if (!sc.function)
+    return std::nullopt;
+  Target *target = exe_ctx->GetTargetPtr();
+  lldb::addr_t pc_addr = pc.GetLoadAddress(target);
+  lldb::addr_t func_addr = sc.function->GetAddress().GetLoadAddress(target);
+  if (pc_addr == LLDB_INVALID_ADDRESS || func_addr == LLDB_INVALID_ADDRESS) {
+    // Not loaded into a process (e.g. static analysis of a binary): both
+    // addresses are still comparable as file addresses.
+    pc_addr = pc.GetFileAddress();
+    func_addr = sc.function->GetAddress().GetFileAddress();
+  }
+  if (pc_addr == LLDB_INVALID_ADDRESS || func_addr == LLDB_INVALID_ADDRESS ||
+      pc_addr < func_addr)
+    return std::nullopt;
+  return pc_addr - func_addr;
+}
+
+/// Evaluate the DWARF expression in \a opcodes against \a stack.
+///
+/// This implements the opcode interpreter loop of DWARFExpression::Evaluate,
+/// which provides and initializes the evaluation state and derives the
+/// result. It is split out so that DW_OP_call2, DW_OP_call4 and
+/// DW_OP_call_ref can evaluate the DW_AT_location expression of the
+/// referenced DIE against the caller's state, as if the called expression's
+/// opcodes appeared in place of the call operation.
+static llvm::Error EvaluateOpcodes(
     ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
     lldb::ModuleSP module_sp, const DataExtractor &opcodes,
     const DWARFExpression::Delegate *dwarf_cu,
-    const lldb::RegisterKind reg_kind, const Value *initial_value_ptr,
-    const Value *object_address_ptr) {
-
-  if (opcodes.GetByteSize() == 0)
-    return llvm::createStringError(
-        "no location, value may have been optimized out");
-
-  Stack stack;
-
+    const lldb::RegisterKind reg_kind, const Value *object_address_ptr,
+    DWARFExpression::Stack &stack,
+    LocationDescriptionKind &dwarf4_location_description_kind, Value &pieces,
+    uint64_t &op_piece_offset, const uint32_t call_depth,
+    const EntryValueResolutionContext *entry_value_ctx) {
   Process *process = nullptr;
   StackFrame *frame = nullptr;
   Target *target = nullptr;
@@ -965,16 +1134,9 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
   if (reg_ctx == nullptr && frame)
     reg_ctx = frame->GetRegisterContext().get();
 
-  if (initial_value_ptr)
-    stack.push_back(*initial_value_ptr);
-
   lldb::offset_t offset = 0;
   Value tmp;
   uint32_t reg_num;
-
-  /// Insertion point for evaluating multi-piece expression.
-  uint64_t op_piece_offset = 0;
-  Value pieces; // Used for DW_OP_piece
 
   Log *log = GetLog(LLDBLog::Expressions);
   // A generic type is "an integral type that has the size of an address and an
@@ -989,11 +1151,6 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
                                            is_signed, /*implicitTrunc=*/true),
                                !is_signed));
   };
-
-  // The default kind is a memory location. This is updated by any
-  // operation that changes this, such as DW_OP_stack_value, and reset
-  // by composition operations like DW_OP_piece.
-  LocationDescriptionKind dwarf4_location_description_kind = Memory;
 
   while (opcodes.ValidOffset(offset)) {
     const lldb::offset_t op_offset = offset;
@@ -1217,6 +1374,10 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
               "NULL execution context for DW_OP_deref_size");
         }
         break;
+
+      case Value::ValueType::ImplicitPointer:
+        return llvm::createStringError(
+            "DW_OP_deref_size of an implicit pointer is not supported");
 
       case Value::ValueType::Invalid:
 
@@ -1964,6 +2125,28 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
                 piece_byte_size, addr);
           } break;
 
+          case Value::ValueType::ImplicitPointer: {
+            // The piece is an implicit pointer: it has no actual bytes.
+            // Append placeholder bytes so that subsequent piece offsets stay
+            // correct, and record the byte range in the composite's
+            // implicit-pointer table. The table entry, never the placeholder
+            // bytes, is the piece's value; consumers must consult the table
+            // before interpreting any bytes of the composite.
+            const std::optional<Value::ImplicitPointerInfo> &pointee =
+                curr_piece_source_value.GetImplicitPointer();
+            if (!pointee)
+              return llvm::createStringError(
+                  "implicit pointer piece does not identify its pointee");
+            if (curr_piece.ResizeData(piece_byte_size) != piece_byte_size)
+              return llvm::createStringError(
+                  "failed to resize the piece memory buffer for "
+                  "DW_OP_piece(%" PRIu64 ")",
+                  piece_byte_size);
+            ::memset(curr_piece.GetBuffer().GetBytes(), 0, piece_byte_size);
+            pieces.AddImplicitPointerPiece(op_piece_offset, piece_byte_size,
+                                           *pointee);
+          } break;
+
           case Value::ValueType::Scalar: {
             uint32_t bit_size = piece_byte_size * 8;
             uint32_t bit_offset = 0;
@@ -2048,6 +2231,12 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
               "unable to extract DW_OP_bit_piece(bit_size = %" PRIu64
               ", bit_offset = %" PRIu64 ") from an address value.",
               piece_bit_size, piece_bit_offset);
+
+        case Value::ValueType::ImplicitPointer:
+          return llvm::createStringError(
+              "unable to extract DW_OP_bit_piece(bit_size = %" PRIu64
+              ", bit_offset = %" PRIu64 ") from an implicit pointer.",
+              piece_bit_size, piece_bit_offset);
         }
       }
       break;
@@ -2076,10 +2265,44 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
       break;
     }
 
-    case DW_OP_implicit_pointer: {
+    // OPCODE: DW_OP_implicit_pointer (DW_OP_GNU_implicit_pointer is the
+    // legacy vendor extension it was standardized from)
+    // OPERANDS: 2
+    //      A reference to a DIE in the .debug_info section, the size of an
+    //      offset in the DWARF format of the compile unit (4 bytes in the
+    //      32-bit DWARF format, 8 bytes in the 64-bit DWARF format)
+    //      SLEB128 byte offset into the value of that DIE
+    // DESCRIPTION: Specifies that the object is a pointer that cannot be
+    // represented as a real pointer, even though the value it would point to
+    // can be described: the referenced DIE describes the pointed-at value
+    // via its DW_AT_location (or DW_AT_const_value) attribute. The resulting
+    // value carries the DIE reference and byte offset so that the pointed-at
+    // value can be materialized on demand with
+    // DWARFExpression::DereferenceImplicitPointer(). The pointer itself has
+    // no numeric value; in particular it is distinct from a pointer whose
+    // value is zero.
+    case DW_OP_implicit_pointer:
+    case DW_OP_GNU_implicit_pointer: {
       dwarf4_location_description_kind = Implicit;
-      return llvm::createStringError("Could not evaluate %s.",
-                                     DW_OP_value_to_name(op));
+      if (!dwarf_cu)
+        return llvm::createStringError(
+            "%s found without a compile unit being specified",
+            DW_OP_value_to_name(op));
+
+      // The DIE reference operand has the size of an offset in the DWARF
+      // format of the compile unit, except for the GNU extension in
+      // pre-DWARF 3 units, which had no notion of an offset sized
+      // reference and used an address sized one.
+      uint32_t ref_byte_size = dwarf_cu->GetDWARFOffsetByteSize();
+      if (op == DW_OP_GNU_implicit_pointer && dwarf_cu->GetVersion() < 3)
+        ref_byte_size = opcodes.GetAddressByteSize();
+      const uint64_t die_offset = opcodes.GetMaxU64(&offset, ref_byte_size);
+      const int64_t byte_offset = opcodes.GetSLEB128(&offset);
+
+      Value result;
+      result.SetImplicitPointer(dwarf_cu, die_offset, byte_offset);
+      stack.push_back(result);
+      break;
     }
 
     // OPCODE: DW_OP_push_object_address
@@ -2099,16 +2322,21 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
       }
       break;
 
-    // OPCODE: DW_OP_call2
-    // OPERANDS:
-    //      uint16_t compile unit relative offset of a DIE
-    // DESCRIPTION: Performs subroutine calls during evaluation
-    // of a DWARF expression. The operand is the 2-byte unsigned offset of a
-    // debugging information entry in the current compilation unit.
+    // OPCODE: DW_OP_call2, DW_OP_call4, DW_OP_call_ref
+    // OPERANDS: 1
+    //      DW_OP_call2: uint16_t compile unit relative offset of a DIE
+    //      DW_OP_call4: uint32_t compile unit relative offset of a DIE
+    //      DW_OP_call_ref: offset of a DIE in the .debug_info section; the
+    //          operand is 4 bytes in the 32-bit DWARF format and 8 bytes in
+    //          the 64-bit DWARF format
+    // DESCRIPTION: Performs a DWARF procedure call during evaluation of a
+    // DWARF expression.
     //
-    // Operand interpretation is exactly like that for DW_FORM_ref2.
+    // Operand interpretation of DW_OP_call2, DW_OP_call4 and DW_OP_call_ref
+    // is exactly like that for DW_FORM_ref2, DW_FORM_ref4 and
+    // DW_FORM_ref_addr, respectively.
     //
-    // This operation transfers control of DWARF expression evaluation to the
+    // These operations transfer control of DWARF expression evaluation to the
     // DW_AT_location attribute of the referenced DIE. If there is no such
     // attribute, then there is no effect. Execution of the DWARF expression of
     // a DW_AT_location attribute may add to and/or remove from values on the
@@ -2118,28 +2346,60 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     // the stack by the called expression may be used as return values by prior
     // agreement between the calling and called expressions.
     case DW_OP_call2:
-      return llvm::createStringError("unimplemented opcode DW_OP_call2");
-    // OPCODE: DW_OP_call4
-    // OPERANDS: 1
-    //      uint32_t compile unit relative offset of a DIE
-    // DESCRIPTION: Performs a subroutine call during evaluation of a DWARF
-    // expression. For DW_OP_call4, the operand is a 4-byte unsigned offset of
-    // a debugging information entry in  the current compilation unit.
-    //
-    // Operand interpretation DW_OP_call4 is exactly like that for
-    // DW_FORM_ref4.
-    //
-    // This operation transfers control of DWARF expression evaluation to the
-    // DW_AT_location attribute of the referenced DIE. If there is no such
-    // attribute, then there is no effect. Execution of the DWARF expression of
-    // a DW_AT_location attribute may add to and/or remove from values on the
-    // stack. Execution returns to the point following the call when the end of
-    // the attribute is reached. Values on the stack at the time of the call
-    // may be used as parameters by the called expression and values left on
-    // the stack by the called expression may be used as return values by prior
-    // agreement between the calling and called expressions.
     case DW_OP_call4:
-      return llvm::createStringError("unimplemented opcode DW_OP_call4");
+    case DW_OP_call_ref: {
+      if (!dwarf_cu)
+        return llvm::createStringError(
+            "%s found without a compile unit being specified",
+            DW_OP_value_to_name(op));
+
+      uint64_t die_offset;
+      bool unit_relative = true;
+      if (op == DW_OP_call2)
+        die_offset = opcodes.GetU16(&offset);
+      else if (op == DW_OP_call4)
+        die_offset = opcodes.GetU32(&offset);
+      else {
+        // The DW_OP_call_ref operand is an offset in the .debug_info
+        // section, whose size depends on the DWARF format of the compile
+        // unit.
+        die_offset =
+            opcodes.GetMaxU64(&offset, dwarf_cu->GetDWARFOffsetByteSize());
+        unit_relative = false;
+      }
+
+      // The current PC selects the applicable entry when the referenced
+      // DIE's DW_AT_location is a location list rather than a single
+      // expression.
+      auto callee_or_err = dwarf_cu->GetDIELocationExpression(
+          die_offset, unit_relative,
+          GetPCFunctionOffsetForLocationLists(exe_ctx, reg_ctx));
+      if (!callee_or_err)
+        return callee_or_err.takeError();
+      const DataExtractor &callee_opcodes = callee_or_err->first;
+      const DWARFExpression::Delegate *callee_cu = callee_or_err->second;
+
+      // The referenced DIE has no DW_AT_location attribute; per the DWARF
+      // specification the call operation has no effect.
+      if (callee_opcodes.GetByteSize() == 0)
+        break;
+
+      if (call_depth >= g_max_dwarf_call_depth)
+        return llvm::createStringError(
+            "DWARF expression call depth exceeds %u, likely due to a cycle "
+            "of DW_OP_call references",
+            g_max_dwarf_call_depth);
+
+      // Evaluate the called expression against the current state, as if its
+      // opcodes appeared in place of the call operation. In particular it
+      // may consume and push values on the current stack.
+      if (llvm::Error err = EvaluateOpcodes(
+              exe_ctx, reg_ctx, module_sp, callee_opcodes, callee_cu, reg_kind,
+              object_address_ptr, stack, dwarf4_location_description_kind,
+              pieces, op_piece_offset, call_depth + 1, entry_value_ctx))
+        return err;
+      break;
+    }
 
     // OPCODE: DW_OP_stack_value
     // OPERANDS: None
@@ -2147,7 +2407,20 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     // rather is a constant value.  The value from the top of the stack is the
     // value to be used.  This is the actual object value and not the location.
     case DW_OP_stack_value:
+      if (stack.empty())
+        return llvm::createStringError(
+            "expression stack needs at least 1 item for DW_OP_stack_value");
       dwarf4_location_description_kind = Implicit;
+      // The value may be an as-yet unresolved file address (e.g. DW_OP_addr
+      // ... DW_OP_stack_value, describing a pointer to a statically
+      // allocated object). DW_OP_addr pushes an address "relocated by the
+      // consumer"; complete that deferred relocation now, before the
+      // conversion to a plain scalar erases the value's address provenance.
+      // Otherwise consumers would receive the unrelocated address (under a
+      // Darwin debug map, an address in the .o file's own address space).
+      // If the address cannot be resolved (no target, or the module is not
+      // loaded), the value is left as the file address, as before.
+      stack.back().ConvertToLoadAddress(module_sp.get(), target);
       stack.back().SetValueType(Value::ValueType::Scalar);
       break;
 
@@ -2292,8 +2565,9 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
 
     case DW_OP_GNU_entry_value:
     case DW_OP_entry_value: {
-      if (llvm::Error err = Evaluate_DW_OP_entry_value(stack, exe_ctx, reg_ctx,
-                                                       opcodes, offset, log))
+      if (llvm::Error err =
+              Evaluate_DW_OP_entry_value(stack, exe_ctx, reg_ctx, opcodes,
+                                         offset, log, entry_value_ctx))
         return llvm::createStringError(
             "could not evaluate DW_OP_entry_value: %s",
             llvm::toString(std::move(err)).c_str());
@@ -2310,6 +2584,43 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
           "Unhandled opcode {0} in DWARFExpression", LocationAtom(op)));
     }
   }
+
+  return llvm::Error::success();
+}
+
+llvm::Expected<Value> DWARFExpression::Evaluate(
+    ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
+    lldb::ModuleSP module_sp, const DataExtractor &opcodes,
+    const DWARFExpression::Delegate *dwarf_cu,
+    const lldb::RegisterKind reg_kind, const Value *initial_value_ptr,
+    const Value *object_address_ptr,
+    const EntryValueResolutionContext *entry_value_ctx) {
+
+  if (opcodes.GetByteSize() == 0)
+    return llvm::createStringError(
+        "no location, value may have been optimized out");
+
+  Stack stack;
+
+  if (initial_value_ptr)
+    stack.push_back(*initial_value_ptr);
+
+  /// Insertion point for evaluating multi-piece expression.
+  uint64_t op_piece_offset = 0;
+  Value pieces; // Used for DW_OP_piece
+
+  // The default kind is a memory location. This is updated by any
+  // operation that changes this, such as DW_OP_stack_value, and reset
+  // by composition operations like DW_OP_piece.
+  LocationDescriptionKind dwarf4_location_description_kind = Memory;
+
+  if (llvm::Error err = EvaluateOpcodes(
+          exe_ctx, reg_ctx, module_sp, opcodes, dwarf_cu, reg_kind,
+          object_address_ptr, stack, dwarf4_location_description_kind, pieces,
+          op_piece_offset, /*call_depth=*/0, entry_value_ctx))
+    return std::move(err);
+
+  Log *log = GetLog(LLDBLog::Expressions);
 
   if (stack.empty()) {
     // Nothing on the stack, check if we created a piece value from DW_OP_piece
@@ -2335,6 +2646,120 @@ llvm::Expected<Value> DWARFExpression::Evaluate(
     }
   }
   return stack.back();
+}
+
+llvm::Expected<Value> DWARFExpression::DereferenceImplicitPointer(
+    const Value &implicit_pointer, ExecutionContext *exe_ctx,
+    RegisterContext *reg_ctx, lldb::ModuleSP module_sp) {
+  if (implicit_pointer.GetValueType() != Value::ValueType::ImplicitPointer)
+    return llvm::createStringError(
+        "cannot dereference a value that is not an implicit pointer");
+  const std::optional<Value::ImplicitPointerInfo> &info =
+      implicit_pointer.GetImplicitPointer();
+  if (!info || !info->delegate)
+    return llvm::createStringError(
+        "implicit pointer does not identify a DWARF unit");
+
+  // The current PC selects the applicable entry when the pointee DIE's
+  // DW_AT_location is a location list rather than a single expression.
+  auto pointee_loc_or_err = info->delegate->GetDIELocationExpression(
+      info->die_offset, /*unit_relative=*/false,
+      GetPCFunctionOffsetForLocationLists(exe_ctx, reg_ctx));
+  if (!pointee_loc_or_err)
+    return pointee_loc_or_err.takeError();
+  const DataExtractor &pointee_opcodes = pointee_loc_or_err->first;
+  const Delegate *pointee_cu = pointee_loc_or_err->second;
+
+  Value pointee;
+  if (pointee_opcodes.GetByteSize() != 0) {
+    llvm::Expected<Value> evaluated =
+        Evaluate(exe_ctx, reg_ctx, module_sp, pointee_opcodes, pointee_cu,
+                 lldb::eRegisterKindDWARF, /*initial_value_ptr=*/nullptr,
+                 /*object_address_ptr=*/nullptr);
+    if (!evaluated)
+      return evaluated.takeError();
+    pointee = std::move(*evaluated);
+  } else {
+    // The DWARF specification allows the referenced DIE to describe the
+    // pointed-at value with a DW_AT_const_value attribute instead of a
+    // DW_AT_location.
+    llvm::Expected<std::optional<Value>> const_value =
+        info->delegate->GetDIEConstValue(info->die_offset);
+    if (!const_value)
+      return const_value.takeError();
+    if (!*const_value)
+      // The pointed-at value is unavailable; report that explicitly so that
+      // it can never be conflated with a value that happens to be zero.
+      return llvm::createStringError(
+          "implicit pointer target DIE at .debug_info offset 0x%" PRIx64
+          " has no DW_AT_location applicable at the current PC and no "
+          "DW_AT_const_value; the pointed-at value is unavailable",
+          info->die_offset);
+    pointee = std::move(**const_value);
+  }
+
+  const int64_t byte_offset = info->byte_offset;
+  switch (pointee.GetValueType()) {
+  case Value::ValueType::FileAddress:
+  case Value::ValueType::LoadAddress:
+    // The pointed-at value exists in the target's memory after all, so the
+    // result is an ordinary address there.
+    if (byte_offset != 0)
+      pointee.GetScalar() += byte_offset;
+    return pointee;
+
+  case Value::ValueType::HostAddress: {
+    // The pointed-at value was materialized into a buffer that lives in
+    // LLDB's own memory, not the target's. Slice off the requested byte
+    // offset into a fresh value: Value's copy semantics only preserve
+    // scalars that point at the start of their own buffer, so we must not
+    // hand out a pointer into the middle of one.
+    if (byte_offset == 0)
+      return pointee;
+    const uint8_t *bytes = pointee.GetBuffer().GetBytes();
+    const uint64_t byte_size = pointee.GetBuffer().GetByteSize();
+    if (!bytes || byte_offset < 0 ||
+        static_cast<uint64_t>(byte_offset) >= byte_size)
+      return llvm::createStringError(
+          "implicit pointer byte offset %" PRId64
+          " is outside the materialized value (%" PRIu64 " bytes)",
+          byte_offset, byte_size);
+    Value sliced(bytes + byte_offset, static_cast<int>(byte_size - byte_offset));
+    // Rebase the composite's implicit-pointer table onto the slice. Pieces
+    // entirely before the slice fall away with their bytes; a piece
+    // straddling the slice boundary would leave unmarked placeholder bytes
+    // in the slice, so refuse it.
+    const uint64_t slice_begin = static_cast<uint64_t>(byte_offset);
+    for (const Value::ImplicitPointerPiece &piece :
+         pointee.GetImplicitPointerPieces()) {
+      if (piece.buffer_offset >= slice_begin)
+        sliced.AddImplicitPointerPiece(piece.buffer_offset - slice_begin,
+                                       piece.byte_size, piece.pointee);
+      else if (piece.buffer_offset + piece.byte_size > slice_begin)
+        return llvm::createStringError(
+            "implicit pointer byte offset %" PRId64
+            " splits an implicit pointer piece of the pointed-at value",
+            byte_offset);
+    }
+    return sliced;
+  }
+
+  case Value::ValueType::Scalar:
+  case Value::ValueType::ImplicitPointer:
+    // A scalar (e.g. a pointee location ending in DW_OP_stack_value, or an
+    // integer DW_AT_const_value) or a chained implicit pointer has no
+    // addressable bytes to offset into.
+    if (byte_offset != 0)
+      return llvm::createStringError(
+          "cannot apply implicit pointer byte offset %" PRId64 " to a %s",
+          byte_offset, Value::GetValueTypeAsCString(pointee.GetValueType()));
+    return pointee;
+
+  case Value::ValueType::Invalid:
+    return llvm::createStringError(
+        "implicit pointer target evaluated to an invalid value");
+  }
+  llvm_unreachable("all value types handled");
 }
 
 bool DWARFExpression::MatchesOperand(

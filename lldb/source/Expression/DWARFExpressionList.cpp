@@ -11,6 +11,8 @@
 #include "lldb/Symbol/Function.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/StackFrame.h"
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
 #include "llvm/DebugInfo/DWARF/DWARFFormValue.h"
 
@@ -144,6 +146,37 @@ bool DWARFExpressionList::LinkThreadLocalStorage(
   return true;
 }
 
+bool DWARFExpressionList::LinkDWOPAddrOperands(
+    std::function<lldb::addr_t(lldb::addr_t file_addr)> const
+        &link_address_callback) {
+  bool all_linked = true;
+  for (size_t i = 0; i < m_exprs.GetSize(); ++i) {
+    DWARFExpression &expr = m_exprs.GetMutableEntryAtIndex(i)->data;
+    llvm::Expected<lldb::addr_t> file_addr =
+        expr.GetLocation_DW_OP_addr(m_dwarf_cu);
+    if (!file_addr) {
+      LLDB_LOG_ERROR(GetLog(LLDBLog::Expressions), file_addr.takeError(),
+                     "Cannot link DW_OP_addr operand: {0}");
+      all_linked = false;
+      continue;
+    }
+    if (*file_addr == LLDB_INVALID_ADDRESS)
+      // The expression has no DW_OP_addr operation.
+      continue;
+    const lldb::addr_t linked_file_addr = link_address_callback(*file_addr);
+    if (linked_file_addr == LLDB_INVALID_ADDRESS) {
+      // The object the address refers to did not make it into the linked
+      // executable. Leave the expression untouched; evaluating it will not
+      // produce a resolvable address.
+      all_linked = false;
+      continue;
+    }
+    if (!expr.Update_DW_OP_addr(m_dwarf_cu, linked_file_addr))
+      all_linked = false;
+  }
+  return all_linked;
+}
+
 bool DWARFExpressionList::MatchesOperand(
     StackFrame &frame, const Instruction::Operand &operand) const {
   RegisterContextSP reg_ctx_sp = frame.GetRegisterContext();
@@ -232,7 +265,8 @@ void DWARFExpressionList::GetDescription(Stream *s,
 llvm::Expected<Value> DWARFExpressionList::Evaluate(
     ExecutionContext *exe_ctx, RegisterContext *reg_ctx,
     lldb::addr_t func_load_addr, const Value *initial_value_ptr,
-    const Value *object_address_ptr) const {
+    const Value *object_address_ptr,
+    const EntryValueResolutionContext *entry_value_ctx) const {
   ModuleSP module_sp = m_module_wp.lock();
   DataExtractor data;
   RegisterKind reg_kind;
@@ -267,5 +301,5 @@ llvm::Expected<Value> DWARFExpressionList::Evaluate(
   reg_kind = expr.GetRegisterKind();
   return DWARFExpression::Evaluate(exe_ctx, reg_ctx, module_sp, data,
                                    m_dwarf_cu, reg_kind, initial_value_ptr,
-                                   object_address_ptr);
+                                   object_address_ptr, entry_value_ctx);
 }

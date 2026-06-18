@@ -179,6 +179,10 @@ bool ValueObjectMemory::UpdateValue() {
     case Value::ValueType::Invalid:
       m_error = Status::FromErrorString("Invalid value");
       return false;
+    case Value::ValueType::ImplicitPointer:
+      // Values read from the target's memory can never be implicit pointers.
+      m_error = Status::FromErrorString("unexpected implicit pointer value");
+      return false;
     case Value::ValueType::Scalar:
       // The variable value is in the Scalar value inside the m_value. We can
       // point our m_data right to it.

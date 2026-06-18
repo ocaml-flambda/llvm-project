@@ -145,6 +145,10 @@ bool ValueObjectChild::UpdateValue() {
       switch (m_value.GetValueType()) {
       case Value::ValueType::Invalid:
         break;
+      case Value::ValueType::ImplicitPointer:
+        m_error = Status::FromErrorString(
+            "parent value is an implicit pointer with no child storage");
+        break;
       case Value::ValueType::LoadAddress:
       case Value::ValueType::FileAddress:
       case Value::ValueType::HostAddress: {

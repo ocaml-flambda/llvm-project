@@ -201,6 +201,15 @@ bool ValueObjectVariable::UpdateValue() {
       case Value::ValueType::Invalid:
         m_error = Status::FromErrorString("invalid value");
         break;
+      case Value::ValueType::ImplicitPointer:
+        // The variable is a pointer that was optimized away, but the value
+        // it would point at is described by another DIE (the m_value
+        // carries that reference). The pointer itself has no bytes to read;
+        // note that its value being unavailable is distinct from it being
+        // a null pointer. Consumers such as language formatters can
+        // materialize the pointed-at value with
+        // DWARFExpression::DereferenceImplicitPointer().
+        break;
       case Value::ValueType::Scalar:
         // The variable value is in the Scalar value inside the m_value. We can
         // point our m_data right to it.
@@ -262,6 +271,7 @@ void ValueObjectVariable::DoUpdateChildrenAddressType(ValueObject &valobj) {
 
   switch (value_type) {
   case Value::ValueType::Invalid:
+  case Value::ValueType::ImplicitPointer:
     break;
   case Value::ValueType::FileAddress:
     // If this type is a pointer, then its children will be considered load
