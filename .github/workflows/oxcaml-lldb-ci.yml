@@ -21,7 +21,7 @@ jobs:
   build-and-test:
     name: Build LLDB + unit/shell tests (Linux x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     env:
       CC: clang
       CXX: clang++
@@ -40,8 +40,13 @@ jobs:
           # python3 drives the lit test runner (llvm-lit). LLDB's own embedded
           # Python is disabled below, so SWIG/libpython are not required.
 
+      # Use the split restore/save form instead of actions/cache@v4. The
+      # combined action only saves in a post-step at the very end of the job,
+      # which is SKIPPED when the job is cancelled (e.g. by timeout-minutes or
+      # cancel-in-progress). With an explicit save step right after the build
+      # (below) we persist the warm ccache before the tests can hang or fail.
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           # Per-commit key so each run saves a fresh cache; restore-keys fall
@@ -69,10 +74,19 @@ jobs:
           ccache --zero-stats
           ninja -C build lldb lldb-server
 
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+
       - name: Unit tests (check-lldb-unit)
+        timeout-minutes: 45
         run: ninja -C build check-lldb-unit
 
       - name: Shell tests (check-lldb-shell)
+        timeout-minutes: 60
         run: ninja -C build check-lldb-shell
 
       - name: ccache statistics
