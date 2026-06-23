@@ -1,0 +1,80 @@
+name: OxCaml LLDB CI
+
+# Builds clang + lldb (including the OxCaml plugin) and runs LLDB's unit and
+# shell test suites. Triggered on the active OxCaml development branch only.
+
+on:
+  push:
+    branches: [oxcaml-llvm-plugin]
+  pull_request:
+    branches: [oxcaml-llvm-plugin]
+
+# Cancel superseded runs on the same branch/PR to save runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build LLDB + unit/shell tests (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CC: clang
+      CXX: clang++
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_COMPRESS: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang lld ccache python3
+          # python3 drives the lit test runner (llvm-lit). LLDB's own embedded
+          # Python is disabled below, so SWIG/libpython are not required.
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # Per-commit key so each run saves a fresh cache; restore-keys fall
+          # back to the most recent cache for this branch, then any branch.
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
+
+      - name: Configure (CMake + Ninja)
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_ENABLE_PROJECTS="clang;lld;lldb" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_USE_LINKER=lld \
+            -DLLVM_CCACHE_BUILD=ON \
+            -DLLDB_ENABLE_PYTHON=OFF \
+            -DLLDB_INCLUDE_TESTS=ON
+          # No LTO: -DLLVM_ENABLE_LTO is intentionally left unset
+
+      - name: Build lldb
+        run: |
+          ccache --zero-stats
+          ninja -C build lldb lldb-server
+
+      - name: Unit tests (check-lldb-unit)
+        run: ninja -C build check-lldb-unit
+
+      - name: Shell tests (check-lldb-shell)
+        run: ninja -C build check-lldb-shell
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
