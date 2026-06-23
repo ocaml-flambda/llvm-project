@@ -20,29 +20,39 @@
 using llvm::itanium_demangle::starts_with;
 using llvm::itanium_demangle::OutputBuffer;
 
-#define ERROR (~((unsigned)0))
+// Sentinel returned by the Consume* helpers when no digits could be parsed, or
+// the value would overflow. All callers must treat it as a parse failure.
+static constexpr unsigned kParseError = ~0u;
 
-static unsigned ConsumeUnsignedDecimal(std::string_view& sv) {
+static unsigned ConsumeUnsignedDecimal(std::string_view &sv) {
   unsigned res = 0, i = 0;
-  while(sv[i] >= '0' && sv[i] <= '9') {
-    res = res * 10 + (sv[i] - '0');
+  while (i < sv.size() && sv[i] >= '0' && sv[i] <= '9') {
+    unsigned digit = (unsigned)(sv[i] - '0');
+    // Reject values that would overflow, mirroring the compiler's
+    // int_of_string_opt, rather than wrapping silently.
+    if (res > (kParseError - digit) / 10)
+      return kParseError;
+    res = res * 10 + digit;
     i++;
   }
   sv.remove_prefix(i);
-  if(i == 0)
-    return ERROR;
+  if (i == 0)
+    return kParseError;
   return res;
 }
 
-static unsigned ConsumeUnsigned26(std::string_view& sv) {
+static unsigned ConsumeUnsigned26(std::string_view &sv) {
   unsigned res = 0, i = 0;
-  while(sv[i] >= 'A' && sv[i] <= 'Z') {
-    res = res * 26 + (sv[i] - 'A');
+  while (i < sv.size() && sv[i] >= 'A' && sv[i] <= 'Z') {
+    unsigned digit = (unsigned)(sv[i] - 'A');
+    if (res > (kParseError - digit) / 26)
+      return kParseError;
+    res = res * 26 + digit;
     i++;
   }
   sv.remove_prefix(i);
-  if(i == 0)
-    return ERROR;
+  if (i == 0)
+    return kParseError;
   return res;
 }
 
@@ -63,7 +73,7 @@ static unsigned lowerhex(char c) {
 // Returns true on success, false on error
 static bool DecodeEscaped(std::string_view& Mangled, OutputBuffer& Demangled) {
   unsigned len = ConsumeUnsignedDecimal(Mangled);
-  if(len == ERROR || len <= 0 || len > Mangled.size())
+  if(len == kParseError || len <= 0 || len > Mangled.size())
     return false;
 
   size_t split = Mangled.find('_');
@@ -75,7 +85,7 @@ static bool DecodeEscaped(std::string_view& Mangled, OutputBuffer& Demangled) {
 
   while(!coded.empty()) {
     unsigned chunklen = ConsumeUnsigned26(coded);
-    if(chunklen == ERROR || chunklen > raw.size())
+    if(chunklen == kParseError || chunklen > raw.size())
       return false;
     Demangled << raw.substr(0, chunklen);
     raw.remove_prefix(chunklen);
@@ -108,7 +118,7 @@ static bool DecodeIdentifier(std::string_view& Mangled, OutputBuffer& Demangled)
   } else {
     // Plain identifier with length prefix
     unsigned len = ConsumeUnsignedDecimal(Mangled);
-    if(len == ERROR || len <= 0 || len > Mangled.size())
+    if(len == kParseError || len <= 0 || len > Mangled.size())
       return false;
     Demangled << Mangled.substr(0, len);
     Mangled.remove_prefix(len);
@@ -158,46 +168,72 @@ static bool DecodeAnonymousLocation(std::string_view& Mangled, OutputBuffer& Dem
     }
   }
 
-  // Output in format type(filename:line:col)
-  if(underscore_count >= 2) {
-    switch(typ) {
-      case 'S':
-        Demangled << "mod";
-        break;
-      case 'L':
-        Demangled << "fn";
-        break;
-      case 'P':
-        Demangled << "partial";
-        break;
-      default:
-        assert(0);
-    }
-    Demangled << '(';
-    for(size_t j = 0; j < first_underscore; j++)
-      Demangled << buf[j];
-    Demangled << ':';
-    for(size_t j = first_underscore + 1; j < second_underscore; j++)
-      Demangled << buf[j];
-    Demangled << ':';
-    for(size_t j = second_underscore + 1; j < temp_len; j++)
-      Demangled << buf[j];
-    Demangled << ')';
-  } else {
-    // Fallback: just output the identifier as-is
-    for(size_t j = 0; j < temp_len; j++)
-      Demangled << buf[j];
+  // The compiler parser (structured_mangling.ml, parse_location) requires the
+  // exact "filename_line_col" shape with numeric line and column fields, and
+  // rejects the whole symbol otherwise. Mirror that: reject here so the symbol
+  // is passed through unchanged rather than emitting a malformed location.
+  auto all_digits = [&](size_t begin, size_t end) {
+    if(begin >= end)
+      return false;
+    for(size_t j = begin; j < end; j++)
+      if(buf[j] < '0' || buf[j] > '9')
+        return false;
+    return true;
+  };
+  if(underscore_count < 2 ||
+     !all_digits(first_underscore + 1, second_underscore) ||
+     !all_digits(second_underscore + 1, temp_len)) {
+    std::free(buf);
+    return false;
   }
+
+  // Output in format type(filename:line:col)
+  switch(typ) {
+    case 'S':
+      Demangled << "mod";
+      break;
+    case 'L':
+      Demangled << "fn";
+      break;
+    case 'P':
+      Demangled << "partial";
+      break;
+    default:
+      assert(0);
+  }
+  Demangled << '(';
+  for(size_t j = 0; j < first_underscore; j++)
+    Demangled << buf[j];
+  Demangled << ':';
+  for(size_t j = first_underscore + 1; j < second_underscore; j++)
+    Demangled << buf[j];
+  Demangled << ':';
+  for(size_t j = second_underscore + 1; j < temp_len; j++)
+    Demangled << buf[j];
+  Demangled << ')';
 
   std::free(buf);
   return true;
 }
 
-// Demangle a symbol in the structured scheme (prefix "_Caml").
+// Length of the structured-scheme prefix at the start of Mangled, or 0 if there
+// is none. The bare prefix is "_Caml"; the macOS assembler prepends a leading
+// underscore, giving "__Caml". Both are accepted, matching the compiler parser
+// (structured_mangling.ml) and mirroring the flat path's "_caml" handling.
+static size_t MatchedStructuredPrefixLen(std::string_view Mangled) {
+  if(starts_with(Mangled, "__Caml"))
+    return 6;
+  if(starts_with(Mangled, "_Caml"))
+    return 5;
+  return 0;
+}
+
+// Demangle a symbol in the structured scheme (prefix "_Caml"/"__Caml").
 static char *demangleStructured(std::string_view Mangled) {
-  if(!starts_with(Mangled, "_Caml"))
+  size_t prefix_len = MatchedStructuredPrefixLen(Mangled);
+  if(prefix_len == 0)
     return nullptr;
-  Mangled.remove_prefix(5);
+  Mangled.remove_prefix(prefix_len);
 
   // Allocate the buffer at a reasonable size, as OutputBuffer allocates 992
   // bytes when starting from an empty buffer
@@ -207,10 +243,11 @@ static char *demangleStructured(std::string_view Mangled) {
     std::terminate();
   OutputBuffer Demangled(DemangledBuffer, Mangled.size());
 
-#define ENDONERROR() do {           \
-  std::free(Demangled.getBuffer()); \
-  return nullptr;                   \
-} while(0)
+  // Free the output buffer and report failure; used on every error path below.
+  auto fail = [&]() -> char * {
+    std::free(Demangled.getBuffer());
+    return nullptr;
+  };
 
   // Parse path items
   while(!Mangled.empty()) {
@@ -230,7 +267,7 @@ static char *demangleStructured(std::string_view Mangled) {
                   Demangled << '.';
               Mangled.remove_prefix(1);
               if(!DecodeIdentifier(Mangled, Demangled))
-                  ENDONERROR();
+                  return fail();
               break;
 
           case 'S':  // anonymous Struct
@@ -241,7 +278,7 @@ static char *demangleStructured(std::string_view Mangled) {
               char typ = Mangled[0];
               Mangled.remove_prefix(1);
               if(!DecodeAnonymousLocation(Mangled, Demangled, typ))
-                  ENDONERROR();
+                  return fail();
               break;
           }
           case 'I':  // Inline marker (specialization)
@@ -255,20 +292,21 @@ static char *demangleStructured(std::string_view Mangled) {
               break;
 
           default:
-              ENDONERROR();
+              return fail();
       }
   }
 
   // A valid symbol must contain at least one path item; reject names like
   // "_Caml" or "_Caml_123" that decoded to nothing.
   if(Demangled.getCurrentPosition() == 0)
-      ENDONERROR();
+      return fail();
 
-  // Append the trailing suffix (compiler-appended unique ids such as "_5_code")
-  // verbatim. They keep otherwise-identical symbols distinct, so dropping them
-  // would risk name clashes.
-  Demangled << Mangled;
-
+  // Anything left in Mangled is the compiler-appended suffix (unique ids such as
+  // "_5_code") that begins at the terminating underscore. Because the path was
+  // decoded from exact length-prefixed identifiers, this boundary is precise, so
+  // we drop the suffix here rather than re-deriving it heuristically over the
+  // whole demangled string (which would also strip digits from real identifiers
+  // such as "add_2").
   Demangled << '\0';
 
   return Demangled.getBuffer();
@@ -277,12 +315,10 @@ static char *demangleStructured(std::string_view Mangled) {
 // ===========================================================================
 // Flat scheme (legacy "caml"/"_caml" prefixes)
 //
-// Ports the flat0 (OCaml <= 5.2) and flat1 (OCaml >= 5.3) demanglers from the
-// ocamlfilt reference tool. flat0 uses "__" as the module separator and "$xx"
-// hex escapes. flat1 additionally supports the macOS assembler flavour, which
-// uses "$" as the separator and "$$xx"/"$$$xx" escapes; the flavour is
-// auto-detected per symbol. As with the structured scheme, the trailing
-// compiler suffix (e.g. "_42") is preserved verbatim.
+// Ports the flat0 (OCaml <= 5.2) demangler from the ocamlfilt reference tool:
+// "__" is the module separator and "$xx" a hex escape. The trailing compiler
+// stamp is stripped heuristically (flat names are not length-delimited, so the
+// boundary cannot be known exactly as it can for the structured scheme).
 // ===========================================================================
 
 static bool IsUpperAZ(char c) { return c >= 'A' && c <= 'Z'; }
@@ -310,35 +346,6 @@ static size_t MatchedFlatPrefixLen(std::string_view Mangled) {
   if(Mangled.size() > 4 && starts_with(Mangled, "caml") && IsUpperAZ(Mangled[4]))
     return 4;
   return 0;
-}
-
-enum class FlatStyle { Linux, Macos };
-
-// flat1 emits one of two flavours per binary. A bare '.' or "__" is a positive
-// Linux marker; "$$" or a '$' not followed by two hex digits is a positive
-// macOS marker. A '$' followed by two hex digits is ambiguous in isolation, so
-// if no Linux marker appears anywhere the only coherent reading is macOS.
-static FlatStyle DetectFlatStyle(std::string_view S, size_t PrefixLen) {
-  size_t len = S.size();
-  bool saw_dollar_hex_pair = false;
-  for(size_t i = PrefixLen; i < len;) {
-    if(S[i] == '.')
-      return FlatStyle::Linux;
-    if(S[i] == '_' && i + 1 < len && S[i + 1] == '_')
-      return FlatStyle::Linux;
-    if(S[i] == '$') {
-      if(i + 1 < len && S[i + 1] == '$')
-        return FlatStyle::Macos;
-      if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
-        saw_dollar_hex_pair = true;
-        i += 3;
-        continue;
-      }
-      return FlatStyle::Macos;
-    }
-    i++;
-  }
-  return saw_dollar_hex_pair ? FlatStyle::Macos : FlatStyle::Linux;
 }
 
 // flat0 (OCaml <= 5.2): "__" -> '.', "$xx" -> hex char, else literal. Returns a
@@ -379,84 +386,9 @@ static char *demangleFlat0(std::string_view S, size_t PrefixLen) {
   return Out;
 }
 
-// flat1 (OCaml >= 5.3): Linux flavour matches flat0; the macOS flavour uses '$'
-// as the separator with "$$xx" / "$$$xx" escapes. Returns a malloc'd C string.
-static char *demangleFlat1(std::string_view S, size_t PrefixLen) {
-  size_t len = S.size();
-  FlatStyle style = DetectFlatStyle(S, PrefixLen);
-  char *Out = static_cast<char *>(std::malloc(len + 1));
-  if(Out == nullptr)
-    std::terminate();
-
-  size_t j = 0;
-  for(size_t i = PrefixLen; i < len;) {
-    if(style == FlatStyle::Macos) {
-      if(S[i] != '$') {
-        Out[j++] = S[i++];
-        continue;
-      }
-      if(i + 4 < len && S[i + 1] == '$' && S[i + 2] == '$' &&
-         IsFlatXDigit(S[i + 3]) && IsFlatXDigit(S[i + 4])) {
-        // "$$$xx" -> separator + hex char
-        Out[j++] = '.';
-        Out[j++] = (char)((FlatHex(S[i + 3]) << 4) | FlatHex(S[i + 4]));
-        i += 5;
-        continue;
-      }
-      if(i + 3 < len && S[i + 1] == '$' && IsFlatXDigit(S[i + 2]) &&
-         IsFlatXDigit(S[i + 3])) {
-        // "$$xx" -> hex char
-        Out[j++] = (char)((FlatHex(S[i + 2]) << 4) | FlatHex(S[i + 3]));
-        i += 4;
-        continue;
-      }
-      // bare '$' -> separator
-      Out[j++] = '.';
-      i++;
-      continue;
-    }
-
-    // Linux flavour
-    if(S[i] == '$') {
-      if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
-        Out[j++] = (char)((FlatHex(S[i + 1]) << 4) | FlatHex(S[i + 2]));
-        i += 3;
-        continue;
-      }
-      Out[j++] = '$';
-      i++;
-      continue;
-    }
-    if(S[i] == '_' && i + 1 < len && S[i + 1] == '_') {
-      Out[j++] = '.';
-      i += 2;
-      continue;
-    }
-    Out[j++] = S[i++];
-  }
-  Out[j] = '\0';
-  return Out;
-}
-
 bool llvm::isOxCamlMangledName(std::string_view MangledName) {
-  return starts_with(MangledName, "_Caml") ||
+  return MatchedStructuredPrefixLen(MangledName) != 0 ||
          MatchedFlatPrefixLen(MangledName) != 0;
-}
-
-// Dispatch to the appropriate scheme, without post-processing.
-static char *demangleAnyScheme(std::string_view Mangled) {
-  if(starts_with(Mangled, "_Caml"))
-    return demangleStructured(Mangled);
-
-  if(size_t PrefixLen = MatchedFlatPrefixLen(Mangled)) {
-    // flat1 (>= 5.3) is a superset of flat0; only fall back to flat0 (<= 5.2)
-    // if flat1 rejects the symbol.
-    if(char *Result = demangleFlat1(Mangled, PrefixLen))
-      return Result;
-    return demangleFlat0(Mangled, PrefixLen);
-  }
-
-  return nullptr;
 }
 
 // Length of the demangled name S[0..len) with any trailing OCaml compiler stamp
@@ -495,16 +427,30 @@ static size_t lengthWithoutStamp(const char *S, size_t len) {
   return end;
 }
 
-char *llvm::oxcamlDemangle(std::string_view Mangled) {
-  char *Result = demangleAnyScheme(Mangled);
-  if(Result == nullptr)
-    return nullptr;
-
-  // Strip the trailing compiler stamp: it is a non-deterministic counter with
-  // no source meaning, so it is dropped from the demangled name.
+// Truncate Result in place at the end of its source-meaningful content, i.e.
+// drop the trailing compiler stamp. Used for the flat scheme only.
+static void stripTrailingStamp(char *Result) {
   size_t len = 0;
   while(Result[len] != '\0')
     len++;
   Result[lengthWithoutStamp(Result, len)] = '\0';
-  return Result;
+}
+
+char *llvm::oxcamlDemangle(std::string_view Mangled) {
+  // Structured scheme: the demangler knows the exact path/suffix boundary and
+  // drops the stamp itself, so its result needs no post-processing.
+  if(MatchedStructuredPrefixLen(Mangled))
+    return demangleStructured(Mangled);
+
+  // Flat scheme: there are no length delimiters, so the trailing compiler stamp
+  // can only be removed heuristically after demangling.
+  if(size_t PrefixLen = MatchedFlatPrefixLen(Mangled)) {
+    char *Result = demangleFlat0(Mangled, PrefixLen);
+    if(Result == nullptr)
+      return nullptr;
+    stripTrailingStamp(Result);
+    return Result;
+  }
+
+  return nullptr;
 }
