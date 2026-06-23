@@ -65,6 +65,12 @@ getArm64ECInsertionPointInMangledName(std::string_view MangledName);
 char *oxcamlDemangle(std::string_view MangledName);
 
 // Returns true if MangledName uses a recognised OxCaml mangling scheme.
+//
+// This is a loose candidate filter based on the scheme prefix, not a guarantee
+// that the name demangles: some names it accepts (e.g. "_Caml" with an empty
+// path) are still rejected by oxcamlDemangle, just as the other schemes'
+// prefix-based predicates behave. Callers must therefore handle a nullptr
+// result from oxcamlDemangle even when this returns true.
 bool isOxCamlMangledName(std::string_view MangledName);
 
 // Demangles a Rust v0 mangled symbol.
