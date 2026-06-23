@@ -11,6 +11,8 @@
 //===----------------------------------------------------------------------===//
 
 #include <cassert>
+#include <limits>
+#include <optional>
 #include <string_view>
 
 #include "llvm/Demangle/StringViewExtras.h"
@@ -20,39 +22,37 @@
 using llvm::itanium_demangle::starts_with;
 using llvm::itanium_demangle::OutputBuffer;
 
-// Sentinel returned by the Consume* helpers when no digits could be parsed, or
-// the value would overflow. All callers must treat it as a parse failure.
-static constexpr unsigned kParseError = ~0u;
-
-static unsigned ConsumeUnsignedDecimal(std::string_view &sv) {
+// The Consume* helpers return std::nullopt when no digits could be parsed, or
+// the value would overflow; all callers must treat that as a parse failure.
+static std::optional<unsigned> ConsumeUnsignedDecimal(std::string_view &sv) {
   unsigned res = 0, i = 0;
   while (i < sv.size() && sv[i] >= '0' && sv[i] <= '9') {
-    unsigned digit = (unsigned)(sv[i] - '0');
+    unsigned digit = static_cast<unsigned>(sv[i] - '0');
     // Reject values that would overflow, mirroring the compiler's
     // int_of_string_opt, rather than wrapping silently.
-    if (res > (kParseError - digit) / 10)
-      return kParseError;
+    if (res > (std::numeric_limits<unsigned>::max() - digit) / 10)
+      return std::nullopt;
     res = res * 10 + digit;
     i++;
   }
   sv.remove_prefix(i);
   if (i == 0)
-    return kParseError;
+    return std::nullopt;
   return res;
 }
 
-static unsigned ConsumeUnsigned26(std::string_view &sv) {
+static std::optional<unsigned> ConsumeUnsigned26(std::string_view &sv) {
   unsigned res = 0, i = 0;
   while (i < sv.size() && sv[i] >= 'A' && sv[i] <= 'Z') {
-    unsigned digit = (unsigned)(sv[i] - 'A');
-    if (res > (kParseError - digit) / 26)
-      return kParseError;
+    unsigned digit = static_cast<unsigned>(sv[i] - 'A');
+    if (res > (std::numeric_limits<unsigned>::max() - digit) / 26)
+      return std::nullopt;
     res = res * 26 + digit;
     i++;
   }
   sv.remove_prefix(i);
   if (i == 0)
-    return kParseError;
+    return std::nullopt;
   return res;
 }
 
@@ -72,9 +72,10 @@ static unsigned lowerhex(char c) {
 // Decode escaped identifier (format: u<len><coded>_<raw>)
 // Returns true on success, false on error
 static bool DecodeEscaped(std::string_view& Mangled, OutputBuffer& Demangled) {
-  unsigned len = ConsumeUnsignedDecimal(Mangled);
-  if(len == kParseError || len <= 0 || len > Mangled.size())
+  std::optional<unsigned> lenOpt = ConsumeUnsignedDecimal(Mangled);
+  if(!lenOpt || *lenOpt == 0 || *lenOpt > Mangled.size())
     return false;
+  unsigned len = *lenOpt;
 
   size_t split = Mangled.find('_');
   if(split >= len)
@@ -84,9 +85,10 @@ static bool DecodeEscaped(std::string_view& Mangled, OutputBuffer& Demangled) {
   std::string_view raw = Mangled.substr(split+1, len-split-1);
 
   while(!coded.empty()) {
-    unsigned chunklen = ConsumeUnsigned26(coded);
-    if(chunklen == kParseError || chunklen > raw.size())
+    std::optional<unsigned> chunklenOpt = ConsumeUnsigned26(coded);
+    if(!chunklenOpt || *chunklenOpt > raw.size())
       return false;
+    unsigned chunklen = *chunklenOpt;
     Demangled << raw.substr(0, chunklen);
     raw.remove_prefix(chunklen);
 
@@ -117,9 +119,10 @@ static bool DecodeIdentifier(std::string_view& Mangled, OutputBuffer& Demangled)
     return DecodeEscaped(Mangled, Demangled);
   } else {
     // Plain identifier with length prefix
-    unsigned len = ConsumeUnsignedDecimal(Mangled);
-    if(len == kParseError || len <= 0 || len > Mangled.size())
+    std::optional<unsigned> lenOpt = ConsumeUnsignedDecimal(Mangled);
+    if(!lenOpt || *lenOpt == 0 || *lenOpt > Mangled.size())
       return false;
+    unsigned len = *lenOpt;
     Demangled << Mangled.substr(0, len);
     Mangled.remove_prefix(len);
     return true;
@@ -236,12 +239,14 @@ static char *demangleStructured(std::string_view Mangled) {
   Mangled.remove_prefix(prefix_len);
 
   // Allocate the buffer at a reasonable size, as OutputBuffer allocates 992
-  // bytes when starting from an empty buffer
-  char *DemangledBuffer;
-  DemangledBuffer = static_cast<char *>(std::malloc(Mangled.size()));
+  // bytes when starting from an empty buffer. Add one so the allocation is never
+  // zero (malloc(0) may return nullptr, which we treat as failure) for an empty
+  // path such as "_Caml"; OutputBuffer grows on demand if the path is longer.
+  size_t buffer_size = Mangled.size() + 1;
+  char *DemangledBuffer = static_cast<char *>(std::malloc(buffer_size));
   if (DemangledBuffer == nullptr)
     std::terminate();
-  OutputBuffer Demangled(DemangledBuffer, Mangled.size());
+  OutputBuffer Demangled(DemangledBuffer, buffer_size);
 
   // Free the output buffer and report failure; used on every error path below.
   auto fail = [&]() -> char * {
