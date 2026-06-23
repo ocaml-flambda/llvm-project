@@ -30,9 +30,21 @@ bool DWARFIndex::ProcessFunctionDIE(
   llvm::StringRef name = lookup_info.GetLookupName().GetStringRef();
   FunctionNameType name_type_mask = lookup_info.GetNameTypeMask();
 
+  // For OCaml, name-based lookups compare against the source-level name
+  // (DW_AT_name, or the demangled DW_AT_linkage_name for the structured
+  // scheme) that users type, not the mangled linkage name that
+  // die.GetMangledName() returns.
+  const bool is_ocaml =
+      SymbolFileDWARF::GetLanguage(*die.GetCU()) == eLanguageTypeOCaml;
+  ConstString ocaml_source_name;
+  if (is_ocaml)
+    ocaml_source_name = die.GetDWARF()->ConstructFunctionDemangledName(die);
+
   if (!(name_type_mask & eFunctionNameTypeFull)) {
     ConstString name_to_match_against;
-    if (const char *mangled_die_name = die.GetMangledName()) {
+    if (is_ocaml) {
+      name_to_match_against = ocaml_source_name;
+    } else if (const char *mangled_die_name = die.GetMangledName()) {
       name_to_match_against = ConstString(mangled_die_name);
     } else {
       SymbolFileDWARF *symbols = die.GetDWARF();
@@ -58,8 +70,11 @@ bool DWARFIndex::ProcessFunctionDIE(
   if (!SymbolFileDWARF::DIEInDeclContext(parent_decl_ctx, die))
     return true;
 
-  // In case of a full match, we just insert everything we find.
-  const char *full_match_candidate = die.GetMangledName();
+  // In case of a full match, we just insert everything we find. For OCaml,
+  // match the user's input against the source-level name rather than the
+  // mangled linkage name.
+  const char *full_match_candidate =
+      is_ocaml ? ocaml_source_name.AsCString() : die.GetMangledName();
   if (name_type_mask & eFunctionNameTypeFull && full_match_candidate &&
       llvm::StringRef(full_match_candidate) == name)
     return callback(die);
