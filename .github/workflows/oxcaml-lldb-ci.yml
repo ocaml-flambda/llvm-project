@@ -1,9 +1,9 @@
 name: OxCaml LLDB CI
 
-# Builds clang + lldb (including the OxCaml plugin) and runs LLDB's unit and
-# shell test suites. On pull requests it then builds the oxcaml compiler and
-# runs its DWARF test suite against the freshly built lldb. Triggered on the
-# active OxCaml development branch only.
+# Builds clang, lld, and lldb (including the OxCaml LLDB plugin) and runs LLDB's
+# unit and shell test suites. On pull requests it then builds the oxcaml
+# compiler and runs its DWARF test suite against the freshly built lldb.
+# Triggered on the active OxCaml development branch only (oxcaml-llvm-plugin).
 
 on:
   push:
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build LLDB + unit/shell + DWARF tests (Linux x86_64)
+    name: Build and test LLDB (Linux x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -34,22 +34,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Install build dependencies. Python for test runners, scripting, and the
+      # OxCaml LLDB tests.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang lld ccache python3 python3-dev swig
-          # python3 drives the lit test runner (llvm-lit). swig + python3-dev
-          # are required to build LLDB's embedded script interpreter, which the
-          # OxCaml DWARF tests use to drive lldb (LLDB_ENABLE_PYTHON=ON below).
 
-      # Use the split restore/save form instead of actions/cache@v4. The
-      # combined action only saves in a post-step at the very end of the job,
-      # which is SKIPPED when the job is cancelled (e.g. by timeout-minutes or
-      # cancel-in-progress). With an explicit save step right after the build
-      # (below) we persist the warm ccache before the tests can hang or fail.
+      # Use the split restore/save form instead of actions/cache@v4. This
+      # ensures that we cache as much as possible even if there are subsequent
+      # test failures.
       - name: Restore ccache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ env.CCACHE_DIR }}
           # Per-commit key so each run saves a fresh cache; restore-keys fall
@@ -70,16 +67,19 @@ jobs:
             -DLLVM_CCACHE_BUILD=ON \
             -DLLDB_ENABLE_PYTHON=ON \
             -DLLDB_INCLUDE_TESTS=ON
-          # No LTO: -DLLVM_ENABLE_LTO is intentionally left unset
 
       - name: Build lldb
         run: |
           ccache --zero-stats
           ninja -C build lldb lldb-server
 
+      # Build the unit-test and shell-test targets early so they are cached.
+      - name: Build test binaries
+        run: ninja -C build LLDBUnitTests lldb-shell-test-deps
+
       - name: Save ccache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
@@ -93,9 +93,8 @@ jobs:
         run: ninja -C build check-lldb-shell
 
       # --- OxCaml DWARF tests ----------------------------------------------
-      # Build the oxcaml compiler and run its DWARF test suite against the lldb
-      # built above. Limited to the PRs (so skipped when pushing to
-      # oxcaml-llvm-plugin).
+      # Build the oxcaml compiler and run its DWARF test suite against lldb.
+      # Limited to PRs, since oxcaml-llvm-plugin can be ahead of oxcaml/oxcaml.
       - name: Install oxcaml build dependencies
         if: github.event_name == 'pull_request'
         run: |
@@ -112,8 +111,8 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           num=$(printf '%s' "$PR_BODY" \
-            | grep -oE '\[Companion OxCaml PR\]\(https://github\.com/oxcaml/oxcaml/pull/[0-9]+\)' \
-            | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+            | grep -oP '\[Companion OxCaml PR\]\(https://github\.com/oxcaml/oxcaml/pull/\K[0-9]+' \
+            | head -1)
           if [ -n "$num" ]; then
             echo "ref=refs/pull/$num/head" >> "$GITHUB_OUTPUT"
             echo "Testing against companion oxcaml PR #$num"
@@ -127,19 +126,14 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: oxcaml/oxcaml
-          # refs/pull/N/head on the base repo also covers PRs from forks.
           ref: ${{ steps.oxcaml_ref.outputs.ref }}
           path: oxcaml-src
 
       - name: Set up OCaml toolchain
         if: github.event_name == 'pull_request'
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3
         with:
           ocaml-compiler: "5.4"
-          # setup-ocaml already caches the opam root (the switch + installed
-          # packages such as dune/menhir). dune-cache additionally persists
-          # ~/.cache/dune across runs so `make compiler` reuses build artifacts
-          # for the (largely unchanged) oxcaml source tree.
           dune-cache: true
 
       - name: Install oxcaml build tools
@@ -155,9 +149,6 @@ jobs:
           CC: gcc
           CXX: g++
         run: |
-          # Bring the opam switch onto PATH for the whole block: ./configure
-          # probes for ocamlopt directly, so it must run under the opam env
-          # (setup-ocaml does not add the switch bin to PATH for plain steps).
           eval "$(opam env)"
           autoconf
           ./configure --prefix="$PWD/_install" --enable-function-sections
@@ -165,13 +156,10 @@ jobs:
 
       - name: Run DWARF tests
         if: github.event_name == 'pull_request'
+        timeout-minutes: 60
         working-directory: oxcaml-src
         env:
           OXCAML_LLDB: ${{ github.workspace }}/build/bin/lldb
-          # Disable the dune cache for this step (it is enabled globally by
-          # setup-ocaml's dune-cache for the compiler build), because the tests
-          # invoke $OXCAML_LLDB, a binary outside the dune workspace referenced
-          # only by a constant path in an env var.
           DUNE_CACHE: disabled
         run: opam exec -- make runtest-dwarf
 
