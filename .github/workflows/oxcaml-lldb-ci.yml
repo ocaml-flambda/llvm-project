@@ -135,6 +135,11 @@ jobs:
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.4"
+          # setup-ocaml already caches the opam root (the switch + installed
+          # packages such as dune/menhir). dune-cache additionally persists
+          # ~/.cache/dune across runs so `make compiler` reuses build artifacts
+          # for the (largely unchanged) oxcaml source tree.
+          dune-cache: true
 
       - name: Install oxcaml build tools
         if: github.event_name == 'pull_request'
@@ -144,9 +149,13 @@ jobs:
         if: github.event_name == 'pull_request'
         working-directory: oxcaml-src
         run: |
+          # Bring the opam switch onto PATH for the whole block: ./configure
+          # probes for ocamlopt directly, so it must run under the opam env
+          # (setup-ocaml does not add the switch bin to PATH for plain steps).
+          eval "$(opam env)"
           autoconf
           ./configure --prefix="$PWD/_install" --enable-function-sections
-          opam exec -- make compiler
+          make compiler
 
       - name: Run DWARF tests
         if: github.event_name == 'pull_request'
