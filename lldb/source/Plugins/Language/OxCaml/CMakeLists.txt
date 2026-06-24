@@ -8,6 +8,7 @@ add_lldb_library(lldbPluginOxCamlLanguage PLUGIN
 
   LINK_LIBS
     lldbCore
+    lldbExpression
     lldbTarget
     lldbUtility
 )
