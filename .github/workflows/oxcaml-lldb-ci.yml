@@ -96,6 +96,7 @@ jobs:
       - name: Install oxcaml build dependencies
         if: github.event_name == 'pull_request'
         run: |
+          sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             gdb autoconf build-essential
 
