@@ -38,9 +38,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build clang lld ccache python3
-          # python3 drives the lit test runner (llvm-lit). LLDB's own embedded
-          # Python is disabled below, so SWIG/libpython are not required.
+            cmake ninja-build clang lld ccache python3 python3-dev swig
+          # python3 drives the lit test runner (llvm-lit). swig + python3-dev
+          # are required to build LLDB's embedded script interpreter, which the
+          # OxCaml DWARF tests use to drive lldb (LLDB_ENABLE_PYTHON=ON below).
 
       # Use the split restore/save form instead of actions/cache@v4. The
       # combined action only saves in a post-step at the very end of the job,
@@ -67,7 +68,7 @@ jobs:
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DLLVM_USE_LINKER=lld \
             -DLLVM_CCACHE_BUILD=ON \
-            -DLLDB_ENABLE_PYTHON=OFF \
+            -DLLDB_ENABLE_PYTHON=ON \
             -DLLDB_INCLUDE_TESTS=ON
           # No LTO: -DLLVM_ENABLE_LTO is intentionally left unset
 
