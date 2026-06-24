@@ -84,13 +84,13 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
 
-      # - name: Unit tests (check-lldb-unit)
-      #   timeout-minutes: 45
-      #   run: ninja -C build check-lldb-unit
+      - name: Unit tests (check-lldb-unit)
+        timeout-minutes: 45
+        run: ninja -C build check-lldb-unit
 
-      # - name: Shell tests (check-lldb-shell)
-      #   timeout-minutes: 60
-      #   run: ninja -C build check-lldb-shell
+      - name: Shell tests (check-lldb-shell)
+        timeout-minutes: 60
+        run: ninja -C build check-lldb-shell
 
       # --- OxCaml DWARF tests ----------------------------------------------
       # Build the oxcaml compiler and run its DWARF test suite against the lldb
