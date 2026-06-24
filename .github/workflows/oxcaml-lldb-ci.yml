@@ -132,9 +132,12 @@ jobs:
           ocaml-compiler: "5.4"
           dune-cache: true
 
-      - name: Install oxcaml build tools
+      - name: Install oxcaml opam dependencies
         if: github.event_name == 'pull_request'
-        run: opam install -y dune menhir.20231231
+        working-directory: oxcaml-src
+        run: |
+          sed -i -e '/ocamlformat\|merlin\|ocaml-lsp-server/d' oxcaml-dev.opam
+          opam pin add --yes oxcaml-dev .
 
       - name: Build oxcaml compiler
         if: github.event_name == 'pull_request'
