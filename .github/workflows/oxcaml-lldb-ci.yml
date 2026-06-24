@@ -110,7 +110,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           num=$(printf '%s' "$PR_BODY" \
-            | grep -oP '\[Companion OxCaml PR\]\(https://github\.com/oxcaml/oxcaml/pull/\K[0-9]+' \
+            | grep -oiP '\[Companion OxCaml PR\]\(https://github\.com/oxcaml/oxcaml/pull/\K[0-9]+' \
             | head -1)
           if [ -n "$num" ]; then
             echo "ref=refs/pull/$num/head" >> "$GITHUB_OUTPUT"
