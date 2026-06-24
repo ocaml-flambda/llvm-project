@@ -40,9 +40,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang lld ccache python3 python3-dev swig
 
-      # Use the split restore/save form instead of actions/cache@v4. This
-      # ensures that we cache as much as possible even if there are subsequent
-      # test failures.
       - name: Restore ccache
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
