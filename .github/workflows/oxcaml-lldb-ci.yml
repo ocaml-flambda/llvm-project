@@ -1,0 +1,167 @@
+name: OxCaml LLDB CI
+
+# Builds clang, lld, and lldb (including the OxCaml LLDB plugin) and runs LLDB's
+# unit and shell test suites. On pull requests it then builds the oxcaml
+# compiler and runs its DWARF test suite against the freshly built lldb.
+# Triggered on the active OxCaml development branch only (oxcaml-llvm-plugin).
+
+on:
+  push:
+    branches: [oxcaml-llvm-plugin]
+  pull_request:
+    branches: [oxcaml-llvm-plugin]
+
+# Cancel superseded runs on the same branch/PR to save runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test LLDB (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CC: clang
+      CXX: clang++
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_COMPRESS: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang lld ccache python3 python3-dev swig
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # Per-commit key so each run saves a fresh cache; restore-keys fall
+          # back to the most recent cache for this branch, then any branch.
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
+
+      - name: Configure (CMake + Ninja)
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_ENABLE_PROJECTS="clang;lld;lldb" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_USE_LINKER=lld \
+            -DLLVM_CCACHE_BUILD=ON \
+            -DLLDB_ENABLE_PYTHON=ON \
+            -DLLDB_INCLUDE_TESTS=ON
+
+      - name: Build lldb
+        run: |
+          ccache --zero-stats
+          ninja -C build lldb lldb-server
+
+      # Build the unit-test and shell-test targets early so they are cached.
+      - name: Build test binaries
+        run: ninja -C build LLDBUnitTests lldb-shell-test-deps
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+
+      - name: Unit tests (check-lldb-unit)
+        timeout-minutes: 45
+        run: ninja -C build check-lldb-unit
+
+      - name: Shell tests (check-lldb-shell)
+        timeout-minutes: 60
+        run: ninja -C build check-lldb-shell
+
+      # --- OxCaml DWARF tests ----------------------------------------------
+      # Build the oxcaml compiler and run its DWARF test suite against lldb.
+      # Limited to PRs, since oxcaml-llvm-plugin can be ahead of oxcaml/oxcaml.
+      - name: Install oxcaml build dependencies
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gdb autoconf build-essential
+
+      - name: Resolve oxcaml source ref
+        id: oxcaml_ref
+        if: github.event_name == 'pull_request'
+        # Default to oxcaml/oxcaml main; override with a companion PR when this
+        # PR's body links one as
+        # [Companion OxCaml PR](https://github.com/oxcaml/oxcaml/pull/N).
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          num=$(printf '%s' "$PR_BODY" \
+            | grep -oiP '\[Companion OxCaml PR\]\(https://github\.com/oxcaml/oxcaml/pull/\K[0-9]+' \
+            | head -1)
+          if [ -n "$num" ]; then
+            echo "ref=refs/pull/$num/head" >> "$GITHUB_OUTPUT"
+            echo "Testing against companion oxcaml PR #$num"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "Testing against oxcaml/oxcaml main"
+          fi
+
+      - name: Checkout oxcaml
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          repository: oxcaml/oxcaml
+          ref: ${{ steps.oxcaml_ref.outputs.ref }}
+          path: oxcaml-src
+
+      - name: Set up OCaml toolchain
+        if: github.event_name == 'pull_request'
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4"
+          dune-cache: true
+
+      - name: Install oxcaml opam dependencies
+        if: github.event_name == 'pull_request'
+        working-directory: oxcaml-src
+        run: |
+          sed -i -e '/ocamlformat\|merlin\|ocaml-lsp-server/d' oxcaml-dev.opam
+          opam pin add --yes oxcaml-dev .
+
+      - name: Build oxcaml compiler
+        if: github.event_name == 'pull_request'
+        working-directory: oxcaml-src
+        env:
+          # Build the OCaml runtime with gcc, overriding the job-level
+          # CC=clang/CXX=clang++ used for the LLVM build.
+          CC: gcc
+          CXX: g++
+        run: |
+          eval "$(opam env)"
+          autoconf
+          ./configure --prefix="$PWD/_install" --enable-function-sections
+          make compiler
+
+      - name: Run DWARF tests
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 60
+        working-directory: oxcaml-src
+        env:
+          OXCAML_LLDB: ${{ github.workspace }}/build/bin/lldb
+          DUNE_CACHE: disabled
+        run: opam exec -- make runtest-dwarf
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
