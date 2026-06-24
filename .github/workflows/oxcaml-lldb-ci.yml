@@ -149,6 +149,11 @@ jobs:
       - name: Build oxcaml compiler
         if: github.event_name == 'pull_request'
         working-directory: oxcaml-src
+        env:
+          # Build the OCaml runtime with gcc, overriding the job-level
+          # CC=clang/CXX=clang++ used for the LLVM build.
+          CC: gcc
+          CXX: g++
         run: |
           # Bring the opam switch onto PATH for the whole block: ./configure
           # probes for ocamlopt directly, so it must run under the opam env
@@ -163,6 +168,11 @@ jobs:
         working-directory: oxcaml-src
         env:
           OXCAML_LLDB: ${{ github.workspace }}/build/bin/lldb
+          # Disable the dune cache for this step (it is enabled globally by
+          # setup-ocaml's dune-cache for the compiler build), because the tests
+          # invoke $OXCAML_LLDB, a binary outside the dune workspace referenced
+          # only by a constant path in an env var.
+          DUNE_CACHE: disabled
         run: opam exec -- make runtest-dwarf
 
       - name: ccache statistics
