@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <cassert>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -129,23 +130,25 @@ static bool DecodeIdentifier(std::string_view& Mangled, OutputBuffer& Demangled)
   }
 }
 
+// True if buf[begin, end) is a non-empty run of decimal digits.
+static bool AllDigits(const char *buf, size_t begin, size_t end) {
+  if(begin >= end)
+    return false;
+  for(size_t j = begin; j < end; j++)
+    if(buf[j] < '0' || buf[j] > '9')
+      return false;
+  return true;
+}
+
 // Decode anonymous location (format: filename_line_col)
 // Anonymous functions, modules and partial functions are encoded as:
 //   type(filename:line:col)
 // where <type> can be fn, mod or partial
 // Returns true on success, false on error
 static bool DecodeAnonymousLocation(std::string_view& Mangled, OutputBuffer& Demangled, char typ) {
-  // Allocate temporary buffer based on remaining mangled string size
-  // The decoded identifier will be at most the size of the remaining mangled string
-  size_t buffer_size = Mangled.size();
-  if(buffer_size == 0)
-    return false;
-
-  char *temp_buf = static_cast<char *>(std::malloc(buffer_size));
-  if(temp_buf == nullptr)
-    std::terminate();
-
-  OutputBuffer TempDemangled(temp_buf, buffer_size);
+  // Decode the identifier into a scratch buffer first; once we know where its
+  // last two underscores are we re-emit it as type(filename:line:col).
+  OutputBuffer TempDemangled;
 
   if(!DecodeIdentifier(Mangled, TempDemangled)) {
     std::free(TempDemangled.getBuffer());
@@ -175,17 +178,9 @@ static bool DecodeAnonymousLocation(std::string_view& Mangled, OutputBuffer& Dem
   // exact "filename_line_col" shape with numeric line and column fields, and
   // rejects the whole symbol otherwise. Mirror that: reject here so the symbol
   // is passed through unchanged rather than emitting a malformed location.
-  auto all_digits = [&](size_t begin, size_t end) {
-    if(begin >= end)
-      return false;
-    for(size_t j = begin; j < end; j++)
-      if(buf[j] < '0' || buf[j] > '9')
-        return false;
-    return true;
-  };
   if(underscore_count < 2 ||
-     !all_digits(first_underscore + 1, second_underscore) ||
-     !all_digits(second_underscore + 1, temp_len)) {
+     !AllDigits(buf, first_underscore + 1, second_underscore) ||
+     !AllDigits(buf, second_underscore + 1, temp_len)) {
     std::free(buf);
     return false;
   }
@@ -238,15 +233,7 @@ static char *demangleStructured(std::string_view Mangled) {
     return nullptr;
   Mangled.remove_prefix(prefix_len);
 
-  // Allocate the buffer at a reasonable size, as OutputBuffer allocates 992
-  // bytes when starting from an empty buffer. Add one so the allocation is never
-  // zero (malloc(0) may return nullptr, which we treat as failure) for an empty
-  // path such as "_Caml"; OutputBuffer grows on demand if the path is longer.
-  size_t buffer_size = Mangled.size() + 1;
-  char *DemangledBuffer = static_cast<char *>(std::malloc(buffer_size));
-  if (DemangledBuffer == nullptr)
-    std::terminate();
-  OutputBuffer Demangled(DemangledBuffer, buffer_size);
+  OutputBuffer Demangled;
 
   // Free the output buffer and report failure; used on every error path below.
   auto fail = [&]() -> char * {
@@ -306,12 +293,11 @@ static char *demangleStructured(std::string_view Mangled) {
   if(Demangled.getCurrentPosition() == 0)
       return fail();
 
-  // Anything left in Mangled is the compiler-appended suffix (unique ids such as
-  // "_5_code") that begins at the terminating underscore. Because the path was
-  // decoded from exact length-prefixed identifiers, this boundary is precise, so
-  // we drop the suffix here rather than re-deriving it heuristically over the
-  // whole demangled string (which would also strip digits from real identifiers
-  // such as "add_2").
+  // Whatever remains in Mangled is the compiler-appended suffix (e.g.
+  // "_5_code"). The path was decoded from exact length-prefixed identifiers, so
+  // this boundary is precise: we drop the suffix simply by not appending it.
+  // (The flat scheme, lacking length prefixes, must instead strip the stamp
+  // heuristically; see stripTrailingStamp.)
   Demangled << '\0';
 
   return Demangled.getBuffer();
@@ -357,38 +343,35 @@ static size_t MatchedFlatPrefixLen(std::string_view Mangled) {
 // malloc'd C string.
 static char *demangleFlat0(std::string_view S, size_t PrefixLen) {
   size_t len = S.size();
-  char *Out = static_cast<char *>(std::malloc(len + 1));
-  if(Out == nullptr)
-    std::terminate();
+  OutputBuffer Demangled;
 
-  size_t j = 0;
   for(size_t i = PrefixLen; i < len;) {
     if(S[i] == '_') {
       if(i + 1 >= len)
         break; // dangling '_' -> stop
       if(S[i + 1] == '_') {
-        Out[j++] = '.';
+        Demangled << '.';
         i += 2;
         continue;
       }
-      Out[j++] = '_';
+      Demangled << '_';
       i++;
       continue;
     }
     if(S[i] == '$') {
       if(i + 2 < len && IsFlatXDigit(S[i + 1]) && IsFlatXDigit(S[i + 2])) {
-        Out[j++] = (char)((FlatHex(S[i + 1]) << 4) | FlatHex(S[i + 2]));
+        Demangled << (char)((FlatHex(S[i + 1]) << 4) | FlatHex(S[i + 2]));
         i += 3;
         continue;
       }
-      Out[j++] = '$'; // not a valid escape -> literal '$'
+      Demangled << '$'; // not a valid escape -> literal '$'
       i++;
       continue;
     }
-    Out[j++] = S[i++];
+    Demangled << S[i++];
   }
-  Out[j] = '\0';
-  return Out;
+  Demangled << '\0';
+  return Demangled.getBuffer();
 }
 
 bool llvm::isOxCamlMangledName(std::string_view MangledName) {
@@ -435,9 +418,7 @@ static size_t lengthWithoutStamp(const char *S, size_t len) {
 // Truncate Result in place at the end of its source-meaningful content, i.e.
 // drop the trailing compiler stamp. Used for the flat scheme only.
 static void stripTrailingStamp(char *Result) {
-  size_t len = 0;
-  while(Result[len] != '\0')
-    len++;
+  size_t len = std::strlen(Result);
   Result[lengthWithoutStamp(Result, len)] = '\0';
 }
 
