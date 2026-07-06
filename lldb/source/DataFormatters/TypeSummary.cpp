@@ -16,10 +16,18 @@
 #include "lldb/DataFormatters/ValueObjectPrinter.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Symbol/CompilerType.h"
+#include "lldb/Target/Language.h"
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Target/Target.h"
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/ValueObject/ValueObject.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -59,6 +67,8 @@ std::string TypeSummaryImpl::GetSummaryKindName() {
     return "c++";
   case Kind::eBytecode:
     return "bytecode";
+  case Kind::eExternal:
+    return "external";
   }
   llvm_unreachable("Unknown type kind name");
 }
@@ -240,6 +250,129 @@ std::string ScriptSummaryFormat::GetDescription() {
 }
 
 std::string ScriptSummaryFormat::GetName() { return m_script_formatter_name; }
+
+ExternalSummaryFormat::ExternalSummaryFormat(
+    const TypeSummaryImpl::Flags &flags, llvm::StringRef executable_path)
+    : TypeSummaryImpl(Kind::eExternal, flags),
+      m_executable_path(executable_path.str()) {}
+
+llvm::Expected<std::string>
+ExternalSummaryFormat::RunSummaryExecutable(llvm::StringRef executable_path,
+                                            llvm::StringRef type_name,
+                                            llvm::ArrayRef<uint8_t> input) {
+  // The input reaches the program through a temporary file redirected to its
+  // standard input; from the program's point of view this is the same as a
+  // pipe, but avoids any risk of deadlock on large inputs.
+  llvm::SmallString<128> input_path;
+  int input_fd;
+  if (std::error_code ec = llvm::sys::fs::createTemporaryFile(
+          "lldb-external-summary-in", "bin", input_fd, input_path))
+    return llvm::createStringError(
+        ec, "cannot create temporary file for external summary input");
+  llvm::FileRemover input_remover(input_path);
+  {
+    llvm::raw_fd_ostream input_stream(input_fd, /*shouldClose=*/true);
+    input_stream.write(reinterpret_cast<const char *>(input.data()),
+                       input.size());
+    input_stream.flush();
+    if (input_stream.has_error())
+      return llvm::createStringError(
+          input_stream.error(),
+          "cannot write temporary file for external summary input");
+  }
+
+  llvm::SmallString<128> output_path;
+  if (std::error_code ec = llvm::sys::fs::createTemporaryFile(
+          "lldb-external-summary-out", "txt", output_path))
+    return llvm::createStringError(
+        ec, "cannot create temporary file for external summary output");
+  llvm::FileRemover output_remover(output_path);
+
+  // An empty redirect sends the program's stderr to /dev/null so that its
+  // diagnostics cannot corrupt LLDB's terminal.
+  std::optional<llvm::StringRef> redirects[3] = {
+      input_path.str(), output_path.str(), llvm::StringRef("")};
+
+  // Guard against a wedged program: a summary is produced interactively, so
+  // a few seconds is already generous.
+  constexpr unsigned timeout_in_seconds = 10;
+
+  std::string error_msg;
+  bool execution_failed = false;
+  int exit_code = llvm::sys::ExecuteAndWait(
+      executable_path, {executable_path, type_name}, /*Env=*/std::nullopt,
+      redirects, timeout_in_seconds, /*MemoryLimit=*/0, &error_msg,
+      &execution_failed);
+  if (execution_failed)
+    return llvm::createStringError("cannot run '%s': %s",
+                                   executable_path.str().c_str(),
+                                   error_msg.c_str());
+  if (exit_code != 0)
+    return llvm::createStringError(
+        "'%s' did not recognize type '%s' (exit code %d)",
+        executable_path.str().c_str(), type_name.str().c_str(), exit_code);
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> output_buffer =
+      llvm::MemoryBuffer::getFile(output_path);
+  if (!output_buffer)
+    return llvm::createStringError(
+        output_buffer.getError(), "cannot read external summary output file");
+
+  llvm::StringRef output = (*output_buffer)->getBuffer().rtrim("\r\n");
+  return output.str();
+}
+
+bool ExternalSummaryFormat::FormatObject(ValueObject *valobj,
+                                         std::string &dest,
+                                         const TypeSummaryOptions &options) {
+  dest.clear();
+  if (!valobj || m_executable_path.empty())
+    return false;
+
+  Log *log = GetLog(LLDBLog::DataFormatters);
+
+  // Ask the value's language plugin for the serialized form to send to the
+  // program (and the type name to pass it); without a language plugin, send
+  // the value's raw bytes.
+  Language *language = Language::FindPlugin(options.GetLanguage());
+  if (!language)
+    language = Language::FindPlugin(valobj->GetObjectRuntimeLanguage());
+
+  std::vector<uint8_t> data;
+  llvm::Expected<std::string> type_name =
+      language ? language->GetExternalFormatterInput(*valobj, data)
+               : Language::GetDefaultExternalFormatterInput(*valobj, data);
+  if (!type_name) {
+    LLDB_LOG_ERROR(log, type_name.takeError(),
+                   "external summary: cannot serialize value: {0}");
+    return false;
+  }
+
+  llvm::Expected<std::string> output =
+      RunSummaryExecutable(m_executable_path, *type_name, data);
+  if (!output) {
+    LLDB_LOG_ERROR(log, output.takeError(), "external summary: {0}");
+    return false;
+  }
+
+  dest = std::move(*output);
+  return true;
+}
+
+std::string ExternalSummaryFormat::GetDescription() {
+  StreamString sstr;
+  sstr.Printf("`%s`%s%s%s%s%s%s ptr-match-depth=%u",
+              m_executable_path.c_str(), Cascades() ? "" : " (not cascading)",
+              !DoesPrintChildren(nullptr) ? "" : " (show children)",
+              !DoesPrintValue(nullptr) ? " (hide value)" : "",
+              SkipsPointers() ? " (skip pointers)" : "",
+              SkipsReferences() ? " (skip references)" : "",
+              HideNames(nullptr) ? " (hide member names)" : "",
+              GetPtrMatchDepth());
+  return std::string(sstr.GetString());
+}
+
+std::string ExternalSummaryFormat::GetName() { return m_executable_path; }
 
 BytecodeSummaryFormat::BytecodeSummaryFormat(
     const TypeSummaryImpl::Flags &flags,

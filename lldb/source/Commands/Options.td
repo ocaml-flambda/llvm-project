@@ -1292,11 +1292,22 @@ let Command = "type summary add" in {
     Desc<"Give the name of a Python function to use for this type.">;
   def type_summary_add_input_python : Option<"input-python", "P">, Group<3>,
     Desc<"Input Python code to use for this type manually.">;
-  def type_summary_add_expand : Option<"expand", "e">, Groups<[2,3]>,
+  def type_summary_add_summary_executable :
+    Option<"summary-executable", "\\x02">, Group<4>, Arg<"Filename">,
+    Desc<"Path to an executable that produces the summary. The executable is "
+    "run with the value's type name as its only argument and receives a "
+    "serialization of the value on its standard input (the value's raw bytes "
+    "by default; language plug-ins may define a richer encoding, e.g. OCaml "
+    "values are sent in Marshal format). If it recognizes the type it must "
+    "print the summary on its standard output and exit with code 0; any "
+    "other exit code makes LLDB fall back to the default display for the "
+    "value.">;
+  def type_summary_add_expand : Option<"expand", "e">, Groups<[2,3,4]>,
     Desc<"Expand aggregate data types to show children on separate lines.">;
-  def type_summary_add_hide_empty : Option<"hide-empty", "h">, Groups<[2,3]>,
+  def type_summary_add_hide_empty : Option<"hide-empty", "h">, Groups<[2,3,4]>,
     Desc<"Do not expand aggregate data types with no children.">;
-  def type_summary_add_name : Option<"name", "n">, Groups<[2,3]>, Arg<"Name">,
+  def type_summary_add_name : Option<"name", "n">, Groups<[2,3,4]>,
+    Arg<"Name">,
     Desc<"A name for this summary string.">;
 }
 

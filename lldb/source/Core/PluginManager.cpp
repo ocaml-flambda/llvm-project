@@ -2071,6 +2071,7 @@ static constexpr llvm::StringLiteral kJITLoaderPluginName("jit-loader");
 static constexpr llvm::StringLiteral
     kStructuredDataPluginName("structured-data");
 static constexpr llvm::StringLiteral kCPlusPlusLanguagePlugin("cplusplus");
+static constexpr llvm::StringLiteral kOxCamlLanguagePlugin("oxcaml");
 
 lldb::OptionValuePropertiesSP
 PluginManager::GetSettingForDynamicLoaderPlugin(Debugger &debugger,
@@ -2240,6 +2241,20 @@ bool PluginManager::CreateSettingForCPlusPlusLanguagePlugin(
     llvm::StringRef description, bool is_global_property) {
   return CreateSettingForPlugin(debugger, kCPlusPlusLanguagePlugin,
                                 "Settings for CPlusPlus language plug-ins",
+                                properties_sp, description, is_global_property);
+}
+
+lldb::OptionValuePropertiesSP
+PluginManager::GetSettingForOxCamlLanguagePlugin(Debugger &debugger,
+                                                 llvm::StringRef setting_name) {
+  return GetSettingForPlugin(debugger, setting_name, kOxCamlLanguagePlugin);
+}
+
+bool PluginManager::CreateSettingForOxCamlLanguagePlugin(
+    Debugger &debugger, const lldb::OptionValuePropertiesSP &properties_sp,
+    llvm::StringRef description, bool is_global_property) {
+  return CreateSettingForPlugin(debugger, kOxCamlLanguagePlugin,
+                                "Settings for OxCaml language plug-ins",
                                 properties_sp, description, is_global_property);
 }
 

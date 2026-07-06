@@ -17,7 +17,10 @@
 #include "lldb/Symbol/SymbolFile.h"
 #include "lldb/Symbol/TypeList.h"
 #include "lldb/Target/Target.h"
+#include "lldb/Utility/DataExtractor.h"
+#include "lldb/Utility/Status.h"
 #include "lldb/Utility/Stream.h"
+#include "lldb/ValueObject/ValueObject.h"
 
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Threading.h"
@@ -500,6 +503,20 @@ bool Language::DemangledNameContainsPath(llvm::StringRef path,
 
 DumpValueObjectOptions::DeclPrintingHelper Language::GetDeclPrintingHelper() {
   return nullptr;
+}
+
+llvm::Expected<std::string>
+Language::GetDefaultExternalFormatterInput(ValueObject &valobj,
+                                           std::vector<uint8_t> &data) {
+  DataExtractor extractor;
+  Status error;
+  valobj.GetData(extractor, error);
+  if (error.Fail())
+    return llvm::createStringError("cannot get value data: %s",
+                                   error.AsCString());
+  const uint8_t *bytes = extractor.GetDataStart();
+  data.assign(bytes, bytes + extractor.GetByteSize());
+  return std::string(valobj.GetDisplayTypeName().AsCString(""));
 }
 
 LazyBool Language::IsLogicalTrue(ValueObject &valobj, Status &error) {

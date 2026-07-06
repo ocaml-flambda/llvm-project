@@ -21,6 +21,8 @@
 #include "lldb/Core/FormatEntity.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/Utility/StructuredData.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Error.h"
 
 namespace llvm {
 class MemoryBuffer;
@@ -48,7 +50,14 @@ private:
 
 class TypeSummaryImpl {
 public:
-  enum class Kind { eSummaryString, eScript, eBytecode, eCallback, eInternal };
+  enum class Kind {
+    eSummaryString,
+    eScript,
+    eBytecode,
+    eCallback,
+    eInternal,
+    eExternal
+  };
 
   virtual ~TypeSummaryImpl() = default;
 
@@ -421,6 +430,56 @@ struct ScriptSummaryFormat : public TypeSummaryImpl {
 private:
   ScriptSummaryFormat(const ScriptSummaryFormat &) = delete;
   const ScriptSummaryFormat &operator=(const ScriptSummaryFormat &) = delete;
+};
+
+/// A summary produced by running an external program supplied by the user.
+///
+/// The program is run once per value to be summarized.  It receives the
+/// value's type name as its only command-line argument and, on its standard
+/// input, a language-defined serialization of the value (see
+/// Language::GetExternalFormatterInput; by default the value's raw bytes,
+/// for OCaml the value in Marshal format).  If the program recognizes the
+/// type it must print the summary text on its standard output and exit with
+/// code 0.  Any other exit code, or a failure to run the program at all,
+/// makes the summary fail so that display falls back to LLDB's default
+/// rendering of the value.
+class ExternalSummaryFormat : public TypeSummaryImpl {
+  std::string m_executable_path;
+
+public:
+  ExternalSummaryFormat(const TypeSummaryImpl::Flags &flags,
+                        llvm::StringRef executable_path);
+
+  ~ExternalSummaryFormat() override = default;
+
+  const char *GetExecutablePath() const { return m_executable_path.c_str(); }
+
+  bool FormatObject(ValueObject *valobj, std::string &dest,
+                    const TypeSummaryOptions &options) override;
+
+  /// Run \p executable_path with \p type_name as its only argument, sending
+  /// \p input on its standard input, and return its standard output (with
+  /// trailing newlines removed).  An error is returned if the program cannot
+  /// be run, does not finish in time, or exits with a nonzero code.
+  static llvm::Expected<std::string>
+  RunSummaryExecutable(llvm::StringRef executable_path,
+                       llvm::StringRef type_name,
+                       llvm::ArrayRef<uint8_t> input);
+
+  std::string GetDescription() override;
+
+  std::string GetName() override;
+
+  static bool classof(const TypeSummaryImpl *S) {
+    return S->GetKind() == Kind::eExternal;
+  }
+
+  typedef std::shared_ptr<ExternalSummaryFormat> SharedPointer;
+
+private:
+  ExternalSummaryFormat(const ExternalSummaryFormat &) = delete;
+  const ExternalSummaryFormat &
+  operator=(const ExternalSummaryFormat &) = delete;
 };
 
 /// A summary formatter that is defined in LLDB formmater bytecode.

@@ -372,6 +372,9 @@ bool SBTypeSummary::IsEqualTo(lldb::SBTypeSummary &rhs) {
     return GetOptions() == rhs.GetOptions();
   case TypeSummaryImpl::Kind::eInternal:
     return (m_opaque_sp.get() == rhs.m_opaque_sp.get());
+  case TypeSummaryImpl::Kind::eExternal:
+    return m_opaque_sp->GetName() == rhs.m_opaque_sp->GetName() &&
+           GetOptions() == rhs.GetOptions();
   }
 
   return false;

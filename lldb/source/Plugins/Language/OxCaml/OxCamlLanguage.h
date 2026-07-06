@@ -10,6 +10,7 @@
 #define LLDB_SOURCE_PLUGINS_LANGUAGE_OXCAML_OXCAMLLANGUAGE_H
 
 #include "lldb/Target/Language.h"
+#include "lldb/Utility/FileSpec.h"
 #include "lldb/lldb-private.h"
 
 namespace lldb_private {
@@ -28,11 +29,22 @@ public:
 
   lldb::TypeCategoryImplSP GetFormatters() override;
 
+  llvm::Expected<std::string>
+  GetExternalFormatterInput(ValueObject &valobj,
+                            std::vector<uint8_t> &data) override;
+
+  /// The plugin.oxcaml.display.external-summary-executable setting: the
+  /// external pretty-printer used before falling back to the built-in
+  /// formatter.  Empty when not configured.
+  static FileSpec GetExternalSummaryExecutable();
+
   static void Initialize();
 
   static void Terminate();
 
   static lldb_private::Language *CreateInstance(lldb::LanguageType language);
+
+  static void DebuggerInitialize(Debugger &debugger);
 
   static llvm::StringRef GetPluginNameStatic();
 

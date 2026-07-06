@@ -355,6 +355,26 @@ public:
   // it wants LLDB to honor it should return an appropriate closure here
   virtual DumpValueObjectOptions::DeclPrintingHelper GetDeclPrintingHelper();
 
+  /// Produce the input for an external summary program (see
+  /// ExternalSummaryFormat) applied to \p valobj.
+  ///
+  /// Returns the type name to pass to the program as its argument and stores
+  /// the bytes to send on the program's standard input into \p data.  The
+  /// default implementation sends the value's raw bytes together with its
+  /// display type name; language plugins can override this to send a
+  /// language-specific serialization instead (the OCaml plugin, for example,
+  /// sends the value in Marshal format).
+  virtual llvm::Expected<std::string>
+  GetExternalFormatterInput(ValueObject &valobj, std::vector<uint8_t> &data) {
+    return GetDefaultExternalFormatterInput(valobj, data);
+  }
+
+  /// The behaviour of the base implementation of GetExternalFormatterInput,
+  /// also usable when a value has no language plugin at all.
+  static llvm::Expected<std::string>
+  GetDefaultExternalFormatterInput(ValueObject &valobj,
+                                   std::vector<uint8_t> &data);
+
   virtual LazyBool IsLogicalTrue(ValueObject &valobj, Status &error);
 
   // for a ValueObject of some "reference type", if the value points to the

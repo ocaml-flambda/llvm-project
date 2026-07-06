@@ -8,10 +8,13 @@
 
 #include "OxCamlLanguage.h"
 #include "LogChannelOxCaml.h"
+#include "OxCamlExternalPrinter.h"
 #include "OxCamlFormatters.h"
 #include "lldb/Core/PluginManager.h"
+#include "lldb/Core/UserSettingsController.h"
 #include "lldb/DataFormatters/DataVisualization.h"
 #include "lldb/DataFormatters/TypeSummary.h"
+#include "lldb/Interpreter/OptionValueProperties.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/Log.h"
@@ -19,6 +22,36 @@
 
 using namespace lldb;
 using namespace lldb_private;
+
+#define LLDB_PROPERTIES_language_oxcaml
+#include "LanguageOxCamlProperties.inc"
+
+enum {
+#define LLDB_PROPERTIES_language_oxcaml
+#include "LanguageOxCamlPropertiesEnum.inc"
+};
+
+namespace {
+class PluginProperties : public Properties {
+public:
+  static llvm::StringRef GetSettingName() { return "display"; }
+
+  PluginProperties() {
+    m_collection_sp = std::make_shared<OptionValueProperties>(GetSettingName());
+    m_collection_sp->Initialize(g_language_oxcaml_properties);
+  }
+
+  FileSpec GetExternalSummaryExecutable() const {
+    return GetPropertyAtIndexAs<FileSpec>(ePropertyExternalSummaryExecutable,
+                                          {});
+  }
+};
+} // namespace
+
+static PluginProperties &GetGlobalPluginProperties() {
+  static PluginProperties g_settings;
+  return g_settings;
+}
 
 lldb::LanguageType OxCamlLanguage::GetLanguageType() const {
   return lldb::eLanguageTypeOCaml;
@@ -65,10 +98,30 @@ lldb::TypeCategoryImplSP OxCamlLanguage::GetFormatters() {
   return g_category;
 }
 
+llvm::Expected<std::string>
+OxCamlLanguage::GetExternalFormatterInput(ValueObject &valobj,
+                                          std::vector<uint8_t> &data) {
+  return formatters::oxcaml::GetOCamlExternalFormatterInput(valobj, data);
+}
+
+FileSpec OxCamlLanguage::GetExternalSummaryExecutable() {
+  return GetGlobalPluginProperties().GetExternalSummaryExecutable();
+}
+
+void OxCamlLanguage::DebuggerInitialize(Debugger &debugger) {
+  if (!PluginManager::GetSettingForOxCamlLanguagePlugin(
+          debugger, PluginProperties::GetSettingName())) {
+    PluginManager::CreateSettingForOxCamlLanguagePlugin(
+        debugger, GetGlobalPluginProperties().GetValueProperties(),
+        "Properties for the OxCaml language plug-in.",
+        /*is_global_property=*/true);
+  }
+}
+
 void OxCamlLanguage::Initialize() {
   LogChannelOxCaml::Initialize();
   PluginManager::RegisterPlugin(GetPluginNameStatic(), "OxCaml Language",
-                                CreateInstance);
+                                CreateInstance, &DebuggerInitialize);
 }
 
 void OxCamlLanguage::Terminate() {

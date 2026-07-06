@@ -692,6 +692,14 @@ public:
       Debugger &debugger, const lldb::OptionValuePropertiesSP &properties_sp,
       llvm::StringRef description, bool is_global_property);
 
+  static lldb::OptionValuePropertiesSP
+  GetSettingForOxCamlLanguagePlugin(Debugger &debugger,
+                                    llvm::StringRef setting_name);
+
+  static bool CreateSettingForOxCamlLanguagePlugin(
+      Debugger &debugger, const lldb::OptionValuePropertiesSP &properties_sp,
+      llvm::StringRef description, bool is_global_property);
+
   //
   // Plugin Info+Enable Declarations
   //

@@ -13,6 +13,7 @@
 #include "lldb/DataFormatters/DataVisualization.h"
 #include "lldb/DataFormatters/FormatClasses.h"
 #include "lldb/Host/Config.h"
+#include "lldb/Host/FileSystem.h"
 #include "lldb/Host/OptionParser.h"
 #include "lldb/Host/StreamFile.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
@@ -147,6 +148,7 @@ private:
     std::string m_python_function;
     bool m_is_add_script = false;
     std::string m_category;
+    std::string m_external_executable;
     uint32_t m_ptr_match_depth = 1;
   };
 
@@ -157,6 +159,8 @@ private:
   bool Execute_ScriptSummary(Args &command, CommandReturnObject &result);
 
   bool Execute_StringSummary(Args &command, CommandReturnObject &result);
+
+  bool Execute_ExternalSummary(Args &command, CommandReturnObject &result);
 
 public:
   CommandObjectTypeSummaryAdd(CommandInterpreter &interpreter);
@@ -1218,6 +1222,9 @@ Status CommandObjectTypeSummaryAdd::CommandOptions::SetOptionValue(
   case 'P':
     m_is_add_script = true;
     break;
+  case '\x02':
+    m_external_executable = std::string(option_arg);
+    break;
   case 'w':
     m_category = std::string(option_arg);
     break;
@@ -1246,6 +1253,7 @@ void CommandObjectTypeSummaryAdd::CommandOptions::OptionParsingStarting(
   m_format_string = "";
   m_is_add_script = false;
   m_category = "default";
+  m_external_executable = "";
 }
 
 #if LLDB_ENABLE_PYTHON
@@ -1364,6 +1372,56 @@ bool CommandObjectTypeSummaryAdd::Execute_ScriptSummary(
 }
 
 #endif
+
+bool CommandObjectTypeSummaryAdd::Execute_ExternalSummary(
+    Args &command, CommandReturnObject &result) {
+  const size_t argc = command.GetArgumentCount();
+
+  if (argc < 1 && !m_options.m_name) {
+    result.AppendErrorWithFormat("%s takes one or more args.\n",
+                                 m_cmd_name.c_str());
+    return false;
+  }
+
+  FileSpec exe_spec(m_options.m_external_executable);
+  FileSystem::Instance().Resolve(exe_spec);
+  if (!FileSystem::Instance().Exists(exe_spec))
+    result.AppendWarningWithFormat(
+        "the executable \"%s\" does not currently exist - "
+        "the summary will fail until it does.\n",
+        exe_spec.GetPath().c_str());
+
+  TypeSummaryImplSP entry = std::make_shared<ExternalSummaryFormat>(
+      m_options.m_flags, exe_spec.GetPath());
+
+  Status error;
+  for (auto &arg_entry : command.entries()) {
+    if (arg_entry.ref().empty()) {
+      result.AppendError("empty typenames not allowed");
+      return false;
+    }
+
+    AddSummary(ConstString(arg_entry.ref()), entry, m_options.m_match_type,
+               m_options.m_category, &error);
+
+    if (error.Fail()) {
+      result.AppendError(error.AsCString());
+      return false;
+    }
+  }
+
+  if (m_options.m_name) {
+    AddNamedSummary(m_options.m_name, entry, &error);
+    if (error.Fail()) {
+      result.AppendError(error.AsCString());
+      result.AppendError("added to types, but not given a name");
+      return false;
+    }
+  }
+
+  result.SetStatus(eReturnStatusSuccessFinishNoResult);
+  return result.Succeeded();
+}
 
 bool CommandObjectTypeSummaryAdd::Execute_StringSummary(
     Args &command, CommandReturnObject &result) {
@@ -1548,6 +1606,11 @@ void CommandObjectTypeSummaryAdd::DoExecute(Args &command,
 #else
     result.AppendError("python is disabled");
 #endif
+    return;
+  }
+
+  if (!m_options.m_external_executable.empty()) {
+    Execute_ExternalSummary(command, result);
     return;
   }
 

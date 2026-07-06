@@ -49,6 +49,7 @@
 #include "OxCamlFormatters.h"
 #include "LogChannelOxCaml.h"
 #include "OxCamlAssert.h"
+#include "OxCamlExternalPrinter.h"
 #include "OxCamlFormatHelpers.h"
 #include "OxCamlHelpers.h"
 #include "OxCamlValueFormatters.h"
@@ -180,6 +181,12 @@ bool lldb_private::formatters::oxcaml::OxCamlValue_SummaryProvider(
          "OxCamlValue_SummaryProvider called without process context "
          "(ptr={0:P})",
          process_sp.get());
+
+  // A user-configured external pretty-printer takes precedence; on any
+  // failure (unmarshallable value, unrecognized type, printer error) the
+  // built-in formatting below is used instead.
+  if (TryExternalPrettyPrinter(valobj, stream))
+    return true;
 
   // The variable may have been optimized away into an implicit pointer
   // (DW_OP_implicit_pointer): it then has no bytes of its own, and the
