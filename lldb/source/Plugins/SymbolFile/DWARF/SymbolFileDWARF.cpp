@@ -1376,20 +1376,15 @@ size_t SymbolFileDWARF::ParseBlocksRecursive(CompileUnit &comp_unit,
                   call_file.value_or(0)),
               call_line.value_or(0), call_column.value_or(0));
 
-        // For OCaml, the default char-pointer overload would feed
-        // mangled_name through Mangled::SetValue, which doesn't recognise
-        // OCaml mangling and would route the linkage name into m_demangled.
-        // Backtraces (e.g. "[inlined] camlHello__concat_1_4_code") would then
-        // show the mangled symbol instead of the source name. Build the
-        // Mangled explicitly so both slots are populated correctly.
-        // TODO(oxcaml): drop this carve-out once lldb has an OCaml demangler
-        // registered with Mangled::GetManglingScheme(); the default branch
-        // will then suffice.
+        // For OCaml, prefer DW_AT_name (the source-level name) when present and
+        // otherwise demangle the DW_AT_linkage_name (which for the structured
+        // scheme reconstructs the source name). Build the Mangled explicitly
+        // so both slots are populated correctly.
         if (GetLanguage(*die.GetCU()) == eLanguageTypeOCaml) {
           Mangled inlined_mangled;
-          if (name && name[0] != '\0')
+          if (name && strlen(name) > 0)
             inlined_mangled.SetDemangledName(ConstString(name));
-          if (mangled_name && mangled_name[0] != '\0')
+          if (mangled_name && strlen(mangled_name) > 0)
             inlined_mangled.SetMangledName(ConstString(mangled_name));
           block->SetInlinedFunctionInfo(ConstString(name), inlined_mangled,
                                         decl_up.get(), call_up.get());

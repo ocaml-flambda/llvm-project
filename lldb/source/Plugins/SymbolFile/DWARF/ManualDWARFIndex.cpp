@@ -21,9 +21,11 @@
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Stream.h"
 #include "lldb/Utility/Timer.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/ThreadPool.h"
 #include <atomic>
+#include <cstdlib>
 #include <optional>
 
 using namespace lldb_private;
@@ -299,6 +301,31 @@ void ManualDWARFIndex::IndexUnitImpl(DWARFUnit &unit,
     case DW_TAG_inlined_subroutine:
     case DW_TAG_subprogram:
       if (has_address) {
+        if (cu_language == eLanguageTypeOCaml) {
+          // For OCaml, index the source-level name so name-based lookups (which
+          // default to eFunctionNameTypeFull) resolve `break Module.function`.
+          // The flat scheme provides the source name in DW_AT_name; the
+          // structured scheme provides only DW_AT_linkage_name, which we
+          // demangle here. Keep this in sync with
+          // DWARFASTParserOxCaml::ConstructDemangledNameFromDWARF.
+          ConstString source_name;
+          if (name && name[0] != '\0') {
+            source_name = ConstString(name);
+          } else if (mangled_cstr && mangled_cstr[0] != '\0') {
+            if (char *demangled = llvm::oxcamlDemangle(mangled_cstr)) {
+              source_name = ConstString(demangled);
+              std::free(demangled);
+            }
+          }
+          if (source_name) {
+            set.function_basenames.Insert(source_name, ref);
+            set.function_fullnames.Insert(source_name, ref);
+          }
+          // Also index the mangled symbol so raw-symbol lookups still work.
+          if (mangled_cstr && mangled_cstr[0] != '\0')
+            set.function_fullnames.Insert(ConstString(mangled_cstr), ref);
+          break;
+        }
         if (name) {
           bool is_objc_method = false;
           if (cu_language == eLanguageTypeObjC ||
@@ -335,17 +362,7 @@ void ManualDWARFIndex::IndexUnitImpl(DWARFUnit &unit,
           else
             set.function_basenames.Insert(ConstString(name), ref);
 
-          // For OCaml, DW_AT_name is the user-facing source name (e.g.
-          // "Module.function") and DW_AT_linkage_name is the mangled assembly
-          // symbol. lldb has no OCaml demangler, so the standard
-          // function_fullnames entry built from DW_AT_linkage_name below is
-          // not what users will type when setting a breakpoint. Index the
-          // source name as a full name too so that name-based lookups (which
-          // default to eFunctionNameTypeFull) hit it.
-          // TODO(oxcaml): remove the OCaml carve-out once lldb can demangle
-          // OCaml linkage names; the default branch will then suffice.
-          if (!is_method && !is_objc_method &&
-              (!mangled_cstr || cu_language == eLanguageTypeOCaml))
+          if (!is_method && !mangled_cstr && !is_objc_method)
             set.function_fullnames.Insert(ConstString(name), ref);
         }
         if (mangled_cstr) {

@@ -43,6 +43,7 @@ public:
     eManglingSchemeNone = 0,
     eManglingSchemeMSVC,
     eManglingSchemeItanium,
+    eManglingSchemeOxCaml,
     eManglingSchemeRustV0,
     eManglingSchemeD,
     eManglingSchemeSwift,
