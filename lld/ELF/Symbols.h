@@ -566,8 +566,15 @@ union SymbolUnion {
   alignas(LazySymbol) char e[sizeof(LazySymbol)];
 };
 
+// All SymbolUnion objects are allocated from a single contiguous arena so that
+// any Symbol* can be encoded as a 32-bit index (see SymRef in Relocations.h).
+// `symArena` is the base; slot 0 is the nullptr sentinel, so real symbols have
+// index >= 1. See Symbols.cpp for the allocator.
+extern char *symArena;
+SymbolUnion *allocSymbolUnions(size_t n);
+
 template <typename... T> Defined *makeDefined(T &&...args) {
-  auto *sym = getSpecificAllocSingleton<SymbolUnion>().Allocate();
+  auto *sym = allocSymbolUnions(1);
   memset(sym, 0, sizeof(Symbol));
   auto &s = *new (reinterpret_cast<Defined *>(sym)) Defined(std::forward<T>(args)...);
   return &s;

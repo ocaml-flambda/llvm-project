@@ -85,7 +85,7 @@ Symbol *SymbolTable::insert(StringRef name) {
     return sym;
   }
 
-  Symbol *sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
+  Symbol *sym = reinterpret_cast<Symbol *>(allocSymbolUnions(1)); // arena
   symVector.push_back(sym);
 
   // *sym was not initialized by a constructor. Initialize all Symbol fields.
