@@ -120,14 +120,61 @@ enum RelExpr {
   R_LOONGARCH_TLSDESC_PAGE_PC,
 };
 
-// Architecture-neutral representation of relocation.
-struct Relocation {
-  RelExpr expr;
-  RelType type;
-  uint64_t offset;
-  int64_t addend;
-  Symbol *sym;
+// Encode a Symbol* as a 32-bit index into the contiguous SymbolUnion arena
+// (see Symbols.{h,cpp}). Every Symbol lives in that arena, so the pointer is
+// symArena + index*64; index 0 is the nullptr sentinel. SymRef converts
+// implicitly to/from Symbol*, so relocation `sym` use sites are unchanged.
+class Symbol;
+extern char *symArena;
+struct SymRef {
+  uint32_t idx = 0;
+  SymRef() = default;
+  SymRef(Symbol *s) { *this = s; }
+  SymRef &operator=(Symbol *s) {
+    idx = s ? uint32_t((reinterpret_cast<char *>(s) - symArena) / 64) : 0;
+    return *this;
+  }
+  operator Symbol *() const {
+    return idx ? reinterpret_cast<Symbol *>(symArena + size_t(idx) * 64)
+               : nullptr;
+  }
+  Symbol *operator->() const {
+    return reinterpret_cast<Symbol *>(symArena + size_t(idx) * 64);
+  }
+  Symbol &operator*() const {
+    return *reinterpret_cast<Symbol *>(symArena + size_t(idx) * 64);
+  }
 };
+
+// Architecture-neutral representation of relocation, packed to 16 bytes by
+// additionally narrowing `offset` to uint32 and `addend` to int32 on top of the
+// 32-bit `sym` index. This caps section-relative offsets at 4 GiB and addends at
+// signed 32-bit, so it is a fork-local layout rather than upstreamable. The
+// 16-byte size is pinned by the static_assert below. `expr` needs 7 bits and
+// `type` fits in 24 bits for every supported target. The constructor moves the
+// offset/addend narrowing into the mem-init list to avoid braced-init narrowing
+// errors, keeping the historical (expr, type, offset, addend, sym) parameter
+// order so positional initializers are unchanged. Inputs whose offset or addend
+// does not fit the narrowed fields are rejected with a fatal error rather than
+// silently truncated.
+[[noreturn]] void reportRelocationValueOverflow(uint64_t offset, int64_t addend);
+struct Relocation {
+  RelExpr expr : 8;
+  RelType type : 24;
+  uint32_t offset;
+  int32_t addend;
+  SymRef sym;
+
+  Relocation() = default;
+  Relocation(RelExpr expr, RelType type, uint64_t offset, int64_t addend,
+             Symbol *sym)
+      : expr(expr), type(type), offset(offset), addend((int32_t)addend),
+        sym(sym) {
+    if (offset != this->offset || addend != this->addend)
+      reportRelocationValueOverflow(offset, addend);
+  }
+};
+static_assert(sizeof(Relocation) == 16, "Relocation should pack to 16 bytes");
 
 // Manipulate jump instructions with these modifiers.  These are used to relax
 // jump instruction opcodes at basic block boundaries and are particularly
@@ -332,5 +379,18 @@ sortRels(Relocs<llvm::object::Elf_Crel_Impl<is64>> rels,
 // GOT differently than the regular variables.
 bool needsGot(RelExpr expr);
 } // namespace lld::elf
+
+// Let LLVM's cast<>/dyn_cast<>/isa<> see SymRef as a Symbol*, so existing
+// `dyn_cast<Defined>(rel.sym)` sites compile unchanged.
+namespace llvm {
+template <> struct simplify_type<lld::elf::SymRef> {
+  using SimpleType = lld::elf::Symbol *;
+  static SimpleType getSimplifiedValue(lld::elf::SymRef &s) { return s; }
+};
+template <> struct simplify_type<const lld::elf::SymRef> {
+  using SimpleType = lld::elf::Symbol *;
+  static SimpleType getSimplifiedValue(const lld::elf::SymRef &s) { return s; }
+};
+} // namespace llvm
 
 #endif

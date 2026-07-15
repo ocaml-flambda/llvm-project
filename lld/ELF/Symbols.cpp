@@ -17,7 +17,10 @@
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/Compiler.h"
+#include <atomic>
 #include <cstring>
+#include <mutex>
+#include <sys/mman.h>
 
 using namespace llvm;
 using namespace llvm::object;
@@ -26,6 +29,34 @@ using namespace lld;
 using namespace lld::elf;
 
 static_assert(sizeof(SymbolUnion) <= 64, "SymbolUnion too large");
+// SymRef (Relocations.h) encodes Symbol* as index*64, so the arena stride must
+// be exactly 64 for the shift-based conversion to be valid.
+static_assert(sizeof(SymbolUnion) == 64, "SymRef assumes 64-byte stride");
+static_assert(alignof(SymbolUnion) <= 64, "SymbolUnion overaligned");
+
+// Contiguous SymbolUnion arena. Reserve a large virtual region (only touched
+// pages commit) and hand out 64-byte slots with an atomic bump. Slot 0 is
+// reserved as the nullptr sentinel, so the first real symbol has index 1.
+char *elf::symArena = nullptr;
+namespace {
+constexpr size_t symArenaCapacity = size_t(1) << 29; // 512M symbols (32 GiB VA)
+std::atomic<size_t> symArenaNext{1};                 // index 0 == nullptr
+std::once_flag symArenaOnce;
+} // namespace
+SymbolUnion *elf::allocSymbolUnions(size_t n) {
+  std::call_once(symArenaOnce, [] {
+    void *p = mmap(nullptr, symArenaCapacity * sizeof(SymbolUnion),
+                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                   -1, 0);
+    if (p == MAP_FAILED)
+      fatal("failed to reserve symbol arena");
+    symArena = reinterpret_cast<char *>(p);
+  });
+  size_t idx = symArenaNext.fetch_add(n, std::memory_order_relaxed);
+  if (idx + n > symArenaCapacity)
+    fatal("symbol arena exhausted");
+  return reinterpret_cast<SymbolUnion *>(symArena) + idx;
+}
 
 template <typename T> struct AssertSymbol {
   static_assert(std::is_trivially_destructible<T>(),

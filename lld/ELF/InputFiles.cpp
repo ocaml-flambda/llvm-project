@@ -1191,7 +1191,7 @@ void ObjFile<ELFT>::initSectionsAndLocalSyms(bool ignoreComdats) {
 
   if (!firstGlobal)
     return;
-  SymbolUnion *locals = makeThreadLocalN<SymbolUnion>(firstGlobal);
+  SymbolUnion *locals = allocSymbolUnions(firstGlobal); // arena
   memset(locals, 0, sizeof(SymbolUnion) * firstGlobal);
 
   ArrayRef<Elf_Sym> eSyms = this->getELFSyms<ELFT>();

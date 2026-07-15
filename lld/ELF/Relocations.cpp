@@ -129,6 +129,12 @@ void elf::reportRangeError(uint8_t *loc, const Relocation &rel, const Twine &v,
               ", " + Twine(max).str() + "]" + hint);
 }
 
+void elf::reportRelocationValueOverflow(uint64_t offset, int64_t addend) {
+  fatal("relocation offset (" + Twine(offset) + ") or addend (" + Twine(addend) +
+        ") does not fit the 16-byte packed relocation record; rebuild the linker "
+        "without 16-byte relocation packing");
+}
+
 void elf::reportRangeError(uint8_t *loc, int64_t v, int n, const Symbol &sym,
                            const Twine &msg) {
   ErrorPlace errPlace = getErrorPlace(loc);
