@@ -146,29 +146,35 @@ struct SymRef {
   }
 };
 
-// Architecture-neutral representation of relocation, packed to 24 bytes (from
-// 32) with no new input limits. `expr` needs 7 bits and `type` fits in 24 bits
-// for every supported target. `sym` is a 32-bit arena index (SymRef); ELF's
-// r_info already stores symbol references as uint32, so this imposes no limit
-// beyond the ELF format. `offset` and `addend` keep their full 64-bit width, so
-// huge-section inputs (e.g. monolithic LTO) are unaffected. `sym` sits next to
-// the expr/type word so the two 8-byte fields stay naturally aligned with no
-// padding (4+4 + 8 + 8 = 24). The constructor keeps the historical
-// (expr, type, offset, addend, sym) parameter order so positional initializers
-// are unchanged.
+// Architecture-neutral representation of relocation, packed to 16 bytes by
+// additionally narrowing `offset` to uint32 and `addend` to int32 on top of the
+// 32-bit `sym` index. This caps section-relative offsets at 4 GiB and addends at
+// signed 32-bit, so it is a fork-local layout rather than upstreamable. The
+// 16-byte size is pinned by the static_assert below. `expr` needs 7 bits and
+// `type` fits in 24 bits for every supported target. The constructor moves the
+// offset/addend narrowing into the mem-init list to avoid braced-init narrowing
+// errors, keeping the historical (expr, type, offset, addend, sym) parameter
+// order so positional initializers are unchanged. Inputs whose offset or addend
+// does not fit the narrowed fields are rejected with a fatal error rather than
+// silently truncated.
+[[noreturn]] void reportRelocationValueOverflow(uint64_t offset, int64_t addend);
 struct Relocation {
   RelExpr expr : 8;
   RelType type : 24;
+  uint32_t offset;
+  int32_t addend;
   SymRef sym;
-  uint64_t offset;
-  int64_t addend;
 
   Relocation() = default;
   Relocation(RelExpr expr, RelType type, uint64_t offset, int64_t addend,
              Symbol *sym)
-      : expr(expr), type(type), sym(sym), offset(offset), addend(addend) {}
+      : expr(expr), type(type), offset(offset), addend((int32_t)addend),
+        sym(sym) {
+    if (offset != this->offset || addend != this->addend)
+      reportRelocationValueOverflow(offset, addend);
+  }
 };
-static_assert(sizeof(Relocation) == 24, "Relocation should pack to 24 bytes");
+static_assert(sizeof(Relocation) == 16, "Relocation should pack to 16 bytes");
 
 // Manipulate jump instructions with these modifiers.  These are used to relax
 // jump instruction opcodes at basic block boundaries and are particularly
