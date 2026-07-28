@@ -18,9 +18,11 @@
 #include "llvm/CodeGen/GCMetadataPrinter.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/IR/BuiltinGCs.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Mangler.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCContext.h"
@@ -164,10 +166,28 @@ static uint8_t encodeAllocSize(uint64_t AllocSize) {
 static const int AllocMask = 2;
 static const int FrameSizeReservedMask = 3; // Debug + Alloc
 
+// The OxCaml compiler sets this module flag (to a nonzero value) when its
+// runtime expects the "short" frametable format: every descriptor is preceded
+// by a return-address delta byte, and descriptors are packed back-to-back with
+// no alignment padding. A zero delta byte (FRAME_DELTA_ESCAPE) means the
+// descriptor "escapes" to the classic layout, which is what this printer
+// emits; the classic layout is byte-identical to the pre-short format. See
+// runtime/caml/frame_descriptors.h in the oxcaml repository. Without the
+// flag, the pre-short format is emitted: bare descriptors, each padded to
+// pointer alignment.
+static bool moduleUsesShortFrametables(const Module &M) {
+  Metadata *MD = M.getModuleFlag("oxcaml_short_frametables");
+  if (auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(MD))
+    if (auto *CI = dyn_cast<ConstantInt>(CAM->getValue()))
+      return !CI->isZero();
+  return false;
+}
+
 bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) {
   MCStreamer &OS = *AP.OutStreamer;
   unsigned PtrSize = M.getDataLayout().getPointerSize(); // Can only be 8 for now
-  
+  bool ShortFrametables = moduleUsesShortFrametables(M);
+
   OS.switchSection(AP.getObjFileLowering().getDataSection());
   
   emitCamlGlobal(M, OS, "frametable");
@@ -185,6 +205,12 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
     //   uint16_t num_live;
     //   uint16_t live_ofs[num_live];
     // } frame_descr;
+
+    // In the short format, every descriptor is preceded by a delta byte;
+    // FRAME_DELTA_ESCAPE (0) means the descriptor below follows the classic
+    // layout, carrying its own return address.
+    if (ShortFrametables)
+      OS.emitInt8(0);
 
     // retaddr_rel
     MCSymbol *Here = OS.getContext().createTempSymbol();
@@ -328,7 +354,10 @@ bool OxCamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter
       }
     }
 
-    OS.emitValueToAlignment(Align(PtrSize));
+    // The short-format runtime walks descriptors back-to-back at byte
+    // granularity, so they must not be padded.
+    if (!ShortFrametables)
+      OS.emitValueToAlignment(Align(PtrSize));
   }
 
   OS.addBlankLine();
