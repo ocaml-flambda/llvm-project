@@ -4249,7 +4249,8 @@ public:
       IsInReg = Call.hasRetAttr(Attribute::InReg);
       DoesNotReturn =
           Call.doesNotReturn() ||
-          (!isa<InvokeInst>(Call) && isa<UnreachableInst>(Call.getNextNode()));
+          (!isa<InvokeInst>(Call) && !isa<CallBrInst>(Call) &&
+            isa<UnreachableInst>(Call.getNextNode()));
       IsVarArg = FTy->isVarArg();
       IsReturnValueUsed = !Call.use_empty();
       RetSExt = Call.hasRetAttr(Attribute::SExt);
