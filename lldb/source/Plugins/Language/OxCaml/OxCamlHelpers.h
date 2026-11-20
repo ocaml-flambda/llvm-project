@@ -46,11 +46,38 @@ constexpr uint64_t HEADER_TAG_MASK = 0xFF;
 /// Bit shift for extracting wosize from header
 constexpr uint64_t HEADER_WOSIZE_SHIFT = 10;
 
-/// Bit shift for extracting reserved field from header
-constexpr uint64_t HEADER_RESERVED_SHIFT = 56;
-
 /// Number of bits used for wosize field
-constexpr uint64_t HEADER_WOSIZE_BITS = 46;
+constexpr uint64_t HEADER_WOSIZE_BITS = 32;
+
+/// Bit shift for extracting reserved field from header. The reserved field
+/// is everything above the wosize: a scan mask, a repeat count and a format.
+constexpr uint64_t HEADER_RESERVED_SHIFT = 42;
+
+/// Scan mask within the header: bit i is set if word i of the block is not
+/// an OCaml value. Bits for words beyond the end of the block are set.
+constexpr uint64_t HEADER_SCAN_MASK_SHIFT = 42;
+constexpr uint64_t HEADER_SCAN_MASK_BITS = 16;
+
+/// Header format (the top two bits), saying where a block's scan mask is.
+constexpr uint64_t HEADER_FORMAT_SHIFT = 62;
+/// No scan mask: the tag alone says whether the block holds OCaml values.
+constexpr uint8_t HEADER_FORMAT_LEGACY = 0;
+/// The scan mask is in the header.
+constexpr uint8_t HEADER_FORMAT_INLINE = 1;
+/// The block's first word is a layout word, with more scan mask bits (for
+/// the words after those covered by the header's). The fields follow it.
+constexpr uint8_t HEADER_FORMAT_EXTENDED = 2;
+/// The block's first word is a layout word, pointing to a layout block: an
+/// array of scan words with the whole scan mask. The fields follow it.
+constexpr uint8_t HEADER_FORMAT_EXTERNAL = 3;
+
+/// Number of scan mask bits in a layout word or scan word (the low bits; the
+/// rest is a repeat count).
+constexpr uint64_t LAYOUT_WORD_MASK_BITS = 58;
+
+/// Before the header formats above, the top byte of the header of a mixed
+/// block was the number of leading OCaml values, plus one.
+constexpr uint64_t HEADER_OLD_RESERVED_SHIFT = 56;
 
 /// Bit mask for extracting wosize from header
 /// Computed as: ((1 << HEADER_WOSIZE_BITS) - 1) << HEADER_WOSIZE_SHIFT
@@ -221,7 +248,7 @@ inline uint8_t ExtractTag(uint64_t header) {
   return header & constants::HEADER_TAG_MASK;
 }
 
-/// Extract wosize field from block header (bits 10-55)
+/// Extract wosize field from block header (bits 10-41)
 /// \param header The 64-bit block header value
 /// \return The wosize (size in words) of the block
 inline uint64_t ExtractWosize(uint64_t header) {
@@ -229,36 +256,36 @@ inline uint64_t ExtractWosize(uint64_t header) {
          constants::HEADER_WOSIZE_SHIFT;
 }
 
-/// Extract reserved field from block header (bits 56-63)
-/// For mixed blocks, this encodes scannable_wosize as (reserved - 1)
+/// Extract reserved field from block header (bits 42-63)
+/// It is zero for a block without a scan mask; see the HEADER_FORMAT
+/// constants for the rest.
 /// \param header The 64-bit block header value
-/// \return The 8-bit reserved field value
-inline uint8_t ExtractReserved(uint64_t header) {
+/// \return The 22-bit reserved field value
+inline uint32_t ExtractReserved(uint64_t header) {
   return header >> constants::HEADER_RESERVED_SHIFT;
 }
 
-/// Calculate scannable wosize for mixed blocks
-/// Mixed blocks have unboxed fields that should not be scanned by GC.
-/// The reserved field encodes: reserved = scannable_wosize + 1
-/// \param reserved The reserved field from the header
-/// \param total_wosize The total wosize from the header
-/// \return The number of words that contain scannable OCaml values
-inline uint64_t ExtractScannableWosize(uint8_t reserved,
-                                       uint64_t total_wosize) {
-  if (reserved > 0) {
-    return reserved - 1; // Mixed block: reserved encodes scannable_wosize + 1
-  }
-  return total_wosize; // Regular block: all words are scannable
+/// Extract the format from block header (bits 62-63)
+/// \param header The 64-bit block header value
+/// \return One of the HEADER_FORMAT constants
+inline uint8_t ExtractFormat(uint64_t header) {
+  return header >> constants::HEADER_FORMAT_SHIFT;
 }
 
-/// Calculate non-scannable wosize for mixed blocks
-/// \param reserved The reserved field from the header
-/// \param total_wosize The total wosize from the header
-/// \return The number of words that contain unboxed data (not OCaml values)
-inline uint64_t ExtractNonScannableWosize(uint8_t reserved,
-                                          uint64_t total_wosize) {
-  uint64_t scannable = ExtractScannableWosize(reserved, total_wosize);
-  return total_wosize - scannable;
+/// Extract the scan mask from block header (bits 42-57)
+/// \param header The 64-bit block header value
+/// \return The 16-bit scan mask
+inline uint64_t ExtractScanMask(uint64_t header) {
+  return (header >> constants::HEADER_SCAN_MASK_SHIFT) &
+         ((1ULL << constants::HEADER_SCAN_MASK_BITS) - 1ULL);
+}
+
+/// Extract the scan mask from a layout word, or from a scan word of a
+/// layout block
+/// \param word The layout word or scan word
+/// \return The 58-bit scan mask
+inline uint64_t ExtractLayoutWordScanMask(uint64_t word) {
+  return word & ((1ULL << constants::LAYOUT_WORD_MASK_BITS) - 1ULL);
 }
 
 /// Parse complete header information in one call
@@ -266,30 +293,13 @@ inline uint64_t ExtractNonScannableWosize(uint8_t reserved,
 /// all fields are extracted consistently using the same bit operations.
 /// \param header The 64-bit block header value
 /// \param[out] tag The block tag (bits 0-7)
-/// \param[out] wosize The total size in words (bits 10-55)
-/// \param[out] reserved The reserved field (bits 56-63)
+/// \param[out] wosize The total size in words (bits 10-41)
+/// \param[out] reserved The reserved field (bits 42-63)
 inline void ParseHeader(uint64_t header, uint8_t &tag, uint64_t &wosize,
-                        uint8_t &reserved) {
+                        uint32_t &reserved) {
   tag = ExtractTag(header);
   wosize = ExtractWosize(header);
   reserved = ExtractReserved(header);
-}
-
-/// Parse complete header with scannable/non-scannable wosize calculation
-/// \param header The 64-bit block header value
-/// \param[out] tag The block tag (bits 0-7)
-/// \param[out] wosize The total size in words (bits 10-55)
-/// \param[out] scannable_wosize Number of words containing OCaml values
-/// \param[out] non_scannable_wosize Number of words containing unboxed data
-inline void ParseHeaderWithMixedBlocks(uint64_t header, uint8_t &tag,
-                                       uint64_t &wosize,
-                                       uint64_t &scannable_wosize,
-                                       uint64_t &non_scannable_wosize) {
-  tag = ExtractTag(header);
-  wosize = ExtractWosize(header);
-  uint8_t reserved = ExtractReserved(header);
-  scannable_wosize = ExtractScannableWosize(reserved, wosize);
-  non_scannable_wosize = ExtractNonScannableWosize(reserved, wosize);
 }
 
 /// Get the address of the last word in an OCaml block

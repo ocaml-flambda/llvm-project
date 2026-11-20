@@ -31,6 +31,7 @@
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/Utility/StreamString.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include <cassert>
@@ -55,6 +56,21 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
                                 DataExtractor &data, lldb::ProcessSP process_sp,
                                 const ExecutionContextRef &exe_ctx_ref,
                                 uint32_t depth);
+/// Where the fields of a generic block are, and how many of them are OCaml
+/// values. A mixed block has its OCaml values first, then its unboxed data.
+struct BlockFields {
+  /// Address of the first field: the block itself, or the word after its
+  /// layout word.
+  uint64_t first_field_address;
+  /// Number of leading fields which are OCaml values.
+  uint64_t scannable_wosize;
+  /// Number of words of unboxed data after them.
+  uint64_t non_scannable_wosize;
+};
+
+static BlockFields FindBlockFields(uint64_t header, uint64_t value,
+                                   uint64_t wosize, lldb::ProcessSP process_sp);
+
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value,
                                      uint8_t tag, uint64_t scannable_wosize,
                                      uint64_t non_scannable_wosize,
@@ -215,7 +231,7 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
   uint64_t header = *header_opt;
   uint8_t tag;
   uint64_t wosize;
-  uint8_t reserved;
+  uint32_t reserved;
   helpers::header::ParseHeader(header, tag, wosize, reserved);
 
   // Dispatch based on tag; none of the special tags support mixed blocks
@@ -251,17 +267,95 @@ static bool FormatOxCamlPointer(Stream &stream, uint64_t value,
     return FormatOxCamlCustom(stream, value, wosize, data, process_sp,
                               exe_ctx_ref, depth);
   default: {
-    // Generic block (tag < 246): for mixed blocks, calculate scannable and
-    // non-scannable sizes
-    uint64_t scannable_wosize =
-        helpers::header::ExtractScannableWosize(reserved, wosize);
-    uint64_t non_scannable_wosize =
-        helpers::header::ExtractNonScannableWosize(reserved, wosize);
-    return FormatOxCamlGenericBlock(stream, value, tag, scannable_wosize,
-                                    non_scannable_wosize, data, process_sp,
-                                    exe_ctx_ref, depth);
+    // Generic block (tag < 246): for mixed blocks, find the fields and
+    // calculate scannable and non-scannable sizes
+    BlockFields fields = FindBlockFields(header, value, wosize, process_sp);
+    return FormatOxCamlGenericBlock(
+        stream, fields.first_field_address, tag, fields.scannable_wosize,
+        fields.non_scannable_wosize, data, process_sp, exe_ctx_ref, depth);
   }
   }
+}
+
+static BlockFields FindBlockFields(uint64_t header, uint64_t value,
+                                   uint64_t wosize,
+                                   lldb::ProcessSP process_sp) {
+  namespace constants = helpers::constants;
+  namespace hd = helpers::header;
+
+  uint8_t format = hd::ExtractFormat(header);
+
+  if (format == constants::HEADER_FORMAT_LEGACY) {
+    // No scan mask. Older compilers put the number of leading OCaml values,
+    // plus one, in the top byte of a mixed block's header; in this format
+    // those bits are otherwise zero. (That encoding with 63 or more leading
+    // values is indistinguishable from the other formats.)
+    uint64_t old_reserved = header >> constants::HEADER_OLD_RESERVED_SHIFT;
+    uint64_t scannable = wosize;
+    if (old_reserved > 0 && old_reserved - 1 < wosize)
+      scannable = old_reserved - 1;
+    return {value, scannable, wosize - scannable};
+  }
+
+  // The scan mask says, for each field, whether it is an OCaml value. Find
+  // the first field which isn't: the fields before it are the OCaml values.
+  bool has_layout_word = format != constants::HEADER_FORMAT_INLINE;
+  uint64_t fields = has_layout_word && wosize > 0 ? wosize - 1 : wosize;
+  uint64_t first_field_address =
+      has_layout_word ? value + constants::WORD_SIZE : value;
+  uint64_t scannable = fields;
+
+  auto read_word = [&](uint64_t address, uint64_t &word) {
+    Status error;
+    word = process_sp->ReadUnsignedIntegerFromMemory(
+        address, constants::WORD_SIZE, 0, error);
+    return error.Success();
+  };
+
+  uint64_t mask = hd::ExtractScanMask(header);
+  if (mask != 0) {
+    // In the header (or, in the external format, never: its mask is zero).
+    scannable = llvm::countr_zero(mask);
+  } else if (format == constants::HEADER_FORMAT_EXTENDED) {
+    // In the layout word, whose mask starts where the header's stops.
+    uint64_t layout_word;
+    if (!read_word(value, layout_word)) {
+      scannable = 0;
+    } else if (uint64_t more = hd::ExtractLayoutWordScanMask(layout_word)) {
+      scannable = constants::HEADER_SCAN_MASK_BITS + llvm::countr_zero(more);
+    }
+  } else if (format == constants::HEADER_FORMAT_EXTERNAL) {
+    // In the layout block, an array of scan words.
+    uint64_t layout_block;
+    uint64_t scan_words = 0;
+    if (!read_word(value, layout_block)) {
+      scannable = 0;
+    } else if (auto layout_header =
+                   helpers::ReadBlockHeader(layout_block, process_sp)) {
+      scan_words = hd::ExtractWosize(*layout_header);
+    } else {
+      scannable = 0;
+    }
+    for (uint64_t i = 0; i < scan_words; i++) {
+      uint64_t scan_word;
+      if (!read_word(layout_block + i * constants::WORD_SIZE, scan_word)) {
+        scannable = 0;
+        break;
+      }
+      if (uint64_t more = hd::ExtractLayoutWordScanMask(scan_word)) {
+        scannable =
+            i * constants::LAYOUT_WORD_MASK_BITS + llvm::countr_zero(more);
+        break;
+      }
+      // Don't read more scan words than the block has fields for.
+      if ((i + 1) * constants::LAYOUT_WORD_MASK_BITS >= fields)
+        break;
+    }
+  }
+
+  if (scannable > fields)
+    scannable = fields;
+  return {first_field_address, scannable, fields - scannable};
 }
 
 static bool FormatOxCamlGenericBlock(Stream &stream, uint64_t value,
