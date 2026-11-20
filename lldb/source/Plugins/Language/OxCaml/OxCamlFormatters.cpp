@@ -624,7 +624,7 @@ static bool FormatArray(Stream &stream, OxCamlArrayType *array_type,
   uint64_t header = *header_opt;
   uint8_t tag;
   uint64_t wosize;
-  uint8_t reserved;
+  uint32_t reserved;
   helpers::header::ParseHeader(header, tag, wosize, reserved);
 
   // OCaml float arrays (tag 254) store unboxed 8-byte IEEE 754 doubles
